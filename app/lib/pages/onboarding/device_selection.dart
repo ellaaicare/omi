@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'package:video_player/video_player.dart';
+import 'package:omi/ella/services/admitted_video_player.dart';
 
 import 'package:omi/pages/onboarding/wrapper.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -44,6 +44,7 @@ class _DeviceSelectionPageState extends State<DeviceSelectionPage> with SingleTi
     _videoController = VideoPlayerController.asset('assets/images/onboarding.mp4');
     try {
       await _videoController.initialize();
+      if (!mounted) return;
       setState(() {
         _isVideoInitialized = true;
       });

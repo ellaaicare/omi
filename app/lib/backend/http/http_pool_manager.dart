@@ -58,6 +58,13 @@ class HttpPoolManager {
     _pool = Pool(10, timeout: const Duration(seconds: 60));
   }
 
+  /// Creates an isolated pool with a fake transport for regression tests.
+  @visibleForTesting
+  HttpPoolManager.forTesting(http.Client client) {
+    _client = client;
+    _pool = Pool(10, timeout: const Duration(seconds: 60));
+  }
+
   Future<http.Response> send(
     http.Request Function() requestBuilder, {
     Duration timeout = const Duration(seconds: 30),
@@ -88,8 +95,13 @@ class HttpPoolManager {
     }).timeout(admissionTimeout);
 
     if (isGet && exactAuthority == null) {
-      _pendingGets[url] = future;
-      future.whenComplete(() => _pendingGets.remove(url));
+      // Return the cleanup future too: an ignored whenComplete branch would
+      // report a second unhandled error when the request fails.
+      final tracked = future.whenComplete(() {
+        _pendingGets.remove(url);
+      });
+      _pendingGets[url] = tracked;
+      return tracked;
     }
 
     return future;

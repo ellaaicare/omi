@@ -105,6 +105,19 @@ class EllaCaptureAuthority {
         mayEmitAudio(boundUid: _boundUid, lease: lease, expectedGeneration: _expectedGeneration);
   }
 
+  /// Revalidates an exact reservation without admitting/counting a frame.
+  /// A stale reservation cannot revoke a newer same-account binding.
+  bool revalidateReservation({required String? uid, required int epoch, required int generation}) {
+    if (_boundUid != uid || _bindingEpoch != epoch || _expectedGeneration != generation) return false;
+    if (hasCurrentAuthority) return true;
+    if (_lease != null) {
+      _revoke(_authenticatedUid() != _boundUid
+          ? EllaCaptureRevocationReason.accountSwitch
+          : EllaCaptureRevocationReason.authorityNotCurrent);
+    }
+    return false;
+  }
+
   /// Binds capture to [uid] with a freshly started consent lease. Returns true
   /// only when the new session holds current authority. Rebinding the same
   /// account while current keeps the existing session; any other rebind first

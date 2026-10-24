@@ -60,7 +60,6 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "42A7BA332E788BD300138969"
             BuildableName = "omiWatchApp.app"
-            BlueprintName = "omiWatchApp"
             ReferencedContainer = "container:Runner.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -77,7 +76,6 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "42A7BA332E788BD300138969"
             BuildableName = "omiWatchApp.app"
-            BlueprintName = "omiWatchApp"
             ReferencedContainer = "container:Runner.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

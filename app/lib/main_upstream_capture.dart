@@ -1,3 +1,6 @@
+import 'package:omi/ella/upstream_capture/ella_home_transcript_panel.dart';
+import 'package:omi/ella/voice/foreground_dictation_registration.dart';
+import 'package:omi/upstream_capture/utils/enums.dart' show RecordingState;
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_dock.dart';
@@ -19,9 +22,10 @@ void main() {
   final runtime = EllaUpstreamCaptureRuntime.instance;
   // Refuses unless the Dart define generated from the xcconfig is true.
   EllaCaptureHost.installUpstreamCapture(
+    homeTranscriptPreviewBuilder: (_) => EllaHomeTranscriptPanel(runtime: runtime),
     homeCaptureDockBuilder: (context) => EllaCaptureMemoryBinding(
       bridge: runtime.memoryBridge,
-      child: const EllaUpstreamCaptureDock(),
+      child: const EllaUpstreamCaptureDock(headerControl: true),
     ),
     deviceService: EllaUpstreamDeviceServiceAdapter.production(runtime),
   );
@@ -30,8 +34,16 @@ void main() {
   // graph never reaches it.
   EllaCaptureHost.installNativeDiscoveryDiagnosticsLoader(loadNativeDiscoveryDiagnostics);
   EllaCaptureHost.installCaptureDiagnosticsReader(() => runtime.captureDiagnostics);
+  EllaCaptureHost.installCompanionRecordingReader(() {
+    final state = runtime.provider?.recordingState;
+    return runtime.authority.hasCurrentAuthority &&
+        (state == RecordingState.record ||
+            state == RecordingState.deviceRecord ||
+            state == RecordingState.systemAudioRecord);
+  });
   // Account transitions (sign-out / switch) revoke the bound capture session
   // through the existing Ella account-isolation hook before the next account.
   EllaAccountIsolationService.registerCaptureProducer(runtime.releaseAccount);
+  installForegroundDictationRegistration();
   legacy.main();
 }

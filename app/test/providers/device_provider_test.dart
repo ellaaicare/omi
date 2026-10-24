@@ -14,8 +14,10 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/devices/device_connection.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/mic/audio_capture_ownership.dart';
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart' as upstream;
 import 'package:omi/utils/enums.dart';
+import 'package:omi/ella/capture_host/ella_capture_host.dart';
 
 class _TestConnectivityPlatform extends ConnectivityPlatform {
   @override
@@ -205,6 +207,80 @@ void main() {
     await preferences.saveBool('aiConsentAccepted', true);
     await preferences.btDeviceSet(BtDevice.empty());
     await preferences.btDeviceOwnerBindingSet('');
+  });
+
+  test('Home launch without necklace preserves actual idle capture admission', () async {
+    final capture = CaptureProvider();
+    final provider = DeviceProvider(
+        deviceService: _FakeDeviceService(DeviceServiceStatus.ready), automaticallyReconnectOnReady: false)
+      ..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    expect(capture.isCaptureQuiescentForDiagnostic, isTrue);
+    await provider.resumeConnectedCaptureAtHomeLaunch();
+    expect(capture.recordingState, RecordingState.stop);
+    expect(capture.isCaptureQuiescentForDiagnostic, isTrue);
+    expect(capture.recordingDeviceServiceReady, isFalse);
+    expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+  });
+
+  test('original null-device stream reproduces idle non-stopped diagnostic state', () async {
+    final capture = CaptureProvider();
+    addTearDown(capture.dispose);
+    await capture.streamDeviceRecording();
+    expect(capture.recordingState, RecordingState.error);
+    expect(capture.isCaptureQuiescentForDiagnostic, isFalse);
+    expect(capture.recordingDeviceServiceReady, isFalse);
+    expect(capture.phoneCaptureOwnsMobileAudio, isFalse);
+    expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+  });
+
+  test('Home launch does not clear a pre-existing error or retained capture', () async {
+    final capture = CaptureProvider()..updateRecordingState(RecordingState.error);
+    final provider = DeviceProvider(
+        deviceService: _FakeDeviceService(DeviceServiceStatus.ready), automaticallyReconnectOnReady: false)
+      ..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    await provider.resumeConnectedCaptureAtHomeLaunch();
+    expect(capture.recordingState, RecordingState.error);
+    expect(capture.isCaptureQuiescentForDiagnostic, isFalse);
+  });
+
+  test('Home launch resumes only current connected owner through existing gates', () async {
+    final device = BtDevice(name: 'Synthetic necklace', id: 'home-launch-device', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(device);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+        deviceService: _FakeDeviceService(DeviceServiceStatus.ready), automaticallyReconnectOnReady: false)
+      ..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    provider.connectedDevice = device;
+    provider.pairedDevice = device;
+    provider.setIsConnected(true);
+    await provider.resumeConnectedCaptureAtHomeLaunch();
+    expect(capture.deviceStarts, 1);
+    expect(capture.recordingState, RecordingState.deviceRecord);
+  });
+
+  test('Home launch never attaches legacy stream to upstream capture graph', () async {
+    final device = BtDevice(name: 'Synthetic necklace', id: 'upstream-launch-device', type: DeviceType.omi, rssi: -30);
+    await bindRememberedDeviceForCurrentTestAuthority(device);
+    final capture = _RecordingCaptureProvider();
+    final provider = DeviceProvider(
+        deviceService: _FakeDeviceService(DeviceServiceStatus.ready), automaticallyReconnectOnReady: false)
+      ..setProviders(capture);
+    addTearDown(provider.dispose);
+    addTearDown(capture.dispose);
+    EllaCaptureHost.installForTesting(homeCaptureDockBuilder: (_) => const SizedBox.shrink());
+    addTearDown(EllaCaptureHost.resetForTesting);
+    provider.connectedDevice = device;
+    provider.pairedDevice = device;
+    provider.setIsConnected(true);
+    await provider.resumeConnectedCaptureAtHomeLaunch();
+    expect(capture.deviceStarts, 0);
+    expect(capture.recordingState, RecordingState.stop);
   });
 
   test('empty remembered-device sentinels never present as a paired necklace', () async {

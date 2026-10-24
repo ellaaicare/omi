@@ -93,9 +93,12 @@ ServerMessageChunk? parseMessageChunk(String line, String messageId) {
 }
 
 Future<List<ServerMessageChunk>> collectTerminalMessageChunks(Stream<ServerMessageChunk> stream) async {
-  final chunks = await stream.toList();
-  if (chunks.any((chunk) => chunk.type == MessageChunkType.error)) {
-    throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
+  final chunks = <ServerMessageChunk>[];
+  await for (final chunk in stream) {
+    if (chunk.type == MessageChunkType.error) {
+      throw const ClientApiFailure(ClientApiFailureKind.invalidResponse);
+    }
+    chunks.add(chunk);
   }
   final doneCount = chunks.where((chunk) => chunk.type == MessageChunkType.done).length;
   if (chunks.isEmpty || chunks.last.type != MessageChunkType.done || doneCount != 1) {

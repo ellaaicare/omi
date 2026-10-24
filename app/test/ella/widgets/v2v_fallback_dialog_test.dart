@@ -24,26 +24,28 @@ void main() {
         home: const Scaffold(body: V2VFallbackDialog(receipt: receipt)),
       );
 
-  testWidgets('names failed provider, safe receipt, and explicit ElevenLabs fallback', (tester) async {
+  testWidgets('ordinary voice copy hides closed receipt until Details without advertising broken fallback',
+      (tester) async {
     await tester.pumpWidget(buildApp());
     await tester.pumpAndSettle();
 
-    expect(find.text("Gemini Native Live couldn't connect"), findsOneWidget);
+    expect(find.text('Ella’s voice couldn’t connect'), findsOneWidget);
+    expect(find.textContaining('isolated_voice_not_ready'), findsNothing);
+    await tester.tap(find.text('Details'));
+    await tester.pumpAndSettle();
     expect(find.textContaining('session'), findsOneWidget);
     expect(find.textContaining('HTTP 503'), findsOneWidget);
     expect(find.textContaining('isolated_voice_not_ready'), findsOneWidget);
     expect(find.text('Retry'), findsOneWidget);
-    expect(find.text('Use ElevenLabs'), findsOneWidget);
-    expect(find.text('Cancel'), findsOneWidget);
+    expect(find.text('Use ElevenLabs'), findsNothing);
+    expect(find.text('Close'), findsOneWidget);
     expect(find.byKey(const ValueKey('v2v-failure-cancel')), findsOneWidget);
 
     final cancel = tester.widget<OutlinedButton>(find.byKey(const ValueKey('v2v-failure-cancel')));
-    final fallback = tester.widget<TextButton>(find.byKey(const ValueKey('v2v-failure-elevenlabs')));
     final retry = tester.widget<FilledButton>(find.byKey(const ValueKey('v2v-failure-retry')));
-    expect(cancel.style?.foregroundColor?.resolve({}), EllaColors.tealDeep);
-    expect(fallback.style?.foregroundColor?.resolve({}), EllaColors.tealDeep);
+    expect(cancel.style?.foregroundColor?.resolve({}), const EllaPalette(false).ink);
     expect(retry.style?.foregroundColor?.resolve({}), EllaColors.paper);
-    expect(retry.style?.backgroundColor?.resolve({}), EllaColors.tealDeep);
+    expect(retry.style?.backgroundColor?.resolve({}), const EllaPalette(false).ink);
     expect(tester.getSize(find.byKey(const ValueKey('v2v-failure-retry'))).width, lessThan(180));
   });
 
@@ -115,6 +117,73 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(choice, V2VFailureChoice.stop);
+    expect(find.byType(V2VFallbackDialog), findsNothing);
+  });
+
+  testWidgets('standard permanent failure offers close without retry or fallback', (tester) async {
+    const permanent = V2VConnectionReceipt(
+      connected: false,
+      provider: 'grok-voice',
+      voiceMode: 'grok-voice',
+      stage: V2VConnectionStage.session,
+      errorCode: 'ai_consent_required',
+    );
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: const Scaffold(body: V2VFallbackDialog(receipt: permanent)),
+    ));
+    expect(find.byKey(const ValueKey('v2v-failure-retry')), findsNothing);
+    expect(find.byKey(const ValueKey('v2v-failure-elevenlabs')), findsNothing);
+    expect(find.text('Close'), findsOneWidget);
+  });
+
+  for (final action in ['retry', 'close', 'barrier']) {
+    testWidgets('real standard failure dialog returns $action choice', (tester) async {
+      V2VFailureChoice? choice;
+      await tester.pumpWidget(MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+            builder: (context) => Scaffold(
+                    body: TextButton(
+                  onPressed: () async => choice = await showV2VFallbackDialog(context, receipt),
+                  child: const Text('Open'),
+                ))),
+      ));
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('v2v-failure-elevenlabs')), findsNothing);
+      if (action == 'barrier') {
+        await tester.tapAt(const Offset(4, 4));
+      } else {
+        await tester.tap(find.byKey(ValueKey(action == 'retry' ? 'v2v-failure-retry' : 'v2v-failure-cancel')));
+      }
+      await tester.pumpAndSettle();
+      expect(choice, action == 'retry' ? V2VFailureChoice.retry : V2VFailureChoice.stop);
+    });
+  }
+
+  testWidgets('real failure dialog remains closable at narrow width and large text', (tester) async {
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      builder: (context, child) =>
+          MediaQuery(data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(3)), child: child!),
+      home: Builder(
+          builder: (context) => Scaffold(
+              body: TextButton(onPressed: () => showV2VFallbackDialog(context, receipt), child: const Text('Open')))),
+    ));
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const ValueKey('v2v-failure-cancel')).hitTestable(), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('v2v-failure-cancel')));
+    await tester.pumpAndSettle();
     expect(find.byType(V2VFallbackDialog), findsNothing);
   });
 

@@ -1,7 +1,9 @@
+import 'discovery_provenance.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -10,6 +12,7 @@ import 'package:omi/backend/preferences.dart';
 /// Lightweight debug log manager to persist important diagnostics when
 /// developer debug logging is enabled.
 class DebugLogManager {
+  static final discoveryProvenance = DiscoveryProvenanceLedger();
   DebugLogManager._();
 
   static String _dailyFileName() {
@@ -206,6 +209,30 @@ class DebugLogManager {
   static int deviceScansStopped = 0;
   static int deviceCandidatesSeen = 0;
   static int deviceCandidatesAdmitted = 0;
+  static String deviceDiscoveryStage = 'idle';
+  static String deviceDiscoveryFailure = 'none';
+  static String deviceAdapterState = 'idle';
+  static String deviceAdapterFailure = 'none';
+  static String deviceBluetoothPermission = 'unknown';
+
+  static String safeDeviceFailure(Object error) {
+    if (error is MissingPluginException) return 'missing_plugin';
+    if (error is PlatformException) {
+      const codes = {'bluetoothUnavailable', 'bluetoothUnauthorized', 'bluetoothOff', 'request_in_progress'};
+      return codes.contains(error.code) ? error.code : 'platform_error';
+    }
+    if (error is TimeoutException) return 'timeout';
+    if (error is StateError) return 'state_error';
+    return 'unexpected_error';
+  }
+
+  /// Stage and bounded error enums only; never platform messages or device IDs.
+  static void recordPickerStage(String stage, {String failure = 'none'}) {
+    deviceDiscoveryStage = stage;
+    deviceDiscoveryFailure = failure;
+    recordDeviceDiagnostic('picker stage=$stage failure=$failure');
+  }
+
   static final Map<String, int> deviceCandidatesRejectedByReason = {};
 
   /// Bridge-layer timestamp (ms since epoch, UTC) recorded when
@@ -234,6 +261,11 @@ class DebugLogManager {
     deviceCandidatesRejectedByReason.clear();
     _deviceDiagnosticsBuffer.clear();
     bleFlutterApiSetUpAtMs = null;
+    deviceDiscoveryStage = 'idle';
+    deviceDiscoveryFailure = 'none';
+    deviceAdapterState = 'idle';
+    deviceAdapterFailure = 'none';
+    deviceBluetoothPermission = 'unknown';
   }
 
   static void recordCandidateRejected(String reason) {

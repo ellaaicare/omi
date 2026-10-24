@@ -1,22 +1,33 @@
+import 'package:omi/ella/widgets/ella_v7_surfaces.dart';
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:omi/ella/services/journal_preview_refresh.dart';
+import 'package:omi/ella/widgets/refreshed_journal_preview.dart';
+import 'package:omi/ella/widgets/summary_refresh_notice.dart';
+
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/backend/schema/action_item.dart';
+import 'package:omi/ella/services/iris_journal_reminders.dart';
+import 'package:omi/ella/widgets/iris_journal_reminder_row.dart';
+import 'package:omi/ella/widgets/iris_journal_presentation.dart';
+import 'package:omi/ella/widgets/iris_capture_controls.dart';
+import 'package:omi/ella/widgets/iris_whisper_stop_bar.dart';
+import 'package:intl/intl.dart';
 import 'package:omi/ella/demo/today_card_fixtures.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/widgets/quiet_memory_preview.dart';
 import 'package:omi/ella/hardware/ella_hardware_artwork.dart';
 import 'package:omi/ella/models/capture_source.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
-import 'package:omi/ella/pages/ella_runtime_diagnostics_page.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
@@ -99,15 +110,15 @@ class TodayCaptureDockPresentation {
 }
 
 EllaCaptureSource? todayActiveCaptureSource(RecordingState state, CaptureDiagnostics diagnostics) => switch (state) {
-      RecordingState.record => EllaCaptureSource.phone,
-      RecordingState.deviceRecord => EllaCaptureSource.necklace,
-      RecordingState.initialising || RecordingState.pause || RecordingState.error => switch (diagnostics.source) {
-          CaptureDiagnosticSource.phone => EllaCaptureSource.phone,
-          CaptureDiagnosticSource.necklace => EllaCaptureSource.necklace,
-          _ => null,
-        },
-      RecordingState.stop || RecordingState.systemAudioRecord => null,
-    };
+  RecordingState.record => EllaCaptureSource.phone,
+  RecordingState.deviceRecord => EllaCaptureSource.necklace,
+  RecordingState.initialising || RecordingState.pause || RecordingState.error => switch (diagnostics.source) {
+    CaptureDiagnosticSource.phone => EllaCaptureSource.phone,
+    CaptureDiagnosticSource.necklace => EllaCaptureSource.necklace,
+    _ => null,
+  },
+  RecordingState.stop || RecordingState.systemAudioRecord => null,
+};
 
 EllaCaptureSource todaySelectedCaptureSource({
   required RecordingState state,
@@ -119,8 +130,7 @@ EllaCaptureSource todaySelectedCaptureSource({
     RecordingState.record => EllaCaptureSource.phone,
     RecordingState.initialising ||
     RecordingState.pause ||
-    RecordingState.error =>
-      preferredSource ?? activeSource ?? EllaCaptureSource.phone,
+    RecordingState.error => preferredSource ?? activeSource ?? EllaCaptureSource.phone,
     _ => preferredSource ?? EllaCaptureSource.phone,
   };
 }
@@ -144,12 +154,11 @@ bool todayDockShowsLiveNecklaceRecording({
     diagnostics.failure == CaptureDiagnosticFailure.none;
 
 bool todayNecklaceFailureRequiresFreshSession(CaptureDiagnosticFailure? failure) => switch (failure) {
-      CaptureDiagnosticFailure.physicalAudioUnavailable ||
-      CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
-      CaptureDiagnosticFailure.necklaceConnectionUnavailable =>
-        true,
-      _ => false,
-    };
+  CaptureDiagnosticFailure.physicalAudioUnavailable ||
+  CaptureDiagnosticFailure.necklaceAudioSubscriptionUnavailable ||
+  CaptureDiagnosticFailure.necklaceConnectionUnavailable => true,
+  _ => false,
+};
 
 bool shouldShowDailyNote(TodayCardViewState state) {
   final card = state.card;
@@ -221,8 +230,12 @@ class TodayPage extends StatefulWidget {
     this.memoryArtworkApi,
     this.memoryArtworkAuthorityProvider,
     this.memoryPresentationAuthorityProvider,
+    this.journalReminders,
+    this.journalPreviewLoader,
   });
 
+  final IrisJournalReminders? journalReminders;
+  final JournalPreviewLoader? journalPreviewLoader;
   final TodayCardRepository? todayCardRepository;
   final TodayCardCache? todayCardCache;
   final TodayCardTalkRouteOpener? todayCardTalkRouteOpener;
@@ -314,7 +327,14 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   int _homeArtworkLibrariesRefreshSequence = 0;
   int _homeArtworkDisplayEpoch = 0;
   final ValueNotifier<_ArtworkStudioSnapshot?> _homeArtworkStudioState = ValueNotifier(null);
-  MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.journal;
+  late final IrisJournalReminders _journalReminders;
+  final Set<JournalPreviewRefresh> _journalPreviewReads = {};
+  IrisJournalFilter _journalFilter = IrisJournalFilter.all;
+  void _onJournalChanged() {
+    if (mounted) setState(() {});
+  }
+
+  MemoryGalleryLayout _homeMemoryLayout = MemoryGalleryLayout.days;
   MemoryGallerySort _homeMemorySort = MemoryGallerySort.recent;
   MemoryArtworkPreferences? _homeArtworkPreferences;
   MemoryArtworkLibraries? _homeArtworkLibraries;
@@ -330,7 +350,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       widget.memoryArtworkAuthorityProvider ?? WalOwnerAuthority.active;
   late final MemoryPresentationAuthorityProvider _memoryPresentationAuthorityProvider =
       widget.memoryPresentationAuthorityProvider ??
-          () => _captureMemoryPresentationAuthority() ?? _memoryArtworkAuthorityProvider();
+      () => _captureMemoryPresentationAuthority() ?? _memoryArtworkAuthorityProvider();
 
   bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
 
@@ -347,8 +367,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _scrollController.addListener(_handleHomeScroll);
     _loadHomeMemoryLayout();
+    _journalReminders = widget.journalReminders ?? IrisJournalReminders();
+    _journalReminders.addListener(_onJournalChanged);
     _todayCardController = TodayCardController(
-      repository: widget.todayCardRepository ??
+      repository:
+          widget.todayCardRepository ??
           (SharedPreferencesUtil.isTodayDesignPreviewEnabled
               ? const _DemoTodayCardRepository()
               : HttpTodayCardRepository()),
@@ -368,6 +391,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       unawaited(context.read<ConversationProvider>().ensureFreshConversations());
       unawaited(_loadHomeArtworkPreferences());
       _loadCaptureSourcePreference();
+      unawaited(_journalReminders.load());
     });
   }
 
@@ -395,15 +419,17 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     const isPreview = SharedPreferencesUtil.isTodayDesignPreviewEnabled;
     final uid = widget.todayCardUidOverride ?? (isPreview ? 'today-card-preview' : SharedPreferencesUtil().uid);
     final authority = isPreview || widget.todayCardUidOverride != null ? null : WalOwnerAuthority.active();
-    final authorityKey = widget.todayCardAuthorityKeyOverride ??
+    final authorityKey =
+        widget.todayCardAuthorityKeyOverride ??
         (widget.todayCardUidOverride != null
             ? 'test-authority:$uid'
             : isPreview
-                ? 'today-card-preview'
-                : authority?.uid == uid
-                    ? TodayPage.cacheAuthorityKey(authority!)
-                    : '');
-    final isReady = widget.todayCardReadyOverride ??
+            ? 'today-card-preview'
+            : authority?.uid == uid
+            ? TodayPage.cacheAuthorityKey(authority!)
+            : '');
+    final isReady =
+        widget.todayCardReadyOverride ??
         (isPreview || (_provisioningProvider?.isOperational == true && authority?.uid == uid));
     return (uid: uid, authorityKey: authorityKey, isProvisioningReady: isReady);
   }
@@ -419,6 +445,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   void _onProvisioningChanged() {
+    unawaited(_journalReminders.load());
     unawaited(_syncTodayCardAuthority());
     unawaited(_loadHomeArtworkPreferences());
     if (_guardianAvailable && !_whispersVerified) unawaited(_loadWhisperState());
@@ -432,6 +459,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   void _onTodayCardAuthorityChanged() {
+    _journalReminders.retire();
+    _journalFilter = IrisJournalFilter.all;
     _whisperFence.invalidate();
     // In-memory content disappears synchronously; the exact replacement
     // authority is recaptured only after the old card is no longer renderable.
@@ -464,7 +493,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         _whispersOn = false;
         _whispersVerified = false;
         _whisperReconnecting = false;
-        _homeMemoryLayout = MemoryGalleryLayout.journal;
+        _homeMemoryLayout = MemoryGalleryLayout.days;
         _homeMemorySort = MemoryGallerySort.recent;
         _homeArtworkPreferences = null;
         _homeArtworkBackfillState = _ArtworkBackfillUiState.idle;
@@ -506,6 +535,12 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    for (final preview in _journalPreviewReads) {
+      preview.dispose();
+    }
+    _journalPreviewReads.clear();
+    _journalReminders.removeListener(_onJournalChanged);
+    if (widget.journalReminders == null) _journalReminders.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _provisioningProvider?.removeListener(_onProvisioningChanged);
     _conversationProvider?.removeListener(_onConversationsChanged);
@@ -538,7 +573,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         return layout;
       }
     }
-    return MemoryGalleryLayout.journal;
+    return MemoryGalleryLayout.days;
   }
 
   Future<void> _selectHomeMemoryLayout(MemoryGalleryLayout layout) async {
@@ -616,8 +651,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     if (!mounted || !_isHomeArtworkAuthorityCurrent(authority)) return;
     setState(() {
       _homeArtworkPreferences = preferences;
-      _homeArtworkBackfillState =
-          preferences == null ? _ArtworkBackfillUiState.idle : _storedHomeArtworkBackfillState(preferences, authority);
+      _homeArtworkBackfillState = preferences == null
+          ? _ArtworkBackfillUiState.idle
+          : _storedHomeArtworkBackfillState(preferences, authority);
     });
     _publishHomeArtworkStudioState();
     if (preferences?.releaseEnabled == true) {
@@ -707,7 +743,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     }
     final previous = _homeArtworkQueueStatus;
     MemoryArtworkQueueDiagnostics.project(diagnosticTicket, applied: true);
-    final refreshVisibleArtwork = previous == null ||
+    final refreshVisibleArtwork =
+        previous == null ||
         status.styleVersion != previous.styleVersion ||
         status.generationId != previous.generationId ||
         status.ready > previous.ready ||
@@ -888,32 +925,34 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       mode: mode,
     );
     late final Future<MemoryArtworkBackfillPage?> operation;
-    operation = rawOperation.then((page) {
-      if (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
-        final storedState = _storedHomeArtworkBackfillState(preferences, authority);
-        setState(() {
-          _homeArtworkBackfillState = storedState == _ArtworkBackfillUiState.complete
-              ? storedState
-              : page == null
+    operation = rawOperation
+        .then((page) {
+          if (mounted && _isHomeArtworkAuthorityCurrent(authority)) {
+            final storedState = _storedHomeArtworkBackfillState(preferences, authority);
+            setState(() {
+              _homeArtworkBackfillState = storedState == _ArtworkBackfillUiState.complete
+                  ? storedState
+                  : page == null
                   ? _ArtworkBackfillUiState.needsAttention
                   : _ArtworkBackfillUiState.idle;
+            });
+            _publishHomeArtworkStudioState();
+            unawaited(_refreshHomeArtworkQueueStatus());
+            // Each call queues one bounded preview. Older history advances only
+            // after a deliberate user action, never from a background timer.
+            _homeArtworkBackfillPollTimer?.cancel();
+          } else if (mounted && identical(_homeArtworkBackfillInFlight, operation)) {
+            setState(() => _homeArtworkBackfillState = _ArtworkBackfillUiState.idle);
+            _publishHomeArtworkStudioState();
+          }
+          return page;
+        })
+        .whenComplete(() {
+          if (identical(_homeArtworkBackfillInFlight, operation)) {
+            _homeArtworkBackfillInFlight = null;
+            _homeArtworkBackfillAuthority = null;
+          }
         });
-        _publishHomeArtworkStudioState();
-        unawaited(_refreshHomeArtworkQueueStatus());
-        // Each call queues one bounded preview. Older history advances only
-        // after a deliberate user action, never from a background timer.
-        _homeArtworkBackfillPollTimer?.cancel();
-      } else if (mounted && identical(_homeArtworkBackfillInFlight, operation)) {
-        setState(() => _homeArtworkBackfillState = _ArtworkBackfillUiState.idle);
-        _publishHomeArtworkStudioState();
-      }
-      return page;
-    }).whenComplete(() {
-      if (identical(_homeArtworkBackfillInFlight, operation)) {
-        _homeArtworkBackfillInFlight = null;
-        _homeArtworkBackfillAuthority = null;
-      }
-    });
     _homeArtworkBackfillAuthority = authority;
     _homeArtworkBackfillInFlight = operation;
     return operation;
@@ -1056,7 +1095,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: EllaColors.paper,
+      backgroundColor: EllaPalette.of(context).paper,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(EllaSizes.cardRadius)),
       ),
@@ -1181,7 +1220,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final serverEnabled = _whispersEnabled(info);
     var nativeStarted = false;
     try {
-      nativeStarted = await _whisperFence.serialize(operation, () async {
+      nativeStarted =
+          await _whisperFence.serialize(operation, () async {
             if (!_isWhisperOperationCurrent(operation, generation)) return false;
             await _reconcileWhisperNative(serverEnabled);
             return _isWhisperOperationCurrent(operation, generation);
@@ -1259,7 +1299,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final enabled = snapshot.enabled;
     var nativeStarted = false;
     try {
-      nativeStarted = await _whisperFence.serialize(operation, () async {
+      nativeStarted =
+          await _whisperFence.serialize(operation, () async {
             if (!_isWhisperOperationCurrent(operation, generation)) return false;
             await _reconcileWhisperNative(enabled);
             return _isWhisperOperationCurrent(operation, generation);
@@ -1374,10 +1415,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         }
       });
       if (!_isWhisperOperationCurrent(operation, generation)) return;
-      _whisperFence.publish(
-        operation,
-        (enabled: resolvedEnabled, modeVerified: resolvedVerified, nativeReconciled: nativeReconciled),
-      );
+      _whisperFence.publish(operation, (
+        enabled: resolvedEnabled,
+        modeVerified: resolvedVerified,
+        nativeReconciled: nativeReconciled,
+      ));
       if (resolvedVerified && !nativeReconciled) {
         _whisperRetryOperation = operation;
         _scheduleWhisperNativeRetry(generation);
@@ -1409,7 +1451,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       isDismissible: false,
       enableDrag: false,
       useSafeArea: true,
-      backgroundColor: EllaColors.bgPrimary,
+      backgroundColor: EllaPalette.of(context).bgPrimary,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       clipBehavior: Clip.antiAlias,
       builder: (_) => FractionallySizedBox(
@@ -1432,7 +1474,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: EllaColors.bgPrimary,
+      backgroundColor: EllaPalette.of(context).bgPrimary,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       clipBehavior: Clip.antiAlias,
       builder: (sheetContext) => FractionallySizedBox(
@@ -1449,20 +1491,19 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   String _phoneCaptureFailureMessage(PhoneCaptureStartResult result) => switch (result) {
-        PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
-        PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
-        PhoneCaptureStartResult.accountNotReady ||
-        PhoneCaptureStartResult.consentUnavailable ||
-        PhoneCaptureStartResult.recorderUnavailable ||
-        PhoneCaptureStartResult.cancelled =>
-          context.l10n.todayRecordingUnavailable,
-        PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
-      };
+    PhoneCaptureStartResult.microphonePermissionDenied => context.l10n.todayMicrophonePermissionDenied,
+    PhoneCaptureStartResult.transcriptionUnavailable => context.l10n.todayTranscriptionUnavailable,
+    PhoneCaptureStartResult.accountNotReady ||
+    PhoneCaptureStartResult.consentUnavailable ||
+    PhoneCaptureStartResult.recorderUnavailable ||
+    PhoneCaptureStartResult.cancelled => context.l10n.todayRecordingUnavailable,
+    PhoneCaptureStartResult.started => context.l10n.todayRecordingUnavailable,
+  };
 
   String _finalizationFailureMessage(CaptureProvider capture) =>
       capture.captureDiagnostics.failure == CaptureDiagnosticFailure.noTranscript
-          ? context.l10n.todayNoWordsCaptured
-          : context.l10n.processingFailed;
+      ? context.l10n.todayNoWordsCaptured
+      : context.l10n.processingFailed;
 
   Future<bool> _finalizeHomeMoment(CaptureProvider capture, {bool Function()? isCurrent}) async {
     final finalized = capture.recordingState == RecordingState.deviceRecord
@@ -1698,7 +1739,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<void> _finishExternalCapture(CaptureProvider capture) async {
     if (!mounted || _homeCaptureStarting) return;
     final existingSource = _externalCaptureFinalizationSource;
-    final source = existingSource ??
+    final source =
+        existingSource ??
         switch (capture.recordingState) {
           RecordingState.record => _ExternalCaptureSource.phone,
           RecordingState.deviceRecord => _ExternalCaptureSource.necklace,
@@ -1879,7 +1921,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       // Home's explicit Record action always owns the iPhone microphone. If
       // ambient necklace capture is active (or failed mid-session), close that
       // exact transport first and restore it only after the phone moment ends.
-      final necklaceTransportState = capture.recordingState == RecordingState.deviceRecord ||
+      final necklaceTransportState =
+          capture.recordingState == RecordingState.deviceRecord ||
           capture.recordingState == RecordingState.initialising ||
           capture.recordingState == RecordingState.pause ||
           capture.recordingState == RecordingState.error;
@@ -1943,7 +1986,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: EllaColors.bgPrimary,
+      backgroundColor: EllaPalette.of(context).bgPrimary,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       builder: (sheetContext) => ValueListenableBuilder<int>(
         valueListenable: _whisperControlsRevision,
@@ -1977,10 +2020,11 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   }
 
   Future<void> _confirmLegacyNecklace(DeviceProvider device) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed =
+        await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
-            backgroundColor: EllaColors.bgSecondary,
+            backgroundColor: EllaPalette.of(context).bgSecondary,
             surfaceTintColor: Colors.transparent,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
             title: Text(context.l10n.todayLegacyNecklaceConfirmTitle),
@@ -2018,7 +2062,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final legacyNecklaceNeedsConfirmation = device.legacyUntrustedDeviceCandidate != null;
     final capture = context.watch<CaptureProvider>();
     final diagnosticCaptureSource = todayActiveCaptureSource(capture.recordingState, capture.captureDiagnostics);
-    final activeCaptureSource = diagnosticCaptureSource ??
+    final activeCaptureSource =
+        diagnosticCaptureSource ??
         ((capture.recordingState == RecordingState.initialising ||
                     capture.recordingState == RecordingState.pause ||
                     capture.recordingState == RecordingState.error) &&
@@ -2037,13 +2082,10 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         final result = (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt);
         return _homeMemorySort == MemoryGallerySort.recent ? result : -result;
       });
-    final showDayGallery = _homeMemoryLayout == MemoryGalleryLayout.days;
     final memoriesHydrating = orderedMemories.isEmpty && !conversations.hasLoadedConversations;
-    final heroMemory = orderedMemories.isEmpty || showDayGallery ? null : orderedMemories.first;
-    final remainingMemories = showDayGallery ? orderedMemories : orderedMemories.skip(1).toList(growable: false);
+    final remainingMemories = orderedMemories;
     // Browsing restores existing artwork only. Generation remains an explicit
     // card or Artwork Studio action, even when stored consent is accepted.
-    const automaticArtworkRepairMemoryIds = <String>{};
     final showDailyNote = shouldShowDailyNote(_todayCardController.state);
     final showGuardianSurfaces = _guardianAvailable;
     final homeCaptureOwned =
@@ -2055,31 +2097,35 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     final upstreamDockBuilder = EllaCaptureHost.homeCaptureDockBuilder;
     final upstreamDockActive = upstreamDockBuilder != null;
     final inlineBackToRecent = upstreamDockActive && (dockTextScale >= 2 || MediaQuery.sizeOf(context).width < 360);
-    final dockClearance =
-        todayDockScrollClearance(textScale: dockTextScale, safeBottom: dockSafeBottom, navHeight: navHeight);
+    final dockClearance = todayDockScrollClearance(
+      textScale: dockTextScale,
+      safeBottom: dockSafeBottom,
+      navHeight: navHeight,
+    );
     _scheduleHomeMemoryPrefetch();
 
     void openControls() => unawaited(
-          _showHomeControls(
-            selectedCaptureSource: selectedCaptureSource,
-            showGuardianSurfaces: showGuardianSurfaces,
-            onReconnectNecklace: () => unawaited(_connectNecklace(device)),
-            onConfirmLegacyNecklace: () => unawaited(_confirmLegacyNecklace(device)),
-          ),
-        );
+      _showHomeControls(
+        selectedCaptureSource: selectedCaptureSource,
+        showGuardianSurfaces: showGuardianSurfaces,
+        onReconnectNecklace: () => unawaited(_connectNecklace(device)),
+        onConfirmLegacyNecklace: () => unawaited(_confirmLegacyNecklace(device)),
+      ),
+    );
     return SafeArea(
       bottom: false,
       child: Stack(
         children: [
           RefreshIndicator(
-            color: EllaColors.tealDeep,
-            backgroundColor: EllaColors.card,
+            color: EllaPalette.of(context).tealDeep,
+            backgroundColor: EllaPalette.of(context).card,
             onRefresh: () async {
               await Future.wait([
                 _todayCardController.retry(),
                 if (showGuardianSurfaces) _loadWhisperState(),
                 context.read<ConversationProvider>().getInitialConversations(),
                 _loadHomeArtworkPreferences(),
+                _journalReminders.load(),
               ]);
             },
             child: CustomScrollView(
@@ -2087,62 +2133,101 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               controller: _scrollController,
               physics: const AlwaysScrollableScrollPhysics(),
               slivers: [
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 14, EllaSizes.screenPadding, 0),
-                  sliver: SliverToBoxAdapter(
-                    child: _TodayHeader(
-                      now: now,
-                      onGreetingLongPress: () {
-                        Navigator.of(
-                          context,
-                        ).push(MaterialPageRoute(builder: (_) => const EllaRuntimeDiagnosticsPage()));
-                      },
-                    ),
-                  ),
-                ),
-                if (upstreamDockBuilder != null)
+                if (upstreamDockBuilder != null && !EllaCaptureDockPlacementScope.active(context))
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(14, 16, 14, 0),
                     sliver: SliverToBoxAdapter(child: upstreamDockBuilder(context)),
                   ),
-                if (visibleConversations.isNotEmpty)
-                  SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 16, EllaSizes.screenPadding, 10),
-                    sliver: SliverToBoxAdapter(
-                      child: _HomeMemoryToolbar(
-                        layout: _homeMemoryLayout,
-                        sort: _homeMemorySort,
-                        canSortOldest: !conversations.hasMoreConversations,
-                        artworkPreferences: _homeArtworkPreferences,
-                        artworkBackfillState: _homeArtworkBackfillState,
-                        artworkStyleSaving: _homeArtworkStyleSaving,
-                        artworkQueueStatus: _homeArtworkQueueStatus,
-                        artworkQueueLoadState: _homeArtworkQueueLoadState,
-                        onLayoutSelected: _selectHomeMemoryLayout,
-                        onSortSelected: (sort) => setState(() => _homeMemorySort = sort),
-                        onArtworkStudio: _openHomeArtworkStudio,
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 16, EllaSizes.screenPadding, 10),
+                  sliver: SliverToBoxAdapter(
+                    child: _HomeMemoryToolbar(
+                      filter: Wrap(
+                        key: const Key('iris-journal-filter-chips'),
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final value in [
+                            IrisJournalFilter.all,
+                            IrisJournalFilter.memories,
+                            IrisJournalFilter.reminders,
+                          ])
+                            ChoiceChip(
+                              key: Key('iris-journal-filter-${value.name}'),
+                              selected: _journalFilter == value,
+                              backgroundColor: EllaPalette.of(context).card,
+                              selectedColor: EllaPalette.of(context).ink,
+                              labelStyle: TextStyle(
+                                color: _journalFilter == value
+                                    ? EllaPalette.of(context).paper
+                                    : EllaPalette.of(context).ink,
+                              ),
+                              materialTapTargetSize: MaterialTapTargetSize.padded,
+                              onSelected: (_) => setState(() => _journalFilter = value),
+                              label: Text(
+                                _journalFilterLabel(
+                                  value,
+                                  memories: orderedMemories.length,
+                                  reminders: _journalReminders.items.length,
+                                  includeCount: true,
+                                ),
+                                style: const TextStyle(fontSize: 16),
+                              ),
+                            ),
+                        ],
                       ),
+                      layout: _homeMemoryLayout,
+                      sort: _homeMemorySort,
+                      canSortOldest: !conversations.hasMoreConversations,
+                      artworkPreferences: _homeArtworkPreferences,
+                      artworkBackfillState: _homeArtworkBackfillState,
+                      artworkStyleSaving: _homeArtworkStyleSaving,
+                      artworkQueueStatus: _homeArtworkQueueStatus,
+                      artworkQueueLoadState: _homeArtworkQueueLoadState,
+                      enabled: visibleConversations.isNotEmpty || _journalReminders.items.isNotEmpty,
+                      onLayoutSelected: _selectHomeMemoryLayout,
+                      onSortSelected: (sort) => setState(() => _homeMemorySort = sort),
+                      onArtworkStudio: _openHomeArtworkStudio,
                     ),
                   ),
-                if (orderedMemories.isEmpty || !showDayGallery)
+                ),
+                if (_journalReminders.unavailable)
+                  SliverToBoxAdapter(
+                    child: TextButton(
+                      style: TextButton.styleFrom(
+                        foregroundColor: EllaPalette.of(context).ink,
+                        disabledForegroundColor: EllaPalette.of(context).inkSoft,
+                        minimumSize: const Size(48, 48),
+                      ),
+                      onPressed: _journalReminders.hasMore ? _journalReminders.loadMore : _journalReminders.load,
+                      child: Text(context.l10n.irisRemindersUnavailable, style: const TextStyle(fontSize: 16)),
+                    ),
+                  ),
+                if (_journalReminders.hasMore)
+                  SliverToBoxAdapter(
+                    child: TextButton(
+                      style: TextButton.styleFrom(
+                        foregroundColor: EllaPalette.of(context).ink,
+                        disabledForegroundColor: EllaPalette.of(context).inkSoft,
+                        minimumSize: const Size(48, 48),
+                      ),
+                      key: const Key('iris-journal-load-more-reminders'),
+                      onPressed: _journalReminders.loading ? null : _journalReminders.loadMore,
+                      child: Text(context.l10n.irisLoadMoreReminders, style: const TextStyle(fontSize: 16)),
+                    ),
+                  ),
+                if (_journalFilter == IrisJournalFilter.notes)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Text(context.l10n.irisJournalNotesUnavailable),
+                    ),
+                  ),
+                if (orderedMemories.isEmpty && _journalReminders.items.isEmpty)
                   SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 12, EllaSizes.screenPadding, 0),
+                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
                     sliver: SliverToBoxAdapter(
-                      child: heroMemory == null
-                          ? memoriesHydrating
-                              ? const _MemoryJournalLoadingState()
-                              : const _MemoryJournalEmptyState()
-                          : MemoryGalleryCard(
-                              conversation: heroMemory,
-                              layout: MemoryGalleryLayout.journal,
-                              displayTitle: homeMemoryDisplayTitle(heroMemory, context.l10n.untitledConversation),
-                              artworkApi: _memoryArtworkApi,
-                              artworkRefreshEpoch: _homeArtworkDisplayEpoch,
-                              artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
-                              enqueueArtworkIfMissing: automaticArtworkRepairMemoryIds.contains(heroMemory.id),
-                              onOpen: () => _openMemoryDetail(heroMemory),
-                              onDelete: () => _deleteMemory(heroMemory),
-                            ),
+                      child: memoriesHydrating ? const _MemoryJournalLoadingState() : const _MemoryJournalEmptyState(),
                     ),
                   ),
                 if (showDailyNote)
@@ -2151,28 +2236,33 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                     sliver: SliverToBoxAdapter(
                       child: TodayCardSurface(
                         compact: true,
-                        surfaceColor: EllaColors.elevatedCard,
+                        surfaceColor: EllaPalette.of(context).elevatedCard,
                         state: _todayCardController.state,
                         onReadMore: _openTodayCardDetail,
                         onTalk: _openTodayCardTalk,
                       ),
                     ),
                   ),
-                ..._homeMemoryFeedSlivers(
-                  remainingMemories,
-                  now: now,
-                  automaticRepairMemoryIds: automaticArtworkRepairMemoryIds,
+                ..._journalFeedSlivers(remainingMemories, now),
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
+                    child: Text(
+                      context.l10n.irisJournalFooter,
+                      style: EllaTypography.of(context).secondary.copyWith(fontSize: 15),
+                    ),
+                  ),
                 ),
                 if (conversations.isLoadingMoreConversations)
-                  const SliverToBoxAdapter(
+                  SliverToBoxAdapter(
                     child: Padding(
-                      key: Key('home-memories-loading-more'),
-                      padding: EdgeInsets.symmetric(vertical: 24),
+                      key: const Key('home-memories-loading-more'),
+                      padding: const EdgeInsets.symmetric(vertical: 24),
                       child: Center(
                         child: SizedBox(
                           width: 22,
                           height: 22,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                          child: CircularProgressIndicator(strokeWidth: 2, color: EllaPalette.of(context).tealDeep),
                         ),
                       ),
                     ),
@@ -2199,7 +2289,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                         key: const Key('home-back-to-recent'),
                         onPressed: _scrollHomeBackToRecent,
                         style: TextButton.styleFrom(
-                          foregroundColor: EllaColors.tealDeep,
+                          foregroundColor: EllaPalette.of(context).tealDeep,
                           minimumSize: const Size(48, 48),
                         ),
                         icon: const Icon(Icons.arrow_upward_rounded),
@@ -2209,7 +2299,9 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
                   ),
                 SliverToBoxAdapter(
                   child: SizedBox(
-                    height: upstreamDockActive ? navHeight + dockSafeBottom + 24 : dockClearance,
+                    height: (upstreamDockActive ? navHeight + dockSafeBottom + 24 : dockClearance)
+                        .clamp(96, double.infinity)
+                        .toDouble(),
                   ),
                 ),
               ],
@@ -2221,12 +2313,15 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               bottom: upstreamDockActive
                   ? navHeight + dockSafeBottom + 16
                   : todayBackToRecentBottomOffset(
-                      textScale: dockTextScale, safeBottom: dockSafeBottom, navHeight: navHeight),
+                      textScale: dockTextScale,
+                      safeBottom: dockSafeBottom,
+                      navHeight: navHeight,
+                    ),
               child: FloatingActionButton.small(
                 key: const Key('home-back-to-recent'),
                 onPressed: _scrollHomeBackToRecent,
-                backgroundColor: EllaColors.tealDeep,
-                foregroundColor: EllaColors.paper,
+                backgroundColor: EllaPalette.of(context).tealDeep,
+                foregroundColor: EllaPalette.of(context).paper,
                 tooltip: context.l10n.backToRecentMemories,
                 child: const Icon(Icons.arrow_upward_rounded),
               ),
@@ -2275,56 +2370,278 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     );
   }
 
-  void _openMemoryDetail(ServerConversation conversation) {
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation)));
+  Future<void> _openMemoryDetail(ServerConversation conversation, {bool Function()? presentationCurrent}) async {
+    final authority = _memoryPresentationAuthorityProvider();
+    bool current() =>
+        mounted &&
+        (presentationCurrent?.call() ?? (!SharedPreferencesUtil.isPublicBuild || authority?.isExactCurrent() == true));
+    if (!current()) return;
+    if (authority == null || !authority.isExactCurrent()) return;
+    final provider = context.read<ConversationProvider>();
+    final refresh = JournalPreviewRefresh(
+      id: conversation.id,
+      authority: authority,
+      presentationCurrent: current,
+      loader: widget.journalPreviewLoader,
+      currentRow: () => provider.conversations.where((row) => row.id == conversation.id).firstOrNull,
+      commitRow: (memory, expectedRow, expectedWitness) {
+        final row = provider.conversations.where((row) => row.id == conversation.id).firstOrNull;
+        if (!current() || !identical(row, expectedRow) || journalPreviewRowWitness(expectedRow) != expectedWitness)
+          return false;
+        provider.updateConversation(memory);
+        return true;
+      },
+    );
+    _journalPreviewReads.add(refresh);
+    unawaited(refresh.load());
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        useSafeArea: true,
+        isScrollControlled: true,
+        builder: (sheetContext) => QuietMemoryAuthorityFence(
+          isCurrent: current,
+          child: IrisWhisperSheet(
+            child: RefreshedJournalPreview(
+              controller: refresh,
+              titleFor: (memory) => homeMemoryDisplayTitle(memory, context.l10n.untitledConversation),
+              onClose: () => Navigator.of(sheetContext).pop(),
+              onFullConversation: (memory) {
+                if (!current()) return;
+                Navigator.of(sheetContext).pop();
+                Navigator.of(
+                  this.context,
+                ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: memory)));
+              },
+            ),
+          ),
+        ),
+      );
+    } finally {
+      _journalPreviewReads.remove(refresh);
+      refresh.dispose();
+    }
   }
 
+  Widget _quietMemoryRow(ServerConversation conversation) {
+    final authority = _memoryPresentationAuthorityProvider();
+    bool current() => mounted && (!SharedPreferencesUtil.isPublicBuild || authority?.isExactCurrent() == true);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        QuietMemoryRow(
+          key: Key('iris-memory-row-${conversation.id}'),
+          showWeekday: _homeMemoryLayout != MemoryGalleryLayout.days,
+          conversation: conversation,
+          title: homeMemoryDisplayTitle(conversation, context.l10n.untitledConversation),
+          onOpen: () => _openMemoryDetail(conversation, presentationCurrent: current),
+        ),
+        Consumer<ConversationProvider>(
+          builder: (context, provider, _) =>
+              SummaryRefreshNotice(observation: provider.summaryReadFor(conversation), conversation: conversation),
+        ),
+      ],
+    );
+  }
+
+  DateTime? _reminderSaidAt(ActionItemWithMetadata item, List<ServerConversation> memories) {
+    for (final memory in memories) {
+      if (memory.id == item.conversationId) return memory.startedAt ?? memory.createdAt;
+    }
+    // A task's creation or due time does not establish when its words were said.
+    return null;
+  }
+
+  Widget _reminderRow(
+    ActionItemWithMetadata item,
+    List<ServerConversation> memories,
+    DateTime now, {
+    bool dueColumn = false,
+  }) {
+    final visible = _journalReminders.captureVisibility();
+    return IrisJournalReminderRow(
+      item: item,
+      now: now,
+      saidAt: _reminderSaidAt(item, memories),
+      dueColumn: dueColumn,
+      showWeekday: _homeMemoryLayout != MemoryGalleryLayout.days,
+      onOpen: () => _openJournalReminder(item, memories, isCurrent: visible),
+    );
+  }
+
+  Future<void> _openJournalReminder(
+    ActionItemWithMetadata item,
+    List<ServerConversation> memories, {
+    required bool Function() isCurrent,
+  }) async {
+    bool current() => mounted && isCurrent();
+    if (!current()) return;
+    final said = _reminderSaidAt(item, memories);
+    await showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      isScrollControlled: true,
+      builder: (sheetContext) => QuietMemoryAuthorityFence(
+        isCurrent: current,
+        child: IrisWhisperSheet(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(item.description, style: EllaTypography.of(sheetContext).noteBody.copyWith(fontSize: 28)),
+                const SizedBox(height: 16),
+                Text(
+                  said == null ? sheetContext.l10n.irisNotShownYet : DateFormat.yMMMd().add_jm().format(said.toLocal()),
+                  style: EllaTypography.of(sheetContext).secondary.copyWith(fontSize: 14),
+                ),
+                if (item.dueAt != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    sheetContext.l10n.irisDue(DateFormat.yMMMd().add_jm().format(item.dueAt!.toLocal())),
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                  ),
+                ],
+                for (final memory in memories.where((m) => m.id == item.conversationId))
+                  TextButton(
+                    onPressed: () {
+                      if (!current()) return;
+                      Navigator.of(sheetContext).pop();
+                      _openMemoryDetail(memory, presentationCurrent: current);
+                    },
+                    child: Text(sheetContext.l10n.irisOriginalWordsPreview, style: const TextStyle(fontSize: 16)),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _journalFilterLabel(
+    IrisJournalFilter filter, {
+    int memories = 0,
+    int reminders = 0,
+    bool includeCount = false,
+  }) {
+    final label = switch (filter) {
+      IrisJournalFilter.all => context.l10n.irisAll,
+      IrisJournalFilter.memories => context.l10n.memories,
+      IrisJournalFilter.notes => context.l10n.irisNotes,
+      IrisJournalFilter.reminders => context.l10n.irisReminders,
+    };
+    if (!includeCount) return label;
+    // Counts describe only the loaded, exact-owner visible records. Notes have
+    // no typed endpoint in this client; never invent zero as a server count.
+    return filter == IrisJournalFilter.notes
+        ? '$label · —'
+        : '$label · ${filter == IrisJournalFilter.all
+              ? memories + reminders
+              : filter == IrisJournalFilter.memories
+              ? memories
+              : reminders}';
+  }
+
+  List<Widget> _journalFeedSlivers(List<ServerConversation> memories, DateTime now) {
+    if (_journalFilter == IrisJournalFilter.notes) return [];
+    final reminders = _journalFilter == IrisJournalFilter.memories
+        ? const <ActionItemWithMetadata>[]
+        : _journalReminders.items;
+    Widget header(String text) => Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
+      child: Semantics(
+        header: true,
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: DecoratedBox(
+            decoration: BoxDecoration(color: EllaPalette.of(context).cardDeep, borderRadius: BorderRadius.circular(14)),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              child: Text(text, style: EllaTypography.of(context).noteBody.copyWith(fontSize: 26)),
+            ),
+          ),
+        ),
+      ),
+    );
+    Widget rows(List<Widget> values) => SliverPadding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      sliver: SliverList.separated(
+        itemCount: values.length,
+        itemBuilder: (_, i) => values[i],
+        separatorBuilder: (_, __) => const Divider(height: 1),
+      ),
+    );
+    if (_journalFilter == IrisJournalFilter.reminders) {
+      final groups = irisReminderGroups(reminders, now);
+      return [
+        for (final group in [
+          (context.l10n.irisComingUp, groups.coming),
+          (context.l10n.irisPast, groups.past),
+          (context.l10n.irisNoDueTime, groups.noDue),
+        ])
+          if (group.$2.isNotEmpty) ...[
+            SliverToBoxAdapter(child: header(group.$1)),
+            rows([for (final item in group.$2) _reminderRow(item, memories, now, dueColumn: true)]),
+          ],
+      ];
+    }
+    final entries =
+        <({DateTime? said, Widget row})>[
+          for (final memory in memories) (said: memory.startedAt ?? memory.createdAt, row: _quietMemoryRow(memory)),
+          for (final item in reminders) (said: _reminderSaidAt(item, memories), row: _reminderRow(item, memories, now)),
+        ]..sort((a, b) {
+          if (a.said == null) return b.said == null ? 0 : 1;
+          if (b.said == null) return -1;
+          final order = b.said!.compareTo(a.said!);
+          return _homeMemorySort == MemoryGallerySort.recent ? order : -order;
+        });
+    if (_homeMemoryLayout != MemoryGalleryLayout.days)
+      return [
+        rows([for (final entry in entries) entry.row]),
+      ];
+    final grouped = <String, List<Widget>>{};
+    for (final entry in entries) {
+      final date = entry.said?.toLocal();
+      final label = date == null ? context.l10n.irisNotShownYet : irisJournalDayLabel(context, date, now);
+      (grouped[label] ??= []).add(entry.row);
+    }
+    return [
+      for (final group in grouped.entries) ...[SliverToBoxAdapter(child: header(group.key)), rows(group.value)],
+    ];
+  }
+
+  // Legacy gallery helpers remain for archive compatibility.
+  // ignore: unused_element
   List<Widget> _homeMemoryFeedSlivers(
     List<ServerConversation> memories, {
     required DateTime now,
     required Set<String> automaticRepairMemoryIds,
   }) {
-    if (memories.isEmpty) return const [];
+    if (memories.isEmpty) return [];
     if (_homeMemoryLayout == MemoryGalleryLayout.days) {
       final groups = groupMemoryConversationsByDay(context, memories, now: now);
-      final entries = groups.entries.toList(growable: false);
       return [
-        for (var index = 0; index < entries.length; index++)
+        for (final entry in groups.entries) ...[
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 18, EllaSizes.screenPadding, 0),
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
             sliver: SliverToBoxAdapter(
-              child: MemoryDayGalleryCard(
-                key: Key('home-memory-day-${memoryConversationCalendarDayKey(entries[index].value.first)}'),
-                dayLabel: entries[index].key,
-                memories: entries[index].value,
-                artworkApi: _memoryArtworkApi,
-                artworkRefreshEpoch: _homeArtworkDisplayEpoch,
-                artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
-                automaticRepairMemoryIds: automaticRepairMemoryIds,
-                now: now,
-                onOpen: () {
-                  final authority = _memoryPresentationAuthorityProvider();
-                  if (SharedPreferencesUtil.isPublicBuild && (authority == null || !authority.isExactCurrent())) {
-                    return;
-                  }
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => EllaMemoryDayPage(
-                        dayLabel: entries[index].key,
-                        memories: entries[index].value,
-                        artworkApi: _memoryArtworkApi,
-                        artworkRefreshEpoch: _homeArtworkDisplayEpoch,
-                        artworkAuthorityEpoch: _homeCaptureAuthorityGeneration,
-                        exactAuthority: authority,
-                        authorityChanges: _todayCardAuthorityChanges,
-                        onDelete: _deleteMemory,
-                      ),
-                    ),
-                  );
-                },
+              child: Semantics(
+                header: true,
+                child: Text(entry.key, style: EllaTypography.of(context).body.copyWith(fontWeight: FontWeight.w700)),
               ),
             ),
           ),
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            sliver: SliverList.separated(
+              itemCount: entry.value.length,
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (_, index) => _quietMemoryRow(entry.value[index]),
+            ),
+          ),
+        ],
       ];
     }
     if (_homeMemoryLayout == MemoryGalleryLayout.grid) {
@@ -2345,9 +2662,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
         padding: const EdgeInsets.fromLTRB(EllaSizes.screenPadding, 18, EllaSizes.screenPadding, 0),
         sliver: SliverList.separated(
           itemCount: memories.length,
-          separatorBuilder: (_, __) => const Divider(height: 1, color: EllaColors.cardDeep),
-          itemBuilder: (context, index) =>
-              _homeMemoryCard(memories[index], automaticRepairMemoryIds: automaticRepairMemoryIds),
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (context, index) => _quietMemoryRow(memories[index]),
         ),
       ),
     ];
@@ -2369,7 +2685,8 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
   Future<bool> _deleteMemory(ServerConversation conversation) async {
     final l10n = context.l10n;
     final provider = context.read<ConversationProvider>();
-    final confirmed = await showDialog<bool>(
+    final confirmed =
+        await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
             title: Text(l10n.deleteConversationTitle),
@@ -2378,7 +2695,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
               TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: Text(l10n.cancel)),
               FilledButton(
                 onPressed: () => Navigator.of(dialogContext).pop(true),
-                style: FilledButton.styleFrom(backgroundColor: EllaColors.error),
+                style: FilledButton.styleFrom(backgroundColor: EllaPalette.of(context).error),
                 child: Text(l10n.delete),
               ),
             ],
@@ -2418,8 +2735,7 @@ double todayDockScrollClearance({
   required double safeBottom,
   double? viewportHeight,
   double navHeight = EllaSizes.navBarHeight,
-}) =>
-    navHeight + safeBottom + todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 24;
+}) => navHeight + safeBottom + todayDockReservedHeight(textScale, viewportHeight: viewportHeight) + 24;
 
 double todayBackToRecentBottomOffset({
   required double textScale,
@@ -2456,19 +2772,24 @@ class _TodayCardDetailSheet extends StatelessWidget {
             child: Container(
               width: 44,
               height: 4,
-              decoration: BoxDecoration(color: EllaColors.cardDeep, borderRadius: BorderRadius.circular(2)),
+              decoration: BoxDecoration(
+                color: EllaPalette.of(context).cardDeep,
+                borderRadius: BorderRadius.circular(2),
+              ),
             ),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
             child: Row(
               children: [
-                Expanded(child: Text(context.l10n.todayCardPreparingEyebrow, style: EllaTextStyles.eyebrow)),
+                Expanded(
+                  child: Text(context.l10n.todayCardPreparingEyebrow, style: EllaTypography.of(context).eyebrow),
+                ),
                 IconButton(
                   key: const Key('today-card-detail-close'),
                   tooltip: context.l10n.close,
                   onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close_rounded, color: EllaColors.tealDeep),
+                  icon: Icon(Icons.close_rounded, color: EllaPalette.of(context).tealDeep),
                 ),
               ],
             ),
@@ -2482,10 +2803,13 @@ class _TodayCardDetailSheet extends StatelessWidget {
                 children: [
                   Semantics(
                     header: true,
-                    child: Text(card.headline, style: EllaTextStyles.noteBody.copyWith(fontSize: 30, height: 1.15)),
+                    child: Text(
+                      card.headline,
+                      style: EllaTypography.of(context).noteBody.copyWith(fontSize: 30, height: 1.15),
+                    ),
                   ),
                   const SizedBox(height: 18),
-                  Text(card.body, style: EllaTextStyles.noteBody.copyWith(fontSize: 20, height: 1.45)),
+                  Text(card.body, style: EllaTypography.of(context).noteBody.copyWith(fontSize: 20, height: 1.45)),
                 ],
               ),
             ),
@@ -2498,8 +2822,8 @@ class _TodayCardDetailSheet extends StatelessWidget {
               icon: const Icon(Icons.graphic_eq_rounded),
               label: Text(context.l10n.memoryTalkAction),
               style: FilledButton.styleFrom(
-                backgroundColor: EllaColors.tealDeep,
-                foregroundColor: Colors.white,
+                backgroundColor: EllaPalette.of(context).tealDeep,
+                foregroundColor: EllaPalette.of(context).paper,
                 minimumSize: const Size.fromHeight(EllaSizes.minTouchTarget),
               ),
             ),
@@ -2510,44 +2834,10 @@ class _TodayCardDetailSheet extends StatelessWidget {
   }
 }
 
-class _TodayHeader extends StatelessWidget {
-  const _TodayHeader({required this.now, this.onGreetingLongPress});
-
-  final DateTime now;
-  final VoidCallback? onGreetingLongPress;
-
-  @override
-  Widget build(BuildContext context) {
-    final rawName = SharedPreferencesUtil().givenName.trim();
-    final firstName = rawName.isNotEmpty
-        ? rawName
-        : (SharedPreferencesUtil().demoMode ? 'Margaret' : context.l10n.todayGreetingFallbackName);
-    final greeting = now.hour < 12
-        ? context.l10n.todayGreetingMorning(firstName)
-        : now.hour < 17
-            ? context.l10n.todayGreetingAfternoon(firstName)
-            : context.l10n.todayGreetingEvening(firstName);
-    final locale = Localizations.localeOf(context).toLanguageTag();
-    final date = context.l10n
-        .todayDateEyebrow(DateFormat('EEEE', locale).format(now), DateFormat('MMMM d', locale).format(now))
-        .toUpperCase();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(date, style: EllaTextStyles.eyebrow),
-        const SizedBox(height: 8),
-        GestureDetector(
-          key: const Key('today-greeting'),
-          onLongPress: onGreetingLongPress,
-          child: Text(greeting, style: EllaTextStyles.noteBody.copyWith(fontSize: 24, height: 1.14)),
-        ),
-      ],
-    );
-  }
-}
-
 class _HomeMemoryToolbar extends StatelessWidget {
   const _HomeMemoryToolbar({
+    this.enabled = true,
+    required this.filter,
     required this.layout,
     required this.sort,
     required this.canSortOldest,
@@ -2561,6 +2851,8 @@ class _HomeMemoryToolbar extends StatelessWidget {
     required this.onArtworkStudio,
   });
 
+  final bool enabled;
+  final Widget filter;
   final MemoryGalleryLayout layout;
   final MemoryGallerySort sort;
   final bool canSortOldest;
@@ -2575,106 +2867,79 @@ class _HomeMemoryToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final stacked = MediaQuery.textScalerOf(context).scale(1) >= 2 || MediaQuery.sizeOf(context).width < 360;
-    final heading = Semantics(header: true, child: Text(context.l10n.memories, style: EllaTextStyles.eyebrow));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (stacked) heading,
-        Row(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (stacked) const Spacer() else Expanded(child: heading),
-            PopupMenuButton<MemoryGalleryLayout>(
-              key: const Key('home-memory-layout-menu'),
-              tooltip: context.l10n.memoryGalleryView,
-              initialValue: effectiveMemoryGalleryLayout(context, layout),
-              icon: const Icon(Icons.view_quilt_outlined, color: EllaColors.tealDeep),
-              onSelected: onLayoutSelected,
-              itemBuilder: memoryGalleryLayoutMenu,
-            ),
-            PopupMenuButton<MemoryGallerySort>(
-              key: const Key('home-memory-sort-menu'),
-              tooltip: context.l10n.sortBy,
-              initialValue: sort,
-              icon: const Icon(Icons.swap_vert_rounded, color: EllaColors.tealDeep),
-              onSelected: onSortSelected,
-              itemBuilder: (context) => [
-                PopupMenuItem(value: MemoryGallerySort.recent, child: Text(context.l10n.memorySortRecent)),
-                PopupMenuItem(
-                  value: MemoryGallerySort.oldest,
-                  enabled: canSortOldest,
-                  child: Text(context.l10n.memorySortOldest),
-                ),
-              ],
-            ),
-            if (artworkPreferences?.releaseEnabled == true)
-              IconButton(
-                key: const Key('home-memory-artwork-style-menu'),
-                tooltip: artworkPreferences?.releaseEnabled == true
-                    ? context.l10n.memoryArtworkStudio
-                    : context.l10n.memoryArtworkStyleUnavailable,
-                onPressed: artworkPreferences?.releaseEnabled == true ? onArtworkStudio : null,
-                icon: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Icon(
-                      Icons.palette_outlined,
-                      color: artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
-                    ),
-                    if (artworkStyleSaving || artworkBackfillState == _ArtworkBackfillUiState.running)
-                      const Positioned(
-                        right: -4,
-                        bottom: -4,
-                        child: SizedBox(
-                          key: Key('home-artwork-progress-indicator'),
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
-                        ),
-                      )
-                    else if (artworkBackfillState == _ArtworkBackfillUiState.needsAttention)
-                      const Positioned(
-                        right: -3,
-                        bottom: -3,
-                        child: DecoratedBox(
-                          key: Key('home-artwork-attention-indicator'),
-                          decoration: BoxDecoration(color: EllaColors.warning, shape: BoxShape.circle),
-                          child: SizedBox(width: 9, height: 9),
-                        ),
+            EllaDisplayHeading(context.l10n.irisJournal),
+            ListenableBuilder(
+              listenable: IrisCaptureControls.shared,
+              builder: (context, _) {
+                final controls = IrisCaptureControls.shared;
+                if (!controls.necklaceDisconnected) return const SizedBox.shrink();
+                return TextButton(
+                  key: const Key('iris-journal-status'),
+                  onPressed: controls.openStatus,
+                  style: TextButton.styleFrom(
+                    minimumSize: const Size(44, 44),
+                    foregroundColor: EllaPalette.of(context).ink,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const EllaV7Lume(pose: 'needs', size: 30),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(context.l10n.irisNecklaceNotConnected, style: const TextStyle(fontSize: 16)),
                       ),
-                  ],
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          children: [
+            for (final mode in [MemoryGalleryLayout.journal, MemoryGalleryLayout.days])
+              Semantics(
+                selected: mode == MemoryGalleryLayout.days ? layout == mode : layout != MemoryGalleryLayout.days,
+                child: TextButton(
+                  key: Key('iris-memory-layout-${mode.name}'),
+                  onPressed: enabled ? () => onLayoutSelected(mode) : null,
+                  style: TextButton.styleFrom(
+                    foregroundColor:
+                        (mode == MemoryGalleryLayout.days ? layout == mode : layout != MemoryGalleryLayout.days)
+                        ? EllaPalette.of(context).paper
+                        : EllaPalette.of(context).ink,
+                    disabledForegroundColor: EllaPalette.of(context).textDisabled,
+                    backgroundColor:
+                        (mode == MemoryGalleryLayout.days ? layout == mode : layout != MemoryGalleryLayout.days)
+                        ? EllaPalette.of(context).ink
+                        : EllaPalette.of(context).card,
+                    minimumSize: const Size(44, 44),
+                    textStyle: EllaTypography.of(context).body.copyWith(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                  child: Text(
+                    mode == MemoryGalleryLayout.days ? context.l10n.memoryGalleryDays : context.l10n.irisList,
+                  ),
                 ),
               ),
           ],
         ),
-        if (_showQueueSummary) ...[
-          const SizedBox(height: 8),
-          _HomeArtworkQueueSummary(
-            status: artworkQueueStatus,
-            loadState: artworkQueueLoadState,
-            onTap: onArtworkStudio,
-          ),
-        ],
+        const SizedBox(height: 8),
+        filter,
       ],
     );
   }
-
-  bool get _showQueueSummary {
-    if (artworkPreferences?.releaseEnabled != true) return false;
-    if (artworkQueueLoadState == _ArtworkQueueLoadState.failed) return true;
-    final queue = artworkQueueStatus;
-    if (queue == null) {
-      return artworkQueueLoadState == _ArtworkQueueLoadState.loading ||
-          artworkQueueLoadState == _ArtworkQueueLoadState.failed;
-    }
-    return queue.remaining > 0 ||
-        queue.failed > 0 ||
-        queue.scanStatus != 'completed' ||
-        queue.controlState == MemoryArtworkQueueState.paused ||
-        queue.controlState == MemoryArtworkQueueState.cancelled;
-  }
 }
 
+// Legacy gallery helpers remain for archive compatibility.
+// ignore: unused_element
 class _HomeArtworkQueueSummary extends StatelessWidget {
   const _HomeArtworkQueueSummary({required this.status, required this.loadState, required this.onTap});
 
@@ -2689,19 +2954,19 @@ class _HomeArtworkQueueSummary extends StatelessWidget {
     final headline = failed
         ? context.l10n.memoryArtworkQueueUnavailable
         : queue == null
-            ? context.l10n.memoryArtworkQueueChecking
-            : context.l10n.memoryArtworkQueueProgress(queue.ready, queue.total);
+        ? context.l10n.memoryArtworkQueueChecking
+        : context.l10n.memoryArtworkQueueProgress(queue.ready, queue.total);
     final detail = failed || queue == null ? '' : _detail(context, queue);
     final progress = failed
         ? 1.0
         : queue == null
-            ? null
-            : _progress(queue);
+        ? null
+        : _progress(queue);
     return Semantics(
       button: true,
       label: '$headline${detail.isEmpty ? '' : '. $detail'}. ${context.l10n.memoryArtworkStudio}',
       child: Material(
-        color: EllaColors.elevatedCard,
+        color: EllaPalette.of(context).elevatedCard,
         borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
         child: InkWell(
           key: const Key('home-artwork-queue-summary'),
@@ -2721,13 +2986,13 @@ class _HomeArtworkQueueSummary extends StatelessWidget {
                         key: const Key('home-artwork-queue-ring'),
                         value: progress,
                         strokeWidth: 3,
-                        color: failed ? EllaColors.warning : EllaColors.tealDeep,
-                        backgroundColor: EllaColors.cardEdge,
+                        color: failed ? EllaPalette.of(context).warning : EllaPalette.of(context).tealDeep,
+                        backgroundColor: EllaPalette.of(context).cardEdge,
                       ),
                       Icon(
                         failed ? Icons.priority_high_rounded : Icons.auto_awesome_rounded,
                         size: 15,
-                        color: failed ? EllaColors.warning : EllaColors.tealDeep,
+                        color: failed ? EllaPalette.of(context).warning : EllaPalette.of(context).tealDeep,
                       ),
                     ],
                   ),
@@ -2737,15 +3002,21 @@ class _HomeArtworkQueueSummary extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(headline, style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink)),
+                      Text(
+                        headline,
+                        style: EllaTypography.of(context).secondary.copyWith(color: EllaPalette.of(context).ink),
+                      ),
                       if (detail.isNotEmpty) ...[
                         const SizedBox(height: 2),
-                        Text(detail, style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft)),
+                        Text(
+                          detail,
+                          style: EllaTypography.of(context).caption.copyWith(color: EllaPalette.of(context).inkSoft),
+                        ),
                       ],
                     ],
                   ),
                 ),
-                const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+                Icon(Icons.chevron_right_rounded, color: EllaPalette.of(context).tealDeep),
               ],
             ),
           ),
@@ -2861,15 +3132,21 @@ class _ArtworkStudioSheet extends StatelessWidget {
                   child: Container(
                     width: 40,
                     height: 4,
-                    decoration: BoxDecoration(color: EllaColors.cardEdge, borderRadius: BorderRadius.circular(2)),
+                    decoration: BoxDecoration(
+                      color: EllaPalette.of(context).cardEdge,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 18),
-                Text(context.l10n.memoryArtworkStudio, style: EllaTextStyles.display.copyWith(color: EllaColors.ink)),
+                Text(
+                  context.l10n.memoryArtworkStudio,
+                  style: EllaTypography.of(context).display.copyWith(color: EllaPalette.of(context).ink),
+                ),
                 const SizedBox(height: 6),
                 Text(
                   context.l10n.memoryArtworkStudioDetail,
-                  style: EllaTextStyles.secondary.copyWith(color: EllaColors.inkSoft),
+                  style: EllaTypography.of(context).secondary.copyWith(color: EllaPalette.of(context).inkSoft),
                 ),
                 const SizedBox(height: 8),
                 Text(
@@ -2880,7 +3157,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
                           selectedLibrary?.readyMemories ?? 0,
                         ),
                   key: const Key('home-artwork-library-summary'),
-                  style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                  style: EllaTypography.of(context).caption.copyWith(color: EllaPalette.of(context).inkSoft),
                 ),
                 if (libraries != null) ...[
                   const SizedBox(height: 4),
@@ -2889,7 +3166,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
                       libraries!.historicalBatchSize,
                       libraries!.defaultPreviewDays,
                     ),
-                    style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                    style: EllaTypography.of(context).caption.copyWith(color: EllaPalette.of(context).inkSoft),
                   ),
                 ],
                 const SizedBox(height: 16),
@@ -2902,10 +3179,13 @@ class _ArtworkStudioSheet extends StatelessWidget {
                         Row(
                           children: [
                             if (styleSaving || queueLoadState == _ArtworkQueueLoadState.loading)
-                              const SizedBox(
+                              SizedBox(
                                 width: 20,
                                 height: 20,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: EllaPalette.of(context).tealDeep,
+                                ),
                               )
                             else
                               Icon(
@@ -2913,17 +3193,20 @@ class _ArtworkStudioSheet extends StatelessWidget {
                                         backfillState == _ArtworkBackfillUiState.needsAttention
                                     ? Icons.info_outline_rounded
                                     : Icons.auto_awesome_rounded,
-                                color: queueLoadState == _ArtworkQueueLoadState.failed ||
+                                color:
+                                    queueLoadState == _ArtworkQueueLoadState.failed ||
                                         backfillState == _ArtworkBackfillUiState.needsAttention
-                                    ? EllaColors.warning
-                                    : EllaColors.tealDeep,
+                                    ? EllaPalette.of(context).warning
+                                    : EllaPalette.of(context).tealDeep,
                               ),
                             const SizedBox(width: 12),
                             Expanded(
                               child: Text(
                                 queue == null ? status : _previewHeadline(context, queue),
                                 key: const Key('home-artwork-queue-progress-label'),
-                                style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
+                                style: EllaTypography.of(
+                                  context,
+                                ).secondary.copyWith(color: EllaPalette.of(context).ink),
                               ),
                             ),
                           ],
@@ -2940,8 +3223,8 @@ class _ArtworkStudioSheet extends StatelessWidget {
                               value: progress,
                               minHeight: 8,
                               borderRadius: BorderRadius.circular(99),
-                              color: EllaColors.tealDeep,
-                              backgroundColor: EllaColors.cardEdge,
+                              color: EllaPalette.of(context).tealDeep,
+                              backgroundColor: EllaPalette.of(context).cardEdge,
                             ),
                           ),
                           const SizedBox(height: 10),
@@ -2949,13 +3232,17 @@ class _ArtworkStudioSheet extends StatelessWidget {
                             Text(
                               _queueDetail(context, queue),
                               key: const Key('home-artwork-queue-detail'),
-                              style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                              style: EllaTypography.of(
+                                context,
+                              ).caption.copyWith(color: EllaPalette.of(context).inkSoft),
                             ),
                           if (queue.active > 0 && queue.controlState != MemoryArtworkQueueState.running) ...[
                             const SizedBox(height: 6),
                             Text(
                               context.l10n.memoryArtworkQueueActiveMayFinish,
-                              style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                              style: EllaTypography.of(
+                                context,
+                              ).caption.copyWith(color: EllaPalette.of(context).inkSoft),
                             ),
                           ],
                           const SizedBox(height: 12),
@@ -2968,8 +3255,8 @@ class _ArtworkStudioSheet extends StatelessWidget {
                                   key: const Key('home-artwork-pause'),
                                   onPressed: queueControlBusy ? null : onPause,
                                   style: OutlinedButton.styleFrom(
-                                    foregroundColor: EllaColors.tealDeep,
-                                    side: const BorderSide(color: EllaColors.tealDeep),
+                                    foregroundColor: EllaPalette.of(context).tealDeep,
+                                    side: BorderSide(color: EllaPalette.of(context).tealDeep),
                                   ),
                                   icon: const Icon(Icons.pause_rounded),
                                   label: Text(context.l10n.memoryArtworkQueuePause),
@@ -2979,8 +3266,8 @@ class _ArtworkStudioSheet extends StatelessWidget {
                                   key: const Key('home-artwork-resume'),
                                   onPressed: queueControlBusy ? null : onResume,
                                   style: OutlinedButton.styleFrom(
-                                    foregroundColor: EllaColors.tealDeep,
-                                    side: const BorderSide(color: EllaColors.tealDeep),
+                                    foregroundColor: EllaPalette.of(context).tealDeep,
+                                    side: BorderSide(color: EllaPalette.of(context).tealDeep),
                                   ),
                                   icon: const Icon(Icons.play_arrow_rounded),
                                   label: Text(
@@ -2994,8 +3281,8 @@ class _ArtworkStudioSheet extends StatelessWidget {
                                   key: const Key('home-artwork-generate-all'),
                                   onPressed: queueControlBusy ? null : onGenerateAll,
                                   style: FilledButton.styleFrom(
-                                    foregroundColor: EllaColors.paper,
-                                    backgroundColor: EllaColors.tealDeep,
+                                    foregroundColor: EllaPalette.of(context).paper,
+                                    backgroundColor: EllaPalette.of(context).tealDeep,
                                   ),
                                   icon: const Icon(Icons.auto_awesome_rounded),
                                   label: Text(context.l10n.memoryArtworkQueueGenerateAll),
@@ -3004,17 +3291,20 @@ class _ArtworkStudioSheet extends StatelessWidget {
                                 TextButton.icon(
                                   key: const Key('home-artwork-stop'),
                                   onPressed: queueControlBusy ? null : onStop,
-                                  style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
+                                  style: TextButton.styleFrom(foregroundColor: EllaPalette.of(context).tealDeep),
                                   icon: const Icon(Icons.stop_circle_outlined),
                                   label: Text(context.l10n.memoryArtworkQueueStop),
                                 ),
                               if (queueControlBusy)
-                                const Padding(
-                                  padding: EdgeInsets.all(10),
+                                Padding(
+                                  padding: const EdgeInsets.all(10),
                                   child: SizedBox(
                                     width: 18,
                                     height: 18,
-                                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: EllaPalette.of(context).tealDeep,
+                                    ),
                                   ),
                                 ),
                             ],
@@ -3027,7 +3317,7 @@ class _ArtworkStudioSheet extends StatelessWidget {
                 const SizedBox(height: 18),
                 Text(
                   context.l10n.memoryArtworkStyle,
-                  style: EllaTextStyles.eyebrow.copyWith(color: EllaColors.inkSoft),
+                  style: EllaTypography.of(context).eyebrow.copyWith(color: EllaPalette.of(context).inkSoft),
                 ),
                 const SizedBox(height: 6),
                 ...styles.map((style) {
@@ -3037,26 +3327,29 @@ class _ArtworkStudioSheet extends StatelessWidget {
                   return ListTile(
                     key: Key('home-artwork-style-${style.$1}'),
                     contentPadding: EdgeInsets.zero,
-                    tileColor: EllaColors.paper,
-                    selectedTileColor: EllaColors.card,
-                    textColor: EllaColors.ink,
-                    iconColor: EllaColors.tealDeep,
+                    tileColor: EllaPalette.of(context).paper,
+                    selectedTileColor: EllaPalette.of(context).card,
+                    textColor: EllaPalette.of(context).ink,
+                    iconColor: EllaPalette.of(context).tealDeep,
                     enabled: enabled,
                     leading: Icon(
                       selected ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
-                      color: selected ? EllaColors.tealDeep : EllaColors.inkSoft,
+                      color: selected ? EllaPalette.of(context).tealDeep : EllaPalette.of(context).inkSoft,
                     ),
-                    title: Text(style.$2, style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink)),
+                    title: Text(
+                      style.$2,
+                      style: EllaTypography.of(context).secondary.copyWith(color: EllaPalette.of(context).ink),
+                    ),
                     subtitle: Text(
                       libraries == null
                           ? context.l10n.memoryArtworkLibrariesChecking
                           : library == null || library.readyMemories == 0
-                              ? context.l10n.memoryArtworkLibraryEmpty
-                              : context.l10n.memoryArtworkLibraryCount(library.readyDays, library.readyMemories),
-                      style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+                          ? context.l10n.memoryArtworkLibraryEmpty
+                          : context.l10n.memoryArtworkLibraryCount(library.readyDays, library.readyMemories),
+                      style: EllaTypography.of(context).caption.copyWith(color: EllaPalette.of(context).inkSoft),
                     ),
                     selected: selected,
-                    selectedColor: EllaColors.tealDeep,
+                    selectedColor: EllaPalette.of(context).tealDeep,
                     onTap: enabled ? () => onStyleSelected(style.$1) : null,
                   );
                 }),
@@ -3068,8 +3361,8 @@ class _ArtworkStudioSheet extends StatelessWidget {
                       key: const Key('home-artwork-retry-status'),
                       onPressed: styleSaving || queueControlBusy ? null : onRetryStatus,
                       style: FilledButton.styleFrom(
-                        foregroundColor: EllaColors.paper,
-                        backgroundColor: EllaColors.tealDeep,
+                        foregroundColor: EllaPalette.of(context).paper,
+                        backgroundColor: EllaPalette.of(context).tealDeep,
                       ),
                       icon: const Icon(Icons.refresh_rounded),
                       label: Text(context.l10n.memoryArtworkQueueRetryStatus),
@@ -3082,9 +3375,9 @@ class _ArtworkStudioSheet extends StatelessWidget {
                       key: const Key('home-artwork-continue'),
                       onPressed: styleSaving || queueControlBusy ? null : onContinue,
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: EllaColors.tealDeep,
-                        backgroundColor: EllaColors.paper,
-                        side: const BorderSide(color: EllaColors.tealDeep),
+                        foregroundColor: EllaPalette.of(context).tealDeep,
+                        backgroundColor: EllaPalette.of(context).paper,
+                        side: BorderSide(color: EllaPalette.of(context).tealDeep),
                       ),
                       icon: const Icon(Icons.history_rounded),
                       label: Text(action),
@@ -3097,11 +3390,11 @@ class _ArtworkStudioSheet extends StatelessWidget {
             top: 8,
             right: 8,
             child: DecoratedBox(
-              decoration: const BoxDecoration(color: EllaColors.paper, shape: BoxShape.circle),
+              decoration: BoxDecoration(color: EllaPalette.of(context).paper, shape: BoxShape.circle),
               child: IconButton(
                 key: const Key('home-artwork-studio-close'),
                 tooltip: context.l10n.close,
-                color: EllaColors.ink,
+                color: EllaPalette.of(context).ink,
                 onPressed: () => Navigator.of(context).pop(),
                 icon: const Icon(Icons.close_rounded),
               ),
@@ -3251,22 +3544,22 @@ class TodayRecordMomentControl extends StatelessWidget {
         sourceIsNecklace && (necklaceConnected || necklaceConnecting || necklaceRecording || necklaceTransportStarting);
     final dotActive = active || necklaceStateActive;
     final dotColor = active
-        ? EllaColors.error
+        ? EllaPalette.of(context).error
         : necklaceConnecting || necklaceTransportStarting
-            ? EllaColors.warning
-            : necklaceConnected && sourceIsNecklace
-                ? EllaColors.success
-                : EllaColors.inkSoft;
+        ? EllaPalette.of(context).warning
+        : necklaceConnected && sourceIsNecklace
+        ? EllaPalette.of(context).success
+        : EllaPalette.of(context).inkSoft;
     return Material(
       key: const Key('today-capture-dock'),
       elevation: 12,
       shadowColor: Colors.black.withValues(alpha: 0.14),
-      color: EllaColors.elevatedCard,
+      color: EllaPalette.of(context).elevatedCard,
       borderRadius: BorderRadius.circular(24),
       clipBehavior: Clip.antiAlias,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          border: Border.all(color: EllaColors.cardEdge),
+          border: Border.all(color: EllaPalette.of(context).cardEdge),
           borderRadius: BorderRadius.circular(24),
         ),
         child: Padding(
@@ -3334,17 +3627,16 @@ class TodayRecordMomentControl extends StatelessWidget {
                                 key: const Key('today-record-source'),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: EllaTextStyles.caption.copyWith(
-                                  color: EllaColors.inkSoft,
-                                  fontWeight: FontWeight.w700,
-                                ),
+                                style: EllaTypography.of(
+                                  context,
+                                ).caption.copyWith(color: EllaPalette.of(context).inkSoft, fontWeight: FontWeight.w700),
                               ),
                             ),
                           ),
                           if (selectedSource == EllaCaptureSource.necklace && !necklaceConnected)
                             Icon(
                               legacyNecklaceNeedsConfirmation ? Icons.link_rounded : Icons.refresh_rounded,
-                              color: EllaColors.tealDeep,
+                              color: EllaPalette.of(context).tealDeep,
                               semanticLabel: '',
                             ),
                         ],
@@ -3360,10 +3652,12 @@ class TodayRecordMomentControl extends StatelessWidget {
                   child: TextButton.icon(
                     key: const Key('today-ai-consent-review'),
                     onPressed: onReviewConsent,
-                    icon: const Icon(Icons.privacy_tip_outlined, color: EllaColors.error),
+                    icon: Icon(Icons.privacy_tip_outlined, color: EllaPalette.of(context).error),
                     label: Text(
                       context.l10n.aiConsentNeededReview,
-                      style: EllaTextStyles.caption.copyWith(color: EllaColors.error, fontWeight: FontWeight.w700),
+                      style: EllaTypography.of(
+                        context,
+                      ).caption.copyWith(color: EllaPalette.of(context).error, fontWeight: FontWeight.w700),
                     ),
                   ),
                 ),
@@ -3387,11 +3681,12 @@ class TodayRecordMomentControl extends StatelessWidget {
                     child: _TodayDockAction(
                       actionKey: const Key('today-view-live-transcript'),
                       icon: Icons.subject_rounded,
-                      label: (necklaceRecording || necklaceHasNoAudio
+                      label:
+                          (necklaceRecording || necklaceHasNoAudio
                                   ? EllaCaptureSource.necklace
                                   : phoneRecording
-                                      ? EllaCaptureSource.phone
-                                      : selectedSource) ==
+                                  ? EllaCaptureSource.phone
+                                  : selectedSource) ==
                               EllaCaptureSource.necklace
                           ? context.l10n.todayDockTranscriptNecklace
                           : context.l10n.todayDockTranscriptPhone,
@@ -3438,34 +3733,34 @@ class TodayRecordMomentControl extends StatelessWidget {
     final status = externalCaptureFinalizationPending
         ? context.l10n.todayDockRecordingNeedsAttention
         : phoneRecording
-            ? context.l10n.todayDockRecordingPhone
-            : necklaceRecording
-                ? context.l10n.todayDockRecordingNecklace
-                : necklaceHasNoAudio
-                    ? context.l10n.todayNecklaceAudioSilent
-                    : initialising
-                        ? switchingAwayFromStartup
-                            ? sourceIsNecklace
-                                ? context.l10n.todayDockNecklaceReady
-                                : context.l10n.todayDockPhoneReady
-                            : sourceIsNecklace
-                                ? context.l10n.todayDockNecklaceConnecting
-                                : context.l10n.todayDockPhoneStarting
-                        : sourceIsNecklace
-                            ? recordingState == RecordingState.error
-                                ? context.l10n.todayDockNecklaceNeedsAttention
-                                : necklaceConnecting
-                                    ? context.l10n.todayDockNecklaceConnecting
-                                    : legacyNecklaceNeedsConfirmation
-                                        ? context.l10n.todayLegacyNecklaceDockStatus
-                                        : !necklaceConnected
-                                            ? necklaceConnectionFailed
-                                                ? context.l10n.todayDockNecklaceConnectionFailed
-                                                : context.l10n.todayDockNecklaceNotConnected
-                                            : context.l10n.todayDockNecklaceReady
-                            : recordingState == RecordingState.error
-                                ? context.l10n.todayDockPhoneNeedsAttention
-                                : context.l10n.todayDockPhoneReady;
+        ? context.l10n.todayDockRecordingPhone
+        : necklaceRecording
+        ? context.l10n.todayDockRecordingNecklace
+        : necklaceHasNoAudio
+        ? context.l10n.todayNecklaceAudioSilent
+        : initialising
+        ? switchingAwayFromStartup
+              ? sourceIsNecklace
+                    ? context.l10n.todayDockNecklaceReady
+                    : context.l10n.todayDockPhoneReady
+              : sourceIsNecklace
+              ? context.l10n.todayDockNecklaceConnecting
+              : context.l10n.todayDockPhoneStarting
+        : sourceIsNecklace
+        ? recordingState == RecordingState.error
+              ? context.l10n.todayDockNecklaceNeedsAttention
+              : necklaceConnecting
+              ? context.l10n.todayDockNecklaceConnecting
+              : legacyNecklaceNeedsConfirmation
+              ? context.l10n.todayLegacyNecklaceDockStatus
+              : !necklaceConnected
+              ? necklaceConnectionFailed
+                    ? context.l10n.todayDockNecklaceConnectionFailed
+                    : context.l10n.todayDockNecklaceNotConnected
+              : context.l10n.todayDockNecklaceReady
+        : recordingState == RecordingState.error
+        ? context.l10n.todayDockPhoneNeedsAttention
+        : context.l10n.todayDockPhoneReady;
     if (initialising && !switchingAwayFromStartup) {
       return TodayCaptureDockPresentation(
         mode: TodayCaptureDockMode.starting,
@@ -3541,42 +3836,46 @@ class _TodayCaptureSourceButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Semantics(
-        button: true,
-        selected: selected,
-        enabled: enabled,
-        label: label,
-        excludeSemantics: true,
-        child: Material(
-          color: selected ? const Color(0xFFD0E4DE) : EllaColors.paper,
-          borderRadius: BorderRadius.circular(14),
-          child: InkWell(
-            key: buttonKey,
-            onTap: enabled ? onTap : null,
-            borderRadius: BorderRadius.circular(14),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: 42),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(icon, size: 18, color: selected ? EllaColors.tealDeep : EllaColors.inkSoft),
-                  const SizedBox(width: 7),
-                  Flexible(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: EllaTextStyles.caption.copyWith(
-                        color: selected ? EllaColors.tealDeep : EllaColors.inkSoft,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ],
+    button: true,
+    selected: selected,
+    enabled: enabled,
+    label: label,
+    excludeSemantics: true,
+    child: Material(
+      color: selected ? const Color(0xFFD0E4DE) : EllaPalette.of(context).paper,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        key: buttonKey,
+        onTap: enabled ? onTap : null,
+        borderRadius: BorderRadius.circular(14),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 42),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 18,
+                color: selected ? EllaPalette.of(context).tealDeep : EllaPalette.of(context).inkSoft,
               ),
-            ),
+              const SizedBox(width: 7),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: EllaTypography.of(context).caption.copyWith(
+                    color: selected ? EllaPalette.of(context).tealDeep : EllaPalette.of(context).inkSoft,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
-      );
+      ),
+    ),
+  );
 }
 
 class _TodayDockAction extends StatefulWidget {
@@ -3636,10 +3935,10 @@ class _TodayDockActionState extends State<_TodayDockAction> with SingleTickerPro
   @override
   Widget build(BuildContext context) {
     final foreground = widget.emphasized
-        ? EllaColors.paper
+        ? EllaPalette.of(context).paper
         : widget.selected
-            ? EllaColors.tealDeep
-            : EllaColors.inkSoft;
+        ? EllaPalette.of(context).tealDeep
+        : EllaPalette.of(context).inkSoft;
     return Semantics(
       button: true,
       enabled: widget.enabled,
@@ -3654,21 +3953,21 @@ class _TodayDockActionState extends State<_TodayDockAction> with SingleTickerPro
             boxShadow: widget.emphasized && !MediaQuery.disableAnimationsOf(context)
                 ? [
                     BoxShadow(
-                      color: EllaColors.error.withValues(alpha: 0.18 + (_recordingPulse.value * 0.16)),
+                      color: EllaPalette.of(context).error.withValues(alpha: 0.18 + (_recordingPulse.value * 0.16)),
                       blurRadius: 8 + (_recordingPulse.value * 8),
                       spreadRadius: _recordingPulse.value * 2,
                     ),
                   ]
-                : const [],
+                : [],
           ),
           child: child,
         ),
         child: Material(
           color: widget.emphasized
-              ? EllaColors.error
+              ? EllaPalette.of(context).error
               : widget.selected
-                  ? const Color(0xFFD0E4DE)
-                  : EllaColors.paper,
+              ? const Color(0xFFD0E4DE)
+              : EllaPalette.of(context).paper,
           borderRadius: BorderRadius.circular(16),
           child: InkWell(
             key: widget.actionKey,
@@ -3681,15 +3980,15 @@ class _TodayDockActionState extends State<_TodayDockAction> with SingleTickerPro
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(widget.icon, size: 22, color: widget.enabled ? foreground : EllaColors.cardEdge),
+                    Icon(widget.icon, size: 22, color: widget.enabled ? foreground : EllaPalette.of(context).cardEdge),
                     const SizedBox(height: 3),
                     Text(
                       widget.label,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       textAlign: TextAlign.center,
-                      style: EllaTextStyles.caption.copyWith(
-                        color: widget.enabled ? foreground : EllaColors.cardEdge,
+                      style: EllaTypography.of(context).caption.copyWith(
+                        color: widget.enabled ? foreground : EllaPalette.of(context).cardEdge,
                         fontSize: 11,
                         fontWeight: FontWeight.w700,
                       ),
@@ -3737,8 +4036,8 @@ class _HomeControlsSheet extends StatelessWidget {
         (capture.phoneCaptureOwnsMobileAudio
             ? EllaCaptureSource.phone
             : capture.havingRecordingDevice && device.presentationIsConnected
-                ? EllaCaptureSource.necklace
-                : selectedCaptureSource);
+            ? EllaCaptureSource.necklace
+            : selectedCaptureSource);
   }
 
   @override
@@ -3749,7 +4048,8 @@ class _HomeControlsSheet extends StatelessWidget {
         final hasNecklace = device.presentationPairedDevice != null;
         final legacyNecklaceNeedsConfirmation = device.legacyUntrustedDeviceCandidate != null;
         final necklaceConnecting = device.isConnecting;
-        final deviceType = device.presentationConnectedDevice?.type ??
+        final deviceType =
+            device.presentationConnectedDevice?.type ??
             device.presentationPairedDevice?.type ??
             device.legacyUntrustedDeviceCandidate?.type ??
             DeviceType.omi;
@@ -3770,11 +4070,14 @@ class _HomeControlsSheet extends StatelessWidget {
                 child: Container(
                   width: 40,
                   height: 4,
-                  decoration: BoxDecoration(color: EllaColors.cardDeep, borderRadius: BorderRadius.circular(2)),
+                  decoration: BoxDecoration(
+                    color: EllaPalette.of(context).cardDeep,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
               ),
               const SizedBox(height: 20),
-              Text(context.l10n.todayControlsTitle, style: EllaTextStyles.noteBody.copyWith(fontSize: 28)),
+              Text(context.l10n.todayControlsTitle, style: EllaTypography.of(context).noteBody.copyWith(fontSize: 28)),
               const SizedBox(height: 18),
               if (legacyNecklaceNeedsConfirmation) ...[
                 FilledButton.icon(
@@ -3801,13 +4104,13 @@ class _HomeControlsSheet extends StatelessWidget {
                     _ControlRow(
                       icon: recordingSource == EllaCaptureSource.necklace && necklaceGlyph != null
                           ? Image.asset(necklaceGlyph, width: 28, height: 28)
-                          : const Icon(Icons.phone_iphone_rounded, color: EllaColors.tealDeep),
+                          : Icon(Icons.phone_iphone_rounded, color: EllaPalette.of(context).tealDeep),
                       title: context.l10n.todayRecordingSource,
                       detail: recordingSource == EllaCaptureSource.necklace
                           ? context.l10n.todayRecordOnNecklace
                           : context.l10n.todayRecordOnPhone,
                     ),
-                    const Divider(height: 1, indent: 64, color: EllaColors.cardDeep),
+                    Divider(height: 1, indent: 64, color: EllaPalette.of(context).cardDeep),
                     InkWell(
                       key: const Key('today-manage-necklace'),
                       onTap: onManageNecklace,
@@ -3817,15 +4120,15 @@ class _HomeControlsSheet extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(horizontal: 16),
                           child: Row(
                             children: [
-                              const Icon(Icons.bluetooth_rounded, color: EllaColors.tealDeep),
+                              Icon(Icons.bluetooth_rounded, color: EllaPalette.of(context).tealDeep),
                               const SizedBox(width: 16),
                               Expanded(
                                 child: Text(
                                   context.l10n.todayManageNecklace,
-                                  style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
+                                  style: EllaTypography.of(context).secondary.copyWith(fontWeight: FontWeight.w600),
                                 ),
                               ),
-                              const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
+                              Icon(Icons.chevron_right_rounded, color: EllaPalette.of(context).inkSoft),
                             ],
                           ),
                         ),
@@ -3857,35 +4160,40 @@ class _HomeControlsSheet extends StatelessWidget {
                                       whispersVerified
                                           ? whisperStatusLead(whispersEnabled)
                                           : context.l10n.todayWhispersUnavailable,
-                                      style: EllaTextStyles.secondary.copyWith(fontWeight: FontWeight.w600),
+                                      style: EllaTypography.of(context).secondary.copyWith(fontWeight: FontWeight.w600),
                                     ),
                                     if (whispersReconnecting)
                                       Text(
                                         context.l10n.todayStripReconnecting,
                                         key: const Key('guardian-whispers-reconnecting-hint'),
-                                        style: EllaTextStyles.caption.copyWith(color: EllaColors.warning),
+                                        style: EllaTypography.of(
+                                          context,
+                                        ).caption.copyWith(color: EllaPalette.of(context).warning),
                                       ),
                                   ],
                                 ),
                               ),
                               if (whispersUpdating)
-                                const SizedBox(
+                                SizedBox(
                                   width: 24,
                                   height: 24,
-                                  child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: EllaPalette.of(context).tealDeep,
+                                  ),
                                 )
                               else
                                 Switch(
                                   value: whispersEnabled,
                                   onChanged: whispersVerified ? onWhispersChanged : null,
-                                  activeTrackColor: EllaColors.tealDeep,
-                                  activeThumbColor: EllaColors.paper,
+                                  activeTrackColor: EllaPalette.of(context).tealDeep,
+                                  activeThumbColor: EllaPalette.of(context).paper,
                                 ),
                             ],
                           ),
                         ),
                       ),
-                      const Divider(height: 1, indent: 64, color: EllaColors.cardDeep),
+                      Divider(height: 1, indent: 64, color: EllaPalette.of(context).cardDeep),
                       InkWell(
                         key: const Key('whispers-history-entry'),
                         onTap: onWhispersHistory,
@@ -3899,13 +4207,13 @@ class _HomeControlsSheet extends StatelessWidget {
                                 Expanded(
                                   child: Text(
                                     context.l10n.todayWhispersHistory,
-                                    style: EllaTextStyles.secondary.copyWith(
-                                      color: EllaColors.tealDeep,
+                                    style: EllaTypography.of(context).secondary.copyWith(
+                                      color: EllaPalette.of(context).tealDeep,
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
                                 ),
-                                const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+                                Icon(Icons.chevron_right_rounded, color: EllaPalette.of(context).tealDeep),
                               ],
                             ),
                           ),
@@ -3945,9 +4253,9 @@ class _ControlRow extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(title, style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w700)),
+                  Text(title, style: EllaTypography.of(context).caption.copyWith(fontWeight: FontWeight.w700)),
                   const SizedBox(height: 2),
-                  Text(detail, style: EllaTextStyles.secondary),
+                  Text(detail, style: EllaTypography.of(context).secondary),
                 ],
               ),
             ),
@@ -3983,11 +4291,11 @@ class TodayStatusStrip extends StatelessWidget {
   final String audioOutputName;
   final VoidCallback onTap;
 
-  Color get _necklaceDot => necklaceConnecting
-      ? EllaColors.warning
+  Color _necklaceDot(BuildContext context) => necklaceConnecting
+      ? EllaPalette.of(context).warning
       : necklaceConnected
-          ? (batteryLevel >= 0 && batteryLevel < 20 ? EllaColors.warning : EllaColors.teal)
-          : EllaColors.inkSoft;
+      ? (batteryLevel >= 0 && batteryLevel < 20 ? EllaPalette.of(context).warning : EllaPalette.of(context).teal)
+      : EllaPalette.of(context).inkSoft;
 
   String _necklaceLabel(BuildContext context) {
     if (!hasNecklace) return context.l10n.todayPhoneOnly;
@@ -4002,7 +4310,7 @@ class TodayStatusStrip extends StatelessWidget {
     final glyphSize = scale >= 1.45 ? 28.0 : 24.0;
     final dotSize = scale >= 1.45 ? 10.0 : 8.0;
     final necklaceGlyph = hasNecklace ? EllaHardwareArtwork.glyphForDeviceType(deviceType) : null;
-    final labelStyle = EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w600);
+    final labelStyle = EllaTypography.of(context).caption.copyWith(fontWeight: FontWeight.w600);
     return EllaCardSurface(
       borderRadius: 14,
       child: InkWell(
@@ -4016,22 +4324,24 @@ class TodayStatusStrip extends StatelessWidget {
             child: Row(
               children: [
                 if (!hasNecklace)
-                  Icon(Icons.phone_iphone_rounded, size: glyphSize, color: EllaColors.tealDeep)
+                  Icon(Icons.phone_iphone_rounded, size: glyphSize, color: EllaPalette.of(context).tealDeep)
                 else if (necklaceGlyph != null)
                   Image.asset(necklaceGlyph, width: glyphSize, height: glyphSize)
                 else
-                  Icon(Icons.circle_outlined, size: glyphSize, color: EllaColors.ink),
+                  Icon(Icons.circle_outlined, size: glyphSize, color: EllaPalette.of(context).ink),
                 const SizedBox(width: 8),
-                _StatusDot(color: hasNecklace ? _necklaceDot : EllaColors.teal, size: dotSize),
+                _StatusDot(color: hasNecklace ? _necklaceDot(context) : EllaPalette.of(context).teal, size: dotSize),
                 const SizedBox(width: 8),
                 Text(
                   _necklaceLabel(context),
-                  style: labelStyle.copyWith(color: necklaceConnecting ? EllaColors.warning : EllaColors.inkSoft),
+                  style: labelStyle.copyWith(
+                    color: necklaceConnecting ? EllaPalette.of(context).warning : EllaPalette.of(context).inkSoft,
+                  ),
                 ),
                 Container(
                   width: 1,
                   height: 20,
-                  color: EllaColors.cardDeep,
+                  color: EllaPalette.of(context).cardDeep,
                   margin: const EdgeInsets.symmetric(horizontal: 8),
                 ),
                 Opacity(
@@ -4039,17 +4349,20 @@ class TodayStatusStrip extends StatelessWidget {
                   child: Image.asset(EllaHardwareArtwork.whisperHeadsetGlyph, width: glyphSize, height: glyphSize),
                 ),
                 const SizedBox(width: 8),
-                _StatusDot(color: headsetConnected ? EllaColors.teal : EllaColors.inkSoft, size: dotSize),
+                _StatusDot(
+                  color: headsetConnected ? EllaPalette.of(context).teal : EllaPalette.of(context).inkSoft,
+                  size: dotSize,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     headsetConnected ? audioOutputName : context.l10n.todayStripPhoneSpeaker,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: labelStyle.copyWith(color: EllaColors.inkSoft),
+                    style: labelStyle.copyWith(color: EllaPalette.of(context).inkSoft),
                   ),
                 ),
-                const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft, size: 20),
+                Icon(Icons.chevron_right_rounded, color: EllaPalette.of(context).inkSoft, size: 20),
               ],
             ),
           ),
@@ -4127,14 +4440,14 @@ class TodayActionableDeviceCard extends StatelessWidget {
                       children: [
                         Text(
                           necklaceConnecting ? context.l10n.todayNecklaceReconnectingTitle : context.l10n.todayNecklace,
-                          style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
+                          style: EllaTypography.of(context).body.copyWith(fontWeight: FontWeight.w600),
                         ),
                         const SizedBox(height: 2),
                         Text(
                           necklaceConnecting
                               ? context.l10n.todayNecklaceReconnectingBody
                               : context.l10n.todayNecklaceOffReconnect,
-                          style: EllaTextStyles.secondary.copyWith(color: EllaColors.inkSoft),
+                          style: EllaTypography.of(context).secondary.copyWith(color: EllaPalette.of(context).inkSoft),
                         ),
                       ],
                     ),
@@ -4147,21 +4460,20 @@ class TodayActionableDeviceCard extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                 decoration: BoxDecoration(
-                  color: EllaColors.cardDeep,
+                  color: EllaPalette.of(context).cardDeep,
                   borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Icon(Icons.volume_up_rounded, color: EllaColors.warning, size: 18),
+                    Icon(Icons.volume_up_rounded, color: EllaPalette.of(context).warning, size: 18),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
                         context.l10n.todayHeadsetFallbackWarning,
-                        style: EllaTextStyles.secondary.copyWith(
-                          color: EllaColors.warning,
-                          fontWeight: FontWeight.w600,
-                        ),
+                        style: EllaTypography.of(
+                          context,
+                        ).secondary.copyWith(color: EllaPalette.of(context).warning, fontWeight: FontWeight.w600),
                       ),
                     ),
                   ],
@@ -4171,7 +4483,7 @@ class TodayActionableDeviceCard extends StatelessWidget {
             if (necklaceIssue) ...[
               const SizedBox(height: 12),
               Material(
-                color: EllaColors.cardDeep,
+                color: EllaPalette.of(context).cardDeep,
                 borderRadius: BorderRadius.circular(24),
                 child: InkWell(
                   key: const Key('help-reconnect'),
@@ -4182,10 +4494,9 @@ class TodayActionableDeviceCard extends StatelessWidget {
                     child: Center(
                       child: Text(
                         context.l10n.todayHelpReconnect,
-                        style: EllaTextStyles.secondary.copyWith(
-                          color: EllaColors.tealDeep,
-                          fontWeight: FontWeight.w700,
-                        ),
+                        style: EllaTypography.of(
+                          context,
+                        ).secondary.copyWith(color: EllaPalette.of(context).tealDeep, fontWeight: FontWeight.w700),
                       ),
                     ),
                   ),
@@ -4199,6 +4510,8 @@ class TodayActionableDeviceCard extends StatelessWidget {
   }
 }
 
+// Legacy gallery helpers remain for archive compatibility.
+// ignore: unused_element
 class _MemoryFallbackArtwork extends StatelessWidget {
   const _MemoryFallbackArtwork();
 
@@ -4220,27 +4533,21 @@ class _MemoryJournalEmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return EllaCardSurface(
+    return Padding(
       key: const Key('memory-journal-empty'),
-      borderRadius: 20,
-      color: EllaColors.elevatedCard,
+      padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 20),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const AspectRatio(aspectRatio: 2.4, child: _MemoryFallbackArtwork()),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 22),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  context.l10n.todayMemoryCanvasEmptyHeadline,
-                  style: EllaTextStyles.noteBody.copyWith(fontSize: 23, height: 1.15),
-                ),
-                const SizedBox(height: 8),
-                Text(context.l10n.todayMemoryCanvasEmptyBody, style: EllaTextStyles.secondary),
-              ],
-            ),
+          Text(
+            context.l10n.irisThingsKept,
+            textAlign: TextAlign.center,
+            style: EllaTypography.of(context).body.copyWith(fontSize: 16, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            context.l10n.irisReminderExample,
+            textAlign: TextAlign.center,
+            style: EllaTypography.of(context).secondary.copyWith(fontSize: 15),
           ),
         ],
       ),
@@ -4257,7 +4564,7 @@ class _MemoryJournalLoadingState extends StatelessWidget {
     return EllaCardSurface(
       key: const Key('memory-journal-loading'),
       borderRadius: 20,
-      color: EllaColors.elevatedCard,
+      color: EllaPalette.of(context).elevatedCard,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 24, 20, 26),
         child: Row(
@@ -4266,7 +4573,7 @@ class _MemoryJournalLoadingState extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(top: 2),
               child: reduceMotion
-                  ? const Icon(Icons.auto_awesome_rounded, color: EllaColors.tealDeep)
+                  ? Icon(Icons.auto_awesome_rounded, color: EllaPalette.of(context).tealDeep)
                   : const EllaBreathingDot(active: true, live: true),
             ),
             const SizedBox(width: 14),
@@ -4276,10 +4583,10 @@ class _MemoryJournalLoadingState extends StatelessWidget {
                 children: [
                   Text(
                     context.l10n.todayMemoryCanvasLoadingHeadline,
-                    style: EllaTextStyles.noteBody.copyWith(fontSize: 23, height: 1.15),
+                    style: EllaTypography.of(context).noteBody.copyWith(fontSize: 23, height: 1.15),
                   ),
                   const SizedBox(height: 8),
-                  Text(context.l10n.todayMemoryCanvasLoadingBody, style: EllaTextStyles.secondary),
+                  Text(context.l10n.todayMemoryCanvasLoadingBody, style: EllaTypography.of(context).secondary),
                 ],
               ),
             ),

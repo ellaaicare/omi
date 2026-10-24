@@ -88,6 +88,11 @@ void main() {
     );
   });
 
+  test('literal Hermes timeout frame is typed and never becomes assistant content', () {
+    expect(() => parseMessageChunk('data: Error: Hermes request timed out', 'synthetic-timeout'),
+        throwsA(isA<ClientApiFailure>().having((failure) => failure.kind, 'kind', ClientApiFailureKind.unavailable)));
+  });
+
   test('self-hosted provisioning failure is a typed workspace failure', () {
     final failure = ClientApiFailure.fromHttp(
       statusCode: 409,
@@ -342,6 +347,28 @@ void main() {
       sendVoiceMessageStreamServer([file]),
       ClientApiFailureKind.incompleteStream,
     );
+  });
+
+  test('SSE framing is invariant at every UTF-8 byte split for LF and CRLF events', () async {
+    for (final delimiter in ['\n', '\r\n']) {
+      final wire = ': heartbeat\n\ndata: Café 🪴\n\n${_doneFrame("Café 🪴")}'.replaceAll('\n', delimiter);
+      final bytes = utf8.encode(wire);
+      for (var split = 0; split <= bytes.length; split++) {
+        HttpPoolManager.instance.replaceClientForTesting(_StreamingClient((_) async =>
+            http.StreamedResponse(Stream.fromIterable([bytes.sublist(0, split), bytes.sublist(split)]), 200)));
+        final chunks = await sendEllaMessageStream('Synthetic framing test').toList();
+        expect(chunks.map((chunk) => chunk.type), [MessageChunkType.data, MessageChunkType.done],
+            reason: 'delimiter=$delimiter byte split=$split');
+        expect(chunks.first.text, 'Café 🪴');
+        expect(chunks.last.message?.text, 'Café 🪴');
+      }
+    }
+  });
+
+  test('unterminated done frame is an incomplete stream, never a completed reply', () async {
+    _installStreamResponse(['data: Synthetic reply\n\n', _doneFrame('Synthetic reply').trimRight()]);
+    await _expectNoReleasedChunks(
+        sendEllaMessageStream('Synthetic framing test'), ClientApiFailureKind.incompleteStream);
   });
 
   test('fragmented text data is released only with a valid terminal done frame', () async {

@@ -827,8 +827,12 @@ void main() {
   });
 
   test('primary memories finish loading while failed-summary request is still pending', () async {
+    final readAuthority = _MutableAuthority('fixture-summary-reader');
+    SharedPreferencesUtil().uid = readAuthority.uid;
     final failedRequest = Completer<ConversationsFetchResult>();
     final provider = ConversationProvider(
+      activeAuthority: () => readAuthority,
+      authenticatedUid: () => readAuthority.uid,
       conversationsFetchCall: () async => ConversationsFetchResult.success([conversation('recent')]),
       failedConversationsFetchCall: () => failedRequest.future,
     );
@@ -848,6 +852,8 @@ void main() {
   });
 
   test('failed-summary refresh updates separately after primary memories load', () async {
+    final readAuthority = _MutableAuthority('fixture-summary-reader');
+    SharedPreferencesUtil().uid = readAuthority.uid;
     final failedRequest = Completer<ConversationsFetchResult>();
     final startedAt = DateTime.parse('2026-07-08T19:00:00Z');
     final failedWithReason = ServerConversation(
@@ -860,6 +866,8 @@ void main() {
       processingError: 'conversation_summary_failed',
     );
     final provider = ConversationProvider(
+      activeAuthority: () => readAuthority,
+      authenticatedUid: () => readAuthority.uid,
       conversationsFetchCall: () async => ConversationsFetchResult.success([conversation('recent')]),
       failedConversationsFetchCall: () => failedRequest.future,
     );
@@ -876,8 +884,12 @@ void main() {
   });
 
   test('primary memory timeout releases the loading state', () async {
+    final readAuthority = _MutableAuthority('fixture-summary-reader');
+    SharedPreferencesUtil().uid = readAuthority.uid;
     final primaryRequest = Completer<ConversationsFetchResult>();
     final provider = ConversationProvider(
+      activeAuthority: () => readAuthority,
+      authenticatedUid: () => readAuthority.uid,
       conversationsFetchCall: () => primaryRequest.future,
       failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
       conversationsFetchTimeout: const Duration(milliseconds: 10),
@@ -897,10 +909,14 @@ void main() {
   });
 
   test('stale background refresh cannot clear a newer primary loading state', () async {
+    final readAuthority = _MutableAuthority('fixture-summary-reader');
+    SharedPreferencesUtil().uid = readAuthority.uid;
     final staleRequest = Completer<ConversationsFetchResult>();
     final currentRequest = Completer<ConversationsFetchResult>();
     var requestCount = 0;
     final provider = ConversationProvider(
+      activeAuthority: () => readAuthority,
+      authenticatedUid: () => readAuthority.uid,
       conversationsFetchCall: () {
         requestCount += 1;
         return requestCount == 1 ? staleRequest.future : currentRequest.future;
@@ -935,6 +951,8 @@ void main() {
   });
 
   test('incremental refresh replaces a completed summary and preserves paginated history and cache', () async {
+    final readAuthority = _MutableAuthority('uid-a');
+    SharedPreferencesUtil().uid = readAuthority.uid;
     SharedPreferencesUtil().uid = 'uid-a';
     final updated = ServerConversation(
       id: 'current',
@@ -944,6 +962,8 @@ void main() {
       enrichmentState: {'status': 'writeback_applied'},
     );
     final provider = ConversationProvider(
+      activeAuthority: () => readAuthority,
+      authenticatedUid: () => readAuthority.uid,
       conversationsFetchCall: () async => ConversationsFetchResult.success([updated]),
       failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
     )..conversations = [conversation('current'), conversation('older-page')];
@@ -962,10 +982,12 @@ void main() {
           () async {
         SharedPreferencesUtil().uid = 'uid-a';
         final authority = _MutableAuthority('uid-a');
+        SharedPreferencesUtil().uid = authority.uid;
         final deleted = conversation('deleted');
         final response = Completer<ConversationsFetchResult>();
         final provider = ConversationProvider(
           activeAuthority: () => authority,
+          authenticatedUid: () => authority.uid,
           conversationsFetchCall: () => response.future,
           failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
           conversationDeleteCall: (_, __) async => deleteSucceeds,
@@ -990,11 +1012,13 @@ void main() {
     test('$refreshName list from before account reset cannot restore deleted state or cache', () async {
       SharedPreferencesUtil().uid = 'uid-a';
       var authority = _MutableAuthority('uid-a');
+      SharedPreferencesUtil().uid = authority.uid;
       final deleted = conversation('same-id');
       final oldResponse = Completer<ConversationsFetchResult>();
       var requests = 0;
       final provider = ConversationProvider(
         activeAuthority: () => authority,
+        authenticatedUid: () => authority.uid,
         conversationsFetchCall: () => ++requests == 1
             ? oldResponse.future
             : Future.value(ConversationsFetchResult.success([conversation('same-id')])),
@@ -1025,11 +1049,13 @@ void main() {
 
   test('later page excludes confirmed deleted records without changing raw server offsets', () async {
     final authority = _MutableAuthority('uid-a');
+    SharedPreferencesUtil().uid = authority.uid;
     final deleted = conversation('deleted');
     final offsets = <int>[];
     final stalePage = [deleted, ...List.generate(49, (index) => conversation('page-$index'))];
     final provider = ConversationProvider(
       activeAuthority: () => authority,
+      authenticatedUid: () => authority.uid,
       conversationDeleteCall: (_, __) async => true,
       conversationsPageFetchCall: ({required limit, required offset}) async {
         offsets.add(offset);
@@ -1048,6 +1074,7 @@ void main() {
 
   test('deferred failed-summary list cannot restore a confirmed deleted failure', () async {
     final authority = _MutableAuthority('uid-a');
+    SharedPreferencesUtil().uid = authority.uid;
     final deleted = ServerConversation(
       id: 'deleted-failure',
       createdAt: DateTime.parse('2026-07-08T19:00:00Z'),
@@ -1058,6 +1085,7 @@ void main() {
     final response = Completer<ConversationsFetchResult>();
     final provider = ConversationProvider(
       activeAuthority: () => authority,
+      authenticatedUid: () => authority.uid,
       conversationsFetchCall: () async => const ConversationsFetchResult.success([]),
       failedConversationsFetchCall: () => response.future,
       conversationDeleteCall: (_, __) async => true,
@@ -1096,6 +1124,7 @@ void main() {
 
   test('memory pagination deduplicates shifted pages and records the terminal page', () async {
     final authority = _MutableAuthority('uid-a');
+    SharedPreferencesUtil().uid = authority.uid;
     final initial = List.generate(50, (index) => conversation('memory-$index'));
     final refreshedDuplicate = ServerConversation(
       id: 'memory-0',
@@ -1104,6 +1133,7 @@ void main() {
     );
     final provider = ConversationProvider(
       activeAuthority: () => authority,
+      authenticatedUid: () => authority.uid,
       conversationsPageFetchCall: ({required limit, required offset}) async {
         expect(limit, 50);
         expect(offset, 50);
@@ -1127,9 +1157,11 @@ void main() {
 
   test('failed memory page is non-destructive and can be retried', () async {
     final authority = _MutableAuthority('uid-a');
+    SharedPreferencesUtil().uid = authority.uid;
     var requests = 0;
     final provider = ConversationProvider(
       activeAuthority: () => authority,
+      authenticatedUid: () => authority.uid,
       conversationsPageFetchCall: ({required limit, required offset}) async {
         requests += 1;
         return requests == 1
@@ -1154,10 +1186,12 @@ void main() {
 
   test('memory pagination advances the server offset when a full page contains only duplicates', () async {
     final authority = _MutableAuthority('uid-a');
+    SharedPreferencesUtil().uid = authority.uid;
     final initial = List.generate(50, (index) => conversation('memory-$index'));
     final requestedOffsets = <int>[];
     final provider = ConversationProvider(
       activeAuthority: () => authority,
+      authenticatedUid: () => authority.uid,
       conversationsPageFetchCall: ({required limit, required offset}) async {
         requestedOffsets.add(offset);
         if (offset == 50) return ConversationsFetchResult.success(initial);
@@ -1179,10 +1213,12 @@ void main() {
 
   test('confirmed deletion contracts the consumed offset before requesting the next page', () async {
     final authority = _MutableAuthority('uid-a');
+    SharedPreferencesUtil().uid = authority.uid;
     final initial = List.generate(50, (index) => conversation('memory-$index'));
     final requestedOffsets = <int>[];
     final provider = ConversationProvider(
       activeAuthority: () => authority,
+      authenticatedUid: () => authority.uid,
       conversationsFetchCall: () async => ConversationsFetchResult.success(initial),
       failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
       conversationDeleteCall: (_, __) async => true,
@@ -1204,11 +1240,13 @@ void main() {
 
   test('confirmed deletion invalidates an in-flight page that used the pre-delete offset', () async {
     final authority = _MutableAuthority('uid-a');
+    SharedPreferencesUtil().uid = authority.uid;
     final initial = List.generate(50, (index) => conversation('memory-$index'));
     final stalePage = Completer<ConversationsFetchResult>();
     final requestedOffsets = <int>[];
     final provider = ConversationProvider(
       activeAuthority: () => authority,
+      authenticatedUid: () => authority.uid,
       conversationsFetchCall: () async => ConversationsFetchResult.success(initial),
       failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
       conversationDeleteCall: (_, __) async => true,
@@ -1237,9 +1275,11 @@ void main() {
 
   test('account transition discards a delayed memory page and clears loading state', () async {
     final authority = _MutableAuthority('uid-a');
+    SharedPreferencesUtil().uid = authority.uid;
     final response = Completer<ConversationsFetchResult>();
     final provider = ConversationProvider(
       activeAuthority: () => authority,
+      authenticatedUid: () => authority.uid,
       conversationsPageFetchCall: ({required limit, required offset}) => response.future,
     )
       ..conversations = [conversation('account-a-memory')]

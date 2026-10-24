@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
@@ -33,7 +34,9 @@ import 'package:omi/widgets/text_selection_controls.dart';
 import 'chart_message_widget.dart';
 import 'markdown_message_widget.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/widgets/ella_memory_chat_card.dart';
 import 'package:omi/ella/widgets/ella_thinking_indicator.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 /// Parse app_id from thinking text (format: "text|app_id:app_id")
 String? parseAppIdFromThinking(String thinkingText) {
@@ -91,13 +94,13 @@ Widget _buildAppIcon(BuildContext context, String appId, {double size = 15, doub
             child: Icon(
               Icons.apps,
               size: size * 0.7,
-              color: EllaColors.textTertiary.withOpacity(opacity),
+              color: EllaPalette.of(context).textTertiary.withOpacity(opacity),
             ),
           ),
           errorWidget: (context, url, error) => Icon(
             Icons.apps,
             size: size * 0.7,
-            color: EllaColors.textTertiary.withOpacity(opacity),
+            color: EllaPalette.of(context).textTertiary.withOpacity(opacity),
           ),
         ),
       ),
@@ -110,7 +113,7 @@ Widget _buildAppIcon(BuildContext context, String appId, {double size = 15, doub
     child: Icon(
       Icons.apps,
       size: size,
-      color: EllaColors.textTertiary.withOpacity(opacity),
+      color: EllaPalette.of(context).textTertiary.withOpacity(opacity),
     ),
   );
 }
@@ -251,11 +254,16 @@ Widget buildMessageWidget(
   Function(int, {String? reason}) sendMessageNps, {
   Function(String)? onAskOmi,
 }) {
-  if (message.memories.isNotEmpty) {
+  final displayText = message.sender == MessageSender.ai
+      ? stripEllaDisplayPrefix(message.text.decodeString)
+      : message.text.decodeString;
+  if (message.isCanonicalMemoryArtifact) {
+    return EllaMemoryChatCard(message: message);
+  } else if (message.memories.isNotEmpty) {
     return MemoriesMessageWidget(
         showTypingIndicator: showTypingIndicator,
         messageMemories: message.memories.length > 3 ? message.memories.sublist(0, 3) : message.memories,
-        messageText: message.isEmpty ? '...' : message.text.decodeString,
+        messageText: message.isEmpty ? '...' : displayText,
         updateConversation: updateConversation,
         message: message,
         setMessageNps: sendMessageNps,
@@ -263,11 +271,11 @@ Widget buildMessageWidget(
         onAskOmi: onAskOmi);
   } else if (message.type == MessageType.daySummary) {
     return DaySummaryWidget(
-        showTypingIndicator: showTypingIndicator, messageText: message.text.decodeString, date: message.createdAt);
+        showTypingIndicator: showTypingIndicator, messageText: displayText, date: message.createdAt);
   } else if (displayOptions) {
     return InitialMessageWidget(
       showTypingIndicator: showTypingIndicator,
-      messageText: message.text.decodeString,
+      messageText: displayText,
       sendMessage: sendMessage,
       onAskOmi: onAskOmi,
     );
@@ -275,7 +283,7 @@ Widget buildMessageWidget(
     return NormalMessageWidget(
       showTypingIndicator: showTypingIndicator,
       thinkings: message.thinkings,
-      messageText: message.text.decodeString,
+      messageText: displayText,
       message: message,
       setMessageNps: sendMessageNps,
       createdAt: message.createdAt,
@@ -343,7 +351,7 @@ class DaySummaryWidget extends StatelessWidget {
           style: TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.w500,
-            color: EllaColors.textSecondary,
+            color: EllaPalette.of(context).textSecondary,
             decoration: TextDecoration.underline,
           ),
         ),
@@ -401,16 +409,16 @@ class DaySummaryWidget extends StatelessWidget {
             style: TextStyle(
               fontSize: 15,
               fontWeight: FontWeight.bold,
-              color: EllaColors.textTertiary,
+              color: EllaPalette.of(context).textTertiary,
             ),
           ),
           title: AutoSizeText(
             sentences[index],
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 16.0,
               fontWeight: FontWeight.w500,
               height: 1.35,
-              color: EllaColors.textPrimary,
+              color: EllaPalette.of(context).textPrimary,
             ),
             softWrap: true,
             maxLines: 3,
@@ -451,15 +459,15 @@ class _NormalMessageWidgetState extends State<NormalMessageWidget> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       child: ShimmerWithTimeout(
-        baseColor: EllaColors.bgSecondary,
-        highlightColor: EllaColors.bgTertiary,
+        baseColor: EllaPalette.of(context).bgSecondary,
+        highlightColor: EllaPalette.of(context).bgTertiary,
         timeoutSeconds: 15,
         child: Container(
           height: 236,
           decoration: BoxDecoration(
-            color: EllaColors.bgSecondary,
+            color: EllaPalette.of(context).bgSecondary,
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: EllaColors.bgTertiary),
+            border: Border.all(color: EllaPalette.of(context).bgTertiary),
           ),
         ),
       ),
@@ -482,17 +490,17 @@ class _NormalMessageWidgetState extends State<NormalMessageWidget> {
             : Align(
                 alignment: Alignment.centerLeft,
                 child: FractionallySizedBox(
-                  widthFactor: 0.78,
+                  widthFactor: 0.90,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
-                      color: EllaColors.card,
-                      border: Border.all(color: EllaColors.cardDeep),
+                      color: Colors.transparent,
+                      border: Border.all(color: EllaPalette.of(context).cardEdge),
                       borderRadius: const BorderRadius.only(
-                        topLeft: Radius.circular(18),
-                        topRight: Radius.circular(18),
-                        bottomLeft: Radius.circular(4),
-                        bottomRight: Radius.circular(18),
+                        topLeft: Radius.circular(20),
+                        topRight: Radius.circular(20),
+                        bottomLeft: Radius.circular(6),
+                        bottomRight: Radius.circular(20),
                       ),
                     ),
                     child: Builder(
@@ -511,17 +519,18 @@ class _NormalMessageWidgetState extends State<NormalMessageWidget> {
                             );
                           },
                           child: widget.messageText.trim() == "Good morning — I'm here."
-                              ? const Text(
+                              ? Text(
                                   "Good morning — I'm here.",
                                   style: TextStyle(
                                     fontFamily: EllaTextStyles.noteFont,
                                     fontSize: 18,
                                     fontWeight: FontWeight.w400,
                                     height: 1.45,
-                                    color: EllaColors.ink,
+                                    color: EllaPalette.of(context).ink,
                                   ),
                                 )
-                              : getMarkdownWidget(context, widget.messageText, onAskOmi: widget.onAskOmi),
+                              : getMarkdownWidget(context, widget.messageText,
+                                  onAskOmi: widget.onAskOmi, fontSize: 16.5),
                         );
                       },
                     ),
@@ -549,6 +558,13 @@ class MemoriesMessageWidget extends StatefulWidget {
   final Function(int, {String? reason}) setMessageNps;
   final DateTime date;
   final Function(String)? onAskOmi;
+  @visibleForTesting
+  final ExactAccountAuthorityVerifier? Function()? sourceAuthorityProvider;
+  @visibleForTesting
+  final Future<ServerConversation?> Function(String id,
+      {required String expectedAuthenticatedUid, required ExactAccountAuthorityVerifier exactAuthority})? sourceLoader;
+  @visibleForTesting
+  final Future<void> Function(BuildContext, ServerConversation)? sourcePresenter;
 
   const MemoriesMessageWidget({
     super.key,
@@ -560,6 +576,9 @@ class MemoriesMessageWidget extends StatefulWidget {
     required this.setMessageNps,
     required this.date,
     this.onAskOmi,
+    this.sourceAuthorityProvider,
+    this.sourceLoader,
+    this.sourcePresenter,
   });
 
   @override
@@ -568,11 +587,16 @@ class MemoriesMessageWidget extends StatefulWidget {
 
 class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
   late List<bool> conversationDetailLoading;
+  late final ExactAccountAuthorityVerifier? _sourceAuthority;
+  List<String> _boundReferenceIds = [];
+  int _referenceGeneration = 0;
   bool _showDots = true;
   Timer? _dotsTimer;
 
   @override
   void initState() {
+    _sourceAuthority = (widget.sourceAuthorityProvider ?? WalOwnerAuthority.active)();
+    _boundReferenceIds = widget.messageMemories.map((m) => m.id).toList();
     conversationDetailLoading = List.filled(widget.messageMemories.length, false);
     if (widget.showTypingIndicator && widget.messageText == '...' && widget.message.thinkings.isEmpty) {
       _dotsTimer = Timer(const Duration(milliseconds: 500), () {
@@ -587,6 +611,18 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
   }
 
   @override
+  void didUpdateWidget(covariant MemoriesMessageWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final ids = widget.messageMemories.map((m) => m.id).toList();
+    if (!identical(oldWidget.message, widget.message) ||
+        !const ListEquality<String>().equals(ids, _boundReferenceIds)) {
+      _referenceGeneration++;
+      _boundReferenceIds = ids;
+      conversationDetailLoading = List.filled(ids.length, false);
+    }
+  }
+
+  @override
   void dispose() {
     _dotsTimer?.cancel();
     super.dispose();
@@ -596,15 +632,15 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       child: ShimmerWithTimeout(
-        baseColor: EllaColors.bgSecondary,
-        highlightColor: EllaColors.bgTertiary,
+        baseColor: EllaPalette.of(context).bgSecondary,
+        highlightColor: EllaPalette.of(context).bgTertiary,
         timeoutSeconds: 15,
         child: Container(
           height: 236,
           decoration: BoxDecoration(
-            color: EllaColors.bgSecondary,
+            color: EllaPalette.of(context).bgSecondary,
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: EllaColors.bgTertiary),
+            border: Border.all(color: EllaPalette.of(context).bgTertiary),
           ),
         ),
       ),
@@ -624,209 +660,258 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
         thinkingText != null || (!_showDots && widget.showTypingIndicator && widget.messageText == '...');
     String displayThinkingText = thinkingText ?? 'Thinking';
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Padding(
-        //   padding: const EdgeInsets.only(bottom: 4.0),
-        //   child: Text(
-        //     formatChatTimestamp(widget.date),
-        //     style: TextStyle(
-        //       color: Colors.grey.shade500,
-        //       fontSize: 12,
-        //     ),
-        //   ),
-        // ),
-        widget.showTypingIndicator && widget.messageText == '...'
-            ? Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    shouldShowThinking
-                        ? Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.start,
-                              children: [
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    // Icon stays outside shimmer to preserve colors (app icon or integration logo)
-                                    if (currentAppId != null) ...[
-                                      _buildAppIcon(context, currentAppId, size: 15),
-                                      const SizedBox(width: 6),
-                                    ] else ...[
-                                      _buildThinkingIconWidget(displayThinkingText, size: 15),
-                                      const SizedBox(width: 6),
-                                    ],
-                                    // Shimmer only applies to text
-                                    Flexible(
-                                      child: ShimmerWithTimeout(
-                                        baseColor: EllaColors.textPrimary,
-                                        highlightColor: EllaColors.textTertiary,
-                                        child: Text(
-                                          overflow: TextOverflow.fade,
-                                          maxLines: 1,
-                                          softWrap: false,
-                                          displayThinkingText,
-                                          style: const TextStyle(color: EllaColors.textPrimary, fontSize: 15),
+    final renderedMessage = widget.message;
+    final renderedReferences = List<MessageConversation>.of(widget.messageMemories);
+    final renderedGeneration = _referenceGeneration;
+    return Container(
+      key: const Key('iris-assistant-kept-bubble'),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.transparent,
+        border: Border.all(color: EllaPalette.of(context).cardEdge),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Padding(
+          //   padding: const EdgeInsets.only(bottom: 4.0),
+          //   child: Text(
+          //     formatChatTimestamp(widget.date),
+          //     style: TextStyle(
+          //       color: Colors.grey.shade500,
+          //       fontSize: 12,
+          //     ),
+          //   ),
+          // ),
+          widget.showTypingIndicator && widget.messageText == '...'
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      shouldShowThinking
+                          ? Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisAlignment: MainAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      // Icon stays outside shimmer to preserve colors (app icon or integration logo)
+                                      if (currentAppId != null) ...[
+                                        _buildAppIcon(context, currentAppId, size: 15),
+                                        const SizedBox(width: 6),
+                                      ] else ...[
+                                        _buildThinkingIconWidget(displayThinkingText, size: 15),
+                                        const SizedBox(width: 6),
+                                      ],
+                                      // Shimmer only applies to text
+                                      Flexible(
+                                        child: ShimmerWithTimeout(
+                                          baseColor: EllaPalette.of(context).textPrimary,
+                                          highlightColor: EllaPalette.of(context).textTertiary,
+                                          child: Text(
+                                            overflow: TextOverflow.fade,
+                                            maxLines: 1,
+                                            softWrap: false,
+                                            displayThinkingText,
+                                            style: TextStyle(color: EllaPalette.of(context).textPrimary, fontSize: 15),
+                                          ),
                                         ),
                                       ),
-                                    ),
-                                  ],
-                                )
-                              ],
-                            ),
-                          )
-                        : const TypingIndicator(),
-                  ],
-                ))
-            : widget.showTypingIndicator
-                ? const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.start,
-                    children: [
-                      SizedBox(width: 4),
-                      TypingIndicator(),
-                      Spacer(),
+                                    ],
+                                  )
+                                ],
+                              ),
+                            )
+                          : const TypingIndicator(),
                     ],
-                  )
-                : Builder(
-                    builder: (context) {
-                      String? selectedText;
-                      return SelectionArea(
-                        onSelectionChanged: (SelectedContent? selectedContent) {
-                          selectedText = selectedContent?.plainText;
-                        },
-                        contextMenuBuilder: (context, selectableRegionState) {
-                          return omiSelectionMenuBuilder(
-                            context,
-                            selectableRegionState,
-                            (text) {
-                              widget.onAskOmi?.call(text);
-                            },
-                            selectedText: selectedText,
-                          );
-                        },
-                        child: getMarkdownWidget(context, widget.messageText, onAskOmi: widget.onAskOmi),
-                      );
-                    },
-                  ),
-        if (widget.messageText.isNotEmpty && widget.messageText != '...' && !widget.showTypingIndicator)
-          MessageActionBar(
-            messageText: widget.messageText,
-            setMessageNps: widget.setMessageNps,
-            currentNps: widget.message.rating,
-          ),
-        if (widget.message.chartData != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: ChartMessageWidget(chartData: widget.message.chartData!),
-          )
-        else if (widget.showTypingIndicator && widget.message.thinkings.any((t) => t.toLowerCase().contains('chart')))
-          _buildChartShimmer(),
-        const SizedBox(height: 16),
-        for (var data in widget.messageMemories.indexed) ...[
-          Padding(
-            padding: const EdgeInsetsDirectional.fromSTEB(0.0, 4.0, 0.0, 4.0),
-            child: GestureDetector(
-              onTap: () async {
-                final connectivityProvider = Provider.of<ConnectivityProvider>(context, listen: false);
-                if (connectivityProvider.isConnected) {
-                  var memProvider = Provider.of<ConversationProvider>(context, listen: false);
-                  var idx = -1;
-                  var date = DateTime(data.$2.createdAt.year, data.$2.createdAt.month, data.$2.createdAt.day);
-                  idx = memProvider.groupedConversations[date]?.indexWhere((element) => element.id == data.$2.id) ?? -1;
-
-                  if (idx != -1) {
-                    context.read<ConversationDetailProvider>().updateConversation(data.$2.id, date);
-                    var m = memProvider.groupedConversations[date]![idx];
-                    MixpanelManager().chatMessageConversationClicked(m);
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (c) => ConversationDetailPage(
-                          conversation: m,
-                        ),
-                      ),
-                    );
-                  } else {
+                  ))
+              : widget.showTypingIndicator
+                  ? const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.start,
+                      children: [
+                        SizedBox(width: 4),
+                        TypingIndicator(),
+                        Spacer(),
+                      ],
+                    )
+                  : Builder(
+                      builder: (context) {
+                        String? selectedText;
+                        return SelectionArea(
+                          onSelectionChanged: (SelectedContent? selectedContent) {
+                            selectedText = selectedContent?.plainText;
+                          },
+                          contextMenuBuilder: (context, selectableRegionState) {
+                            return omiSelectionMenuBuilder(
+                              context,
+                              selectableRegionState,
+                              (text) {
+                                widget.onAskOmi?.call(text);
+                              },
+                              selectedText: selectedText,
+                            );
+                          },
+                          child:
+                              getMarkdownWidget(context, widget.messageText, onAskOmi: widget.onAskOmi, fontSize: 16.5),
+                        );
+                      },
+                    ),
+          if (widget.messageText.isNotEmpty && widget.messageText != '...' && !widget.showTypingIndicator)
+            MessageActionBar(
+              messageText: widget.messageText,
+              setMessageNps: widget.setMessageNps,
+              currentNps: widget.message.rating,
+            ),
+          if (widget.message.chartData != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: ChartMessageWidget(chartData: widget.message.chartData!),
+            )
+          else if (widget.showTypingIndicator && widget.message.thinkings.any((t) => t.toLowerCase().contains('chart')))
+            _buildChartShimmer(),
+          const SizedBox(height: 16),
+          for (var data in renderedReferences.indexed) ...[
+            Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(0.0, 4.0, 0.0, 4.0),
+              child: GestureDetector(
+                onTap: () async {
+                  final originMessage = renderedMessage;
+                  final sourceId = data.$2.id;
+                  final owner = _sourceAuthority;
+                  bool current() =>
+                      mounted &&
+                      renderedGeneration == _referenceGeneration &&
+                      owner?.isExactCurrent() == true &&
+                      identical(widget.message, originMessage) &&
+                      data.$1 < widget.messageMemories.length &&
+                      widget.messageMemories[data.$1].id == sourceId;
+                  if (!current()) return;
+                  if (widget.sourceLoader != null) {
                     if (conversationDetailLoading[data.$1]) return;
                     setState(() => conversationDetailLoading[data.$1] = true);
-                    ServerConversation? m = await getConversationById(data.$2.id);
-                    if (m == null) return;
-                    (idx, date) = memProvider.addConversationWithDateGrouped(m);
-                    MixpanelManager().chatMessageConversationClicked(m);
-                    setState(() => conversationDetailLoading[data.$1] = false);
-                    context.read<ConversationDetailProvider>().updateConversation(m.id, date);
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (c) => ConversationDetailPage(
-                          conversation: m,
+                    try {
+                      final memory = await widget.sourceLoader!(sourceId,
+                          expectedAuthenticatedUid: owner!.uid, exactAuthority: owner);
+                      if (!mounted || !context.mounted || !current() || memory == null || memory.id != sourceId) return;
+                      await widget.sourcePresenter?.call(context, memory);
+                    } catch (_) {
+                      return;
+                    } finally {
+                      if (current()) setState(() => conversationDetailLoading[data.$1] = false);
+                    }
+                    return;
+                  }
+                  final connectivityProvider = Provider.of<ConnectivityProvider>(context, listen: false);
+                  if (connectivityProvider.isConnected) {
+                    var memProvider = Provider.of<ConversationProvider>(context, listen: false);
+                    var idx = -1;
+                    var date = DateTime(data.$2.createdAt.year, data.$2.createdAt.month, data.$2.createdAt.day);
+                    idx =
+                        memProvider.groupedConversations[date]?.indexWhere((element) => element.id == data.$2.id) ?? -1;
+
+                    if (idx != -1) {
+                      context.read<ConversationDetailProvider>().updateConversation(data.$2.id, date);
+                      var m = memProvider.groupedConversations[date]![idx];
+                      MixpanelManager().chatMessageConversationClicked(m);
+                      await Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (c) => ConversationDetailPage(
+                            conversation: m,
+                          ),
                         ),
+                      );
+                    } else {
+                      if (conversationDetailLoading[data.$1]) return;
+                      setState(() => conversationDetailLoading[data.$1] = true);
+                      ServerConversation? loaded;
+                      try {
+                        loaded = await getConversationById(sourceId,
+                            expectedAuthenticatedUid: owner!.uid, exactAuthority: owner);
+                      } catch (_) {
+                        return;
+                      } finally {
+                        if (current()) setState(() => conversationDetailLoading[data.$1] = false);
+                      }
+                      final m = loaded;
+                      if (!mounted || !context.mounted || !current() || m == null || m.id != sourceId) return;
+                      (idx, date) = memProvider.addConversationWithDateGrouped(m);
+                      MixpanelManager().chatMessageConversationClicked(m);
+                      setState(() => conversationDetailLoading[data.$1] = false);
+                      context.read<ConversationDetailProvider>().updateConversation(m.id, date);
+                      await Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (c) => ConversationDetailPage(
+                            conversation: m,
+                          ),
+                        ),
+                      );
+                      if (current() && SharedPreferencesUtil().modifiedConversationDetails?.id == m.id) {
+                        ServerConversation modifiedDetails = SharedPreferencesUtil().modifiedConversationDetails!;
+                        widget.updateConversation(SharedPreferencesUtil().modifiedConversationDetails!);
+                        var copy = List<MessageConversation>.from(widget.messageMemories);
+                        copy[data.$1] = MessageConversation(
+                            modifiedDetails.id,
+                            modifiedDetails.createdAt,
+                            MessageConversationStructured(
+                              modifiedDetails.structured.title,
+                              modifiedDetails.structured.emoji,
+                            ));
+                        widget.messageMemories.clear();
+                        widget.messageMemories.addAll(copy);
+                        SharedPreferencesUtil().modifiedConversationDetails = null;
+                        setState(() {});
+                      }
+                    }
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(context.l10n.pleaseCheckInternetConnection),
+                        duration: const Duration(seconds: 2),
                       ),
                     );
-                    if (SharedPreferencesUtil().modifiedConversationDetails?.id == m.id) {
-                      ServerConversation modifiedDetails = SharedPreferencesUtil().modifiedConversationDetails!;
-                      widget.updateConversation(SharedPreferencesUtil().modifiedConversationDetails!);
-                      var copy = List<MessageConversation>.from(widget.messageMemories);
-                      copy[data.$1] = MessageConversation(
-                          modifiedDetails.id,
-                          modifiedDetails.createdAt,
-                          MessageConversationStructured(
-                            modifiedDetails.structured.title,
-                            modifiedDetails.structured.emoji,
-                          ));
-                      widget.messageMemories.clear();
-                      widget.messageMemories.addAll(copy);
-                      SharedPreferencesUtil().modifiedConversationDetails = null;
-                      setState(() {});
-                    }
                   }
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(context.l10n.pleaseCheckInternetConnection),
-                      duration: const Duration(seconds: 2),
-                    ),
-                  );
-                }
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12),
-                width: double.maxFinite,
-                decoration: BoxDecoration(
-                  color: EllaColors.bgSecondary,
-                  borderRadius: BorderRadius.circular(16.0),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '${tryDecodeText(data.$2.structured.emoji)} ${data.$2.structured.title}',
-                        style: Theme.of(context).textTheme.bodyMedium,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                },
+                child: Container(
+                  constraints: const BoxConstraints(minHeight: 44),
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+                  width: double.maxFinite,
+                  decoration: BoxDecoration(
+                    border: Border(top: BorderSide(color: EllaPalette.of(context).cardEdge)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.bookmark_outline, size: 16),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          safeMemoryDisplayTitle(data.$2.structured.title, context.l10n.irisMemoryArtifactLabel),
+                          style: EllaTypography.of(context).body.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    conversationDetailLoading[data.$1]
-                        ? const SizedBox(
-                            height: 16,
-                            width: 16,
-                            child: CircularProgressIndicator(
-                              valueColor: AlwaysStoppedAnimation<Color>(EllaColors.textDisabled),
-                              strokeWidth: 2,
-                            ))
-                        : const FaIcon(FontAwesomeIcons.chevronRight, size: 16, color: EllaColors.textDisabled)
-                  ],
+                      const SizedBox(width: 8),
+                      conversationDetailLoading[data.$1]
+                          ? SizedBox(
+                              height: 16,
+                              width: 16,
+                              child: CircularProgressIndicator(
+                                valueColor: AlwaysStoppedAnimation<Color>(EllaPalette.of(context).textDisabled),
+                                strokeWidth: 2,
+                              ))
+                          : FaIcon(FontAwesomeIcons.chevronRight, size: 16, color: EllaPalette.of(context).textDisabled)
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
+          ],
         ],
-      ],
+      ),
     );
   }
 
@@ -919,7 +1004,7 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
                 height: 4,
                 margin: const EdgeInsets.only(bottom: 16),
                 decoration: BoxDecoration(
-                  color: EllaColors.textDisabled,
+                  color: EllaPalette.of(context).textDisabled,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -929,12 +1014,12 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
+                Text(
                   'What went wrong?',
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w600,
-                    color: EllaColors.textPrimary,
+                    color: EllaPalette.of(context).textPrimary,
                   ),
                 ),
                 TextButton(
@@ -942,7 +1027,7 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
                   child: Text(
                     'Submit',
                     style: TextStyle(
-                      color: _selectedReason != null ? Colors.blue : EllaColors.textDisabled,
+                      color: _selectedReason != null ? Colors.blue : EllaPalette.of(context).textDisabled,
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
                     ),
@@ -953,12 +1038,12 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
             const SizedBox(height: 16),
 
             // Reason options
-            const Text(
+            Text(
               'Select a reason',
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
-                color: EllaColors.textTertiary,
+                color: EllaPalette.of(context).textTertiary,
               ),
             ),
             const SizedBox(height: 10),
@@ -979,14 +1064,14 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
-                      color: isSelected ? Colors.blue.withOpacity(0.2) : EllaColors.bgSecondary,
+                      color: isSelected ? Colors.blue.withOpacity(0.2) : EllaPalette.of(context).bgSecondary,
                       borderRadius: BorderRadius.circular(20),
                       border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
                     ),
                     child: Text(
                       reason.label,
                       style: TextStyle(
-                        color: isSelected ? Colors.blue : EllaColors.textPrimary,
+                        color: isSelected ? Colors.blue : EllaPalette.of(context).textPrimary,
                         fontSize: 14,
                         fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
                       ),
@@ -998,26 +1083,26 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
             const SizedBox(height: 20),
 
             // Comment input
-            const Text(
+            Text(
               'Additional feedback (optional)',
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
-                color: EllaColors.textTertiary,
+                color: EllaPalette.of(context).textTertiary,
               ),
             ),
             const SizedBox(height: 10),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
               decoration: BoxDecoration(
-                color: EllaColors.bgSecondary,
+                color: EllaPalette.of(context).bgSecondary,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: TextField(
                 controller: _commentController,
                 focusNode: _commentFocusNode,
-                style: const TextStyle(
-                  color: EllaColors.textPrimary,
+                style: TextStyle(
+                  color: EllaPalette.of(context).textPrimary,
                   fontSize: 15,
                   height: 1.4,
                 ),
@@ -1025,8 +1110,8 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
                   border: InputBorder.none,
                   contentPadding: const EdgeInsets.symmetric(vertical: 10),
                   hintText: context.l10n.tellUsMoreWhatWentWrong,
-                  hintStyle: const TextStyle(
-                    color: EllaColors.textDisabled,
+                  hintStyle: TextStyle(
+                    color: EllaPalette.of(context).textDisabled,
                     fontSize: 15,
                   ),
                 ),
@@ -1150,7 +1235,7 @@ class InitialOptionWidget extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 10),
         width: double.maxFinite,
         decoration: BoxDecoration(
-          color: EllaColors.bgSecondary,
+          color: EllaPalette.of(context).bgSecondary,
           borderRadius: BorderRadius.circular(12.0),
         ),
         child: Text(optionText, style: Theme.of(context).textTheme.bodyMedium),

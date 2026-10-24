@@ -122,6 +122,7 @@ final class GuardianModePollingService: @unchecked Sendable {
     private var pollTimer: DispatchSourceTimer?
     private var inFlightPoll: InFlightPoll?
     private var isPolling = false
+    private var outputPermit: GuardianDictationOutputGate.Permit?
     private var consecutiveErrors: Int = 0
 
 #if !GUARDIAN_NATIVE_POLICY_TESTS
@@ -149,7 +150,7 @@ final class GuardianModePollingService: @unchecked Sendable {
                 forcingRefresh: forcingRefresh
             )
         }
-        let speechSynthesizer = AVSpeechSynthesizer()
+        let speechOutput = GuardianSpeechOutputCompletion()
         effects = Effects(
             debugMutation: { result, metadata in
                 DebugEventBuffer.shared.add(
@@ -180,15 +181,10 @@ final class GuardianModePollingService: @unchecked Sendable {
                 )
             },
             speak: { text in
-                let utterance = AVSpeechUtterance(string: text)
-                utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-                utterance.rate = 0.5
-                utterance.pitchMultiplier = 1.0
-                speechSynthesizer.speak(utterance)
-                NSLog("TTS_SPEAK: \(text.prefix(80))")
+                speechOutput.speak(text)
             },
             stopSpeaking: {
-                speechSynthesizer.stopSpeaking(at: .immediate)
+                speechOutput.stop()
             },
             cleanCache: GuardianModeManager.shared.cleanCache
         )
@@ -222,6 +218,8 @@ final class GuardianModePollingService: @unchecked Sendable {
 
         let started = pollStateQueue.sync {
             guard !isPolling else { return false }
+            guard let permit = GuardianDictationOutputGate.shared.beginOutput() else { return false }
+            outputPermit = permit
             isPolling = true
             consecutiveErrors = 0
             if schedulesTimer {
@@ -239,17 +237,31 @@ final class GuardianModePollingService: @unchecked Sendable {
 
     func stopPolling() {
         effects.stopSpeaking()
-        let stopped = pollStateQueue.sync {
+        let stopped = pollStateQueue.sync { () -> (Bool, Task<Void, Never>?, GuardianDictationOutputGate.Permit?) in
             let wasPolling = isPolling || pollTimer != nil || inFlightPoll != nil
+            let pending = inFlightPoll?.task
+            let permit = outputPermit
+            outputPermit = nil
             isPolling = false
             pollTimer?.cancel()
             pollTimer = nil
             inFlightPoll?.task.cancel()
             inFlightPoll = nil
-            return wasPolling
+            return (wasPolling, pending, permit)
         }
-
-        if stopped {
+        if let permit = stopped.2 {
+            if let pending = stopped.1 {
+                // Cancellation is only a request. Hold admission until every
+                // old response/effect task has actually returned.
+                Task {
+                    await pending.value
+                    GuardianDictationOutputGate.shared.completeOutput(permit)
+                }
+            } else {
+                GuardianDictationOutputGate.shared.completeOutput(permit)
+            }
+        }
+        if stopped.0 {
             NSLog("GuardianPolling: Stopping poll timer")
         }
     }
@@ -448,3 +460,71 @@ final class GuardianModePollingService: @unchecked Sendable {
         }
     }
 }
+
+#if !GUARDIAN_NATIVE_POLICY_TESTS
+/// A native utterance retains its output permit until its own SDK terminal
+/// callback. Stop only retires queued starts and requests cancellation.
+/// Generation is lock-confined; synthesizer and utterance map are main-only.
+private final class GuardianSpeechOutputCompletion: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation = 0
+    @MainActor private var synthesizer: AVSpeechSynthesizer?
+    @MainActor private var permits = [ObjectIdentifier: GuardianDictationOutputGate.Permit]()
+
+    private func currentGeneration() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return generation
+    }
+
+    func speak(_ text: String) {
+        // Capture retirement identity before cross-registry admission; Stop
+        // between admission and deferred SDK creation retires this request.
+        let epoch = currentGeneration()
+        guard let permit = GuardianDictationOutputGate.shared.beginOutput() else { return }
+        DispatchQueue.main.async { [self] in
+            guard currentGeneration() == epoch else {
+                // This exact deferred start never reached any SDK effect.
+                GuardianDictationOutputGate.shared.completeOutput(permit)
+                return
+            }
+            if synthesizer == nil {
+                let created = AVSpeechSynthesizer()
+                created.delegate = self
+                synthesizer = created
+            }
+            let utterance = AVSpeechUtterance(string: text)
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+            utterance.rate = 0.5
+            utterance.pitchMultiplier = 1.0
+            permits[ObjectIdentifier(utterance)] = permit
+            synthesizer?.speak(utterance)
+        }
+    }
+
+    func stop() {
+        lock.lock(); generation += 1; lock.unlock()
+        DispatchQueue.main.async { [self] in
+            // No lazy SDK creation and no permit release from the Boolean.
+            synthesizer?.stopSpeaking(at: .immediate)
+        }
+    }
+
+    private func terminal(_ utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async { [self, utterance] in
+            // Keep the exact SDK object alive across the queue hop; an
+            // ObjectIdentifier alone can be reused after deallocation.
+            let identity = ObjectIdentifier(utterance)
+            guard let permit = permits.removeValue(forKey: identity) else { return }
+            GuardianDictationOutputGate.shared.completeOutput(permit)
+        }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        terminal(utterance)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        terminal(utterance)
+    }
+}
+#endif

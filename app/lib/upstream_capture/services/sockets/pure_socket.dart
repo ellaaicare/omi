@@ -39,6 +39,16 @@ class PureSocketMessage {
   String? raw;
 }
 
+enum PureSocketDiagnosticEvent {
+  listenerAttached,
+  transportConnected,
+  cleanupCloseRequested,
+  remoteClosed,
+  transportError
+}
+
+typedef PureSocketDiagnosticObserver = void Function(PureSocketDiagnosticEvent event, int generation, int? closeCode);
+
 typedef SocketHeadersProvider = Future<Map<String, String>> Function();
 
 class PureSocket implements IPureSocket {
@@ -61,8 +71,15 @@ class PureSocket implements IPureSocket {
   String url;
   final SocketHeadersProvider _headersProvider;
   final Map<String, String> _extraHeaders;
+  final PureSocketDiagnosticObserver? diagnosticObserver;
+  void _diagnose(PureSocketDiagnosticEvent event, [int? closeCode, int? generation]) {
+    try {
+      diagnosticObserver?.call(event, generation ?? _connectionGeneration, closeCode);
+    } catch (_) {}
+  }
 
-  PureSocket(this.url, {SocketHeadersProvider? headersProvider, Map<String, String> extraHeaders = const {}})
+  PureSocket(this.url,
+      {SocketHeadersProvider? headersProvider, Map<String, String> extraHeaders = const {}, this.diagnosticObserver})
       : _headersProvider =
             headersProvider ?? (() => buildHeaders(requireAuthCheck: true, url: url, forWebSocket: true)),
         _extraHeaders = Map.unmodifiable(extraHeaders);
@@ -123,11 +140,13 @@ class PureSocket implements IPureSocket {
       onDone: () {
         if (generation != _connectionGeneration) return;
         Logger.debug("onDone with close code: ${channel.closeCode}");
+        _diagnose(PureSocketDiagnosticEvent.remoteClosed, channel.closeCode);
         onClosed(channel.closeCode);
       },
       cancelOnError: true,
     );
 
+    _diagnose(PureSocketDiagnosticEvent.listenerAttached);
     dynamic err;
     try {
       await channel.ready;
@@ -149,6 +168,7 @@ class PureSocket implements IPureSocket {
       return false;
     }
     _status = PureSocketStatus.connected;
+    _diagnose(PureSocketDiagnosticEvent.transportConnected);
     DebugLogManager.logEvent('pure_socket_connected', {'url': url});
     onConnected();
 
@@ -156,6 +176,7 @@ class PureSocket implements IPureSocket {
   }
 
   void _retireChannel() {
+    final retiredGeneration = _connectionGeneration;
     _connectionGeneration++;
     final channel = _channel;
     final subscription = _subscription;
@@ -163,7 +184,11 @@ class PureSocket implements IPureSocket {
     _subscription = null;
     // Close even while connecting; the adapter delivers the queued close
     // when its handshake finishes. Never wait for a peer acknowledgement.
-    if (channel != null) unawaited(channel.sink.close(socket_channel_status.normalClosure));
+    if (channel != null) {
+      _diagnose(
+          PureSocketDiagnosticEvent.cleanupCloseRequested, socket_channel_status.normalClosure, retiredGeneration);
+      unawaited(channel.sink.close(socket_channel_status.normalClosure));
+    }
     if (subscription != null) unawaited(subscription.cancel());
   }
 
@@ -220,6 +245,7 @@ class PureSocket implements IPureSocket {
 
   @override
   void onError(Object err, StackTrace trace) {
+    _diagnose(PureSocketDiagnosticEvent.transportError);
     _status = PureSocketStatus.disconnected;
     _retireChannel();
     Logger.debug("[Socket] Error: $err");

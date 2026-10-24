@@ -59,6 +59,7 @@ class MemoryArtworkImage extends StatefulWidget {
     this.deferRemoteFetch = false,
     this.prefetchResolved = false,
     this.compactPlaceholder = false,
+    this.readyOnlyThumbnail = false,
   });
 
   final ServerConversation conversation;
@@ -118,6 +119,10 @@ class MemoryArtworkImage extends StatefulWidget {
 
   /// List thumbnails use a small category symbol rather than an empty illustration frame.
   final bool compactPlaceholder;
+
+  /// Iris rows reserve no space for absent artwork. Existing authenticated
+  /// cache and display reads still run, and never request generation.
+  final bool readyOnlyThumbnail;
 
   static const _automaticGenerationBudgetCapacity = 256;
   static const _automaticPreEgressAttemptLimit = 3;
@@ -1121,6 +1126,18 @@ class _MemoryArtworkImageState extends State<MemoryArtworkImage> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.readyOnlyThumbnail) {
+      _updatePhysicalTargetWidth(64 * MediaQuery.devicePixelRatioOf(context));
+      if (_mustSuppressCachedArtwork(_remoteResult) || (_remoteResult?.isReady != true && _cachedFile == null)) {
+        return const SizedBox.shrink();
+      }
+      return Padding(
+        padding: const EdgeInsetsDirectional.only(end: 12),
+        child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: SizedBox(width: 64, height: 64, child: _buildArtwork(context))),
+      );
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final logicalWidth = constraints.maxWidth.isFinite && constraints.maxWidth > 0 ? constraints.maxWidth : 512.0;

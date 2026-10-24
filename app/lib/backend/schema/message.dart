@@ -230,6 +230,15 @@ class ServerMessage {
 
   /// Durable canonical ordering fields. These survive cache round-trips so an
   /// equal-time user/assistant pair cannot be reordered when history is merged.
+  /// Explicit canonical memory provenance; retained through owner-scoped cache.
+  bool isCanonicalMemoryArtifact;
+
+  /// Explicit canonical Omi transcript provenance; presentation only, never deletes history.
+  bool isCanonicalOverheardTranscript;
+
+  /// Owner-scoped exact canonical storage identity for keyset history; never a cursor.
+  String? canonicalEventKey;
+  String get historyWidgetKey => canonicalEventKey == null ? id : 'canonical:$canonicalEventKey';
   String? canonicalConversationId;
   String? canonicalTurnId;
   int? canonicalTurnOrdinal;
@@ -257,6 +266,9 @@ class ServerMessage {
     this.rating,
     this.chartData,
     this.fromVoice = false,
+    this.isCanonicalMemoryArtifact = false,
+    this.isCanonicalOverheardTranscript = false,
+    this.canonicalEventKey,
     this.canonicalConversationId,
     this.canonicalTurnId,
     this.canonicalTurnOrdinal,
@@ -282,6 +294,9 @@ class ServerMessage {
       rating: json['rating'],
       chartData: json['chart_data'] != null ? ChartData.fromJson(json['chart_data']) : null,
       fromVoice: json['from_voice'] ?? false,
+      isCanonicalMemoryArtifact: json['is_canonical_memory_artifact'] == true,
+      isCanonicalOverheardTranscript: json['is_canonical_overheard_transcript'] == true,
+      canonicalEventKey: json['canonicalEventKey'] as String?,
       canonicalConversationId: metadata['conversation_id']?.toString(),
       canonicalTurnId: metadata['turn_id']?.toString(),
       canonicalTurnOrdinal: parseCanonicalTurnOrdinal(metadata['turn_ordinal']),
@@ -295,6 +310,7 @@ class ServerMessage {
   Map<String, dynamic> toJson() {
     return {
       'id': id,
+      if (canonicalEventKey != null) 'canonicalEventKey': canonicalEventKey,
       'created_at': createdAt.toUtc().toIso8601String(),
       'text': text,
       'sender': sender.toString().split('.').last,
@@ -307,6 +323,8 @@ class ServerMessage {
       'rating': rating,
       'chart_data': chartData?.toJson(),
       'from_voice': fromVoice,
+      if (isCanonicalMemoryArtifact) 'is_canonical_memory_artifact': true,
+      if (isCanonicalOverheardTranscript) 'is_canonical_overheard_transcript': true,
       if (canonicalConversationId != null ||
           canonicalTurnId != null ||
           canonicalTurnOrdinal != null ||

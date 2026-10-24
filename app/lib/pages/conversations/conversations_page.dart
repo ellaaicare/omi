@@ -1,3 +1,4 @@
+import 'package:omi/ella/recording_keep/recording_keep_pages.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -199,6 +200,7 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
             const SliverToBoxAdapter(child: SpeechProfileCardWidget()),
             const SliverToBoxAdapter(child: UpdateFirmwareCardWidget()),
             const SliverToBoxAdapter(child: ConversationCaptureWidget()),
+            const SliverToBoxAdapter(child: SavedRecordingsJournalLink()),
 
             // Search bar
             Consumer2<HomeProvider, ConversationProvider>(

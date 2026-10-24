@@ -13,7 +13,7 @@ import TwilioVoice
 extension FlutterError: Error {}
 
 @main
-@objc class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var methodChannel: FlutterMethodChannel?
   private var appleRemindersChannel: FlutterMethodChannel?
   private var appleHealthChannel: FlutterMethodChannel?
@@ -40,6 +40,8 @@ extension FlutterError: Error {}
   private var twilioVoiceChannel: TwilioVoiceMethodChannel?
   private var guardianModeChannel: FlutterMethodChannel?
   private var audioRouteChannel: FlutterMethodChannel?
+  private var v7AccessibilityChannel: FlutterMethodChannel?
+  private var v7TransparencyObserver: NSObjectProtocol?
   private var guardianAuthStateHandle: AuthStateDidChangeListenerHandle?
 
 
@@ -47,7 +49,6 @@ extension FlutterError: Error {}
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    GeneratedPluginRegistrant.register(with: self)
     clearScopedGuardianNotifications()
 
     // Observe route state without taking ownership of the system audio session.
@@ -68,66 +69,6 @@ extension FlutterError: Error {}
         object: audioSession
     )
 
-
-      // Get Flutter view controller
-      guard let controller = window?.rootViewController as? FlutterViewController else {
-          print("AppDelegate: Failed to get FlutterViewController")
-          return super.application(application, didFinishLaunchingWithOptions: launchOptions)
-      }
-
-      if WCSession.isSupported() {
-          session = WCSession.default
-          session?.delegate = self
-          session?.activate()
-
-          flutterWatchAPI = WatchRecorderFlutterAPI(binaryMessenger: controller.binaryMessenger)
-          if let session = session {
-              let api: WatchRecorderHostAPI = RecorderHostApiImpl(session: session, flutterWatchAPI: flutterWatchAPI)
-              WatchRecorderHostAPISetup.setUp(binaryMessenger: controller.binaryMessenger, api: api)
-          }
-      }
-
-      // Retrieve the link from parameters
-      if let url = AppLinks.shared.getLink(launchOptions: launchOptions) {
-          // We have a link, propagate it to your Flutter app or not
-          AppLinks.shared.handleLink(url: url)
-          return true // Returning true will stop the propagation to other packages
-      }
-
-      //Creates a method channel to handle notifications on kill
-      methodChannel = FlutterMethodChannel(name: "com.friend.ios/notifyOnKill", binaryMessenger: controller.binaryMessenger)
-      methodChannel?.setMethodCallHandler { [weak self] (call, result) in
-          self?.handleMethodCall(call, result: result)
-      }
-
-      // Create Apple Reminders method channel
-      appleRemindersChannel = FlutterMethodChannel(name: "com.omi.apple_reminders", binaryMessenger: controller.binaryMessenger)
-      appleRemindersChannel?.setMethodCallHandler { [weak self] (call, result) in
-          self?.handleAppleRemindersCall(call, result: result)
-      }
-
-      // Create Apple Health method channel
-      appleHealthChannel = FlutterMethodChannel(name: "com.omi.apple_health", binaryMessenger: controller.binaryMessenger)
-      appleHealthChannel?.setMethodCallHandler { [weak self] (call, result) in
-          self?.handleAppleHealthCall(call, result: result)
-      }
-
-      // Create Speech Recognition method channel
-      let speechChannel = FlutterMethodChannel(name: "com.omi.ios/speech", binaryMessenger: controller.binaryMessenger)
-      let speechHandler = SpeechRecognitionHandler()
-      speechChannel.setMethodCallHandler { (call, result) in
-          speechHandler.handle(call, result: result)
-      }
-
-      // Create WiFi Network plugin for device AP connection
-      _ = WifiNetworkPlugin(messenger: controller.binaryMessenger)
-
-#if ELLA_UPSTREAM_CAPTURE_ENABLED_YES
-      // Upstream capture port (ellaaicare/ella-ai#1280): register the vendored
-      // BasedHardware/omi BLE + PhoneMic Pigeon hosts. Compiled only when
-      // ios/Flutter/EllaUpstreamCapture.xcconfig sets ELLA_UPSTREAM_CAPTURE_ENABLED = YES.
-      EllaUpstreamCaptureNativeHost.shared.register(binaryMessenger: controller.binaryMessenger)
-#endif
 
     // here, Without this code the task will not work.
     SwiftFlutterForegroundTaskPlugin.setPluginRegistrantCallback { registry in
@@ -152,62 +93,142 @@ extension FlutterError: Error {}
     TwilioVoiceManager.shared.initialize()
     print("AppDelegate: Twilio Voice SDK initialized")
 
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // UIKit creates the scene's storyboard engine after process launch. Register
+  // plugins and every UI-bound channel against that engine, never AppDelegate.window.
+  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    let messenger = engineBridge.applicationRegistrar.messenger()
+
+    // Read-only appearance seam. No permissions, capture or settings writes.
+    let appearanceChannel = FlutterMethodChannel(name: "com.ella.v7/accessibility", binaryMessenger: messenger)
+    v7AccessibilityChannel = appearanceChannel
+    appearanceChannel.setMethodCallHandler { call, result in
+      guard call.method == "read" else { result(FlutterMethodNotImplemented); return }
+      result(["reduceTransparency": UIAccessibility.isReduceTransparencyEnabled,
+              "increaseContrast": UIAccessibility.isDarkerSystemColorsEnabled])
+    }
+    if let observer = v7TransparencyObserver { NotificationCenter.default.removeObserver(observer) }
+    v7TransparencyObserver = NotificationCenter.default.addObserver(
+      forName: UIAccessibility.reduceTransparencyStatusDidChangeNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.v7AccessibilityChannel?.invokeMethod("changed", arguments: [
+        "reduceTransparency": UIAccessibility.isReduceTransparencyEnabled,
+        "increaseContrast": UIAccessibility.isDarkerSystemColorsEnabled
+      ])
+    }
+
+
+    if WCSession.isSupported() {
+      session = WCSession.default
+      session?.delegate = self
+      session?.activate()
+
+      flutterWatchAPI = WatchRecorderFlutterAPI(binaryMessenger: messenger)
+      if let session = session {
+        let api: WatchRecorderHostAPI = RecorderHostApiImpl(
+          session: session, flutterWatchAPI: flutterWatchAPI)
+        WatchRecorderHostAPISetup.setUp(binaryMessenger: messenger, api: api)
+      }
+    }
+
+    //Creates a method channel to handle notifications on kill
+    methodChannel = FlutterMethodChannel(
+      name: "com.friend.ios/notifyOnKill", binaryMessenger: messenger)
+    methodChannel?.setMethodCallHandler { [weak self] (call, result) in
+      self?.handleMethodCall(call, result: result)
+    }
+
+    // Create Apple Reminders method channel
+    appleRemindersChannel = FlutterMethodChannel(
+      name: "com.omi.apple_reminders", binaryMessenger: messenger)
+    appleRemindersChannel?.setMethodCallHandler { [weak self] (call, result) in
+      self?.handleAppleRemindersCall(call, result: result)
+    }
+
+    // Create Apple Health method channel
+    appleHealthChannel = FlutterMethodChannel(
+      name: "com.omi.apple_health", binaryMessenger: messenger)
+    appleHealthChannel?.setMethodCallHandler { [weak self] (call, result) in
+      self?.handleAppleHealthCall(call, result: result)
+    }
+
+    // Create Speech Recognition method channel
+    let speechChannel = FlutterMethodChannel(name: "com.omi.ios/speech", binaryMessenger: messenger)
+    let speechHandler = SpeechRecognitionHandler()
+    speechChannel.setMethodCallHandler { (call, result) in
+      speechHandler.handle(call, result: result)
+    }
+
+    // Create WiFi Network plugin for device AP connection
+    _ = WifiNetworkPlugin(messenger: messenger)
+
+    #if ELLA_UPSTREAM_CAPTURE_ENABLED_YES
+      // Upstream capture port (ellaaicare/ella-ai#1280): register the vendored
+      // BasedHardware/omi BLE + PhoneMic Pigeon hosts. Compiled only when
+      // ios/Flutter/EllaUpstreamCapture.xcconfig sets ELLA_UPSTREAM_CAPTURE_ENABLED = YES.
+      EllaUpstreamCaptureNativeHost.shared.register(binaryMessenger: messenger)
+    #endif
+
     // Initialize Twilio Voice MethodChannel
-    twilioVoiceChannel = TwilioVoiceMethodChannel(messenger: controller.binaryMessenger)
+    twilioVoiceChannel = TwilioVoiceMethodChannel(messenger: messenger)
     print("AppDelegate: Twilio Voice MethodChannel registered")
 
     // Guardian Mode MethodChannel
     guardianModeChannel = FlutterMethodChannel(
-        name: "com.ellaaicare.ella/guardian_mode",
-        binaryMessenger: controller.binaryMessenger
+      name: "com.ellaaicare.ella/guardian_mode",
+      binaryMessenger: messenger
     )
+    GuardianModeManager.shared.strictPlaybackFact = { [weak self] fact in
+      DispatchQueue.main.async { self?.guardianModeChannel?.invokeMethod("strictPlaybackFact", arguments: fact) }
+    }
     guardianModeChannel?.setMethodCallHandler { [weak self] (call, result) in
-        self?.handleGuardianModeMethodCall(call, result: result)
+      self?.handleGuardianModeMethodCall(call, result: result)
     }
     print("AppDelegate: Guardian Mode MethodChannel registered")
 
     audioRouteChannel = FlutterMethodChannel(
-        name: "com.ellaaicare.ella/audio_route",
-        binaryMessenger: controller.binaryMessenger
+      name: "com.ellaaicare.ella/audio_route",
+      binaryMessenger: messenger
     )
     audioRouteChannel?.setMethodCallHandler { [weak self] (call, result) in
-        switch call.method {
-        case "getCurrentRoute":
-            result(self?.currentAudioRoutePayload() ?? [:])
-        case "ensureAudibleVoiceOutput":
-            let arguments = call.arguments as? [String: Any]
-            let usage = arguments?["usage"] as? String ?? "interactive"
-            result(self?.ensureAudibleVoiceOutput(usage: usage) ?? ["success": false])
-        case "releaseVoiceAudioSession":
-            let arguments = call.arguments as? [String: Any]
-            let usage = arguments?["usage"] as? String ?? "interactive"
-            result(self?.releaseVoiceAudioSession(usage: usage) ?? false)
-        default:
-            result(FlutterMethodNotImplemented)
-        }
+      switch call.method {
+      case "getCurrentRoute":
+        result(self?.currentAudioRoutePayload() ?? [:])
+      case "ensureAudibleVoiceOutput":
+        let arguments = call.arguments as? [String: Any]
+        let usage = arguments?["usage"] as? String ?? "interactive"
+        result(self?.ensureAudibleVoiceOutput(usage: usage) ?? ["success": false])
+      case "releaseVoiceAudioSession":
+        let arguments = call.arguments as? [String: Any]
+        let usage = arguments?["usage"] as? String ?? "interactive"
+        result(self?.releaseVoiceAudioSession(usage: usage) ?? false)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
     }
     print("AppDelegate: Audio Route MethodChannel registered")
 
     // Debug Events MethodChannel
     let debugEventsChannel = FlutterMethodChannel(
-        name: "com.ellaaicare.ella/debug_events",
-        binaryMessenger: controller.binaryMessenger
+      name: "com.ellaaicare.ella/debug_events",
+      binaryMessenger: messenger
     )
     debugEventsChannel.setMethodCallHandler { (call, result) in
-        switch call.method {
-        case "getEvents":
-            result(DebugEventBuffer.shared.asFlutterList())
-        case "clearEvents":
-            DebugEventBuffer.shared.clear()
-            result(nil)
-        default:
-            result(FlutterMethodNotImplemented)
-        }
+      switch call.method {
+      case "getEvents":
+        result(DebugEventBuffer.shared.asFlutterList())
+      case "clearEvents":
+        DebugEventBuffer.shared.clear()
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
     }
     print("AppDelegate: Debug Events MethodChannel registered")
 
-
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
   // MARK: - VoIP Push Registration
@@ -912,6 +933,23 @@ extension AppDelegate: WCSessionDelegate {
 
     private func handleGuardianModeMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
+        case "dictationAcquireOutput", "dictationProofOutput", "dictationReleaseOutput":
+            guard let args = call.arguments as? [String: Any],
+                  Set(args.keys) == Set(["request_id"]),
+                  let request = args["request_id"] as? String,
+                  UUID(uuidString: request)?.uuidString.lowercased() == request else {
+                result(FlutterError(code: "DICTATION_OUTPUT_INVALID", message: "Audio admission unavailable", details: nil))
+                return
+            }
+            let gate = GuardianDictationOutputGate.shared
+            if call.method == "dictationReleaseOutput" {
+                result(["version": 1, "request_id": request, "released": gate.release(request: request)])
+            } else {
+                let held = call.method == "dictationAcquireOutput"
+                    ? gate.acquire(request: request) : gate.held(request: request)
+                result(["version": 1, "request_id": request, "held": held])
+            }
+
         case "configureAvailability":
             ensureGuardianAuthStateListener()
             let args = call.arguments as? [String: Any]
@@ -929,6 +967,45 @@ extension AppDelegate: WCSessionDelegate {
                     message: "Failed to start Guardian Mode",
                     details: error.localizedDescription
                 ))
+            }
+
+        case "strictStop", "strictActivate", "strictAudio":
+            ensureGuardianAuthStateListener()
+            guard let args = call.arguments as? [String: Any], let uid = args["uid"] as? String,
+                  let number = args["generation"] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(), number.intValue >= 1 else {
+                result(FlutterError(code: "STRICT_INVALID", message: "Whisper delivery unavailable", details: nil)); return
+            }
+            if call.method == "strictStop" {
+                let stopped = GuardianModeManager.shared.stopStrict(uid: uid,
+                    epoch: args["client_epoch"] as? String, generation: number.intValue)
+                result(["stopped": stopped]); return
+            }
+            guard Auth.auth().currentUser?.uid == uid,
+                  let epoch = args["client_epoch"] as? String, let session = args["session_id"] as? String,
+                  let presentation = args["presentation"] as? String else {
+                result(FlutterError(code: "STRICT_OWNER", message: "Whisper delivery unavailable", details: nil)); return
+            }
+            let ticket = GuardianStrictMediaTicket(uid: uid, epoch: epoch, session: session,
+                generation: number.intValue, presentation: presentation)
+            do {
+                if call.method == "strictActivate" {
+                    GuardianModeManager.shared.configureAvailability(true, uid: uid)
+                    try GuardianModeManager.shared.activateStrict(ticket)
+                }
+                else {
+                    guard let event = args["event_id"] as? String, let raw = args["url"] as? String,
+                          let url = URL(string: raw) else { throw NSError(domain: "GuardianStrict", code: 5) }
+                    try GuardianModeManager.shared.playStrict(ticket, eventID: event, url: url)
+                }
+                result(["accepted": true])
+            } catch { result(FlutterError(code: "STRICT_MEDIA", message: "Whisper delivery unavailable", details: nil)) }
+
+        case "stopCurrentOutput":
+            do {
+                result(try GuardianModeManager.shared.stopCurrentOutput())
+            } catch {
+                result(FlutterError(code: "OUTPUT_STOP_FAILED", message: "Whisper output stop failed", details: nil))
             }
 
         case "stop":
@@ -1048,4 +1125,30 @@ class SpeechRecognitionHandler: NSObject {
         }
     }
 
+}
+
+// The pinned app_links/Firebase Auth plugins use application URL callbacks.
+// FlutterSceneDelegate bridges their warm callbacks; cold connection URLs need
+// the same callbacks after the storyboard engine and its plugins are ready.
+@objc class EllaSceneDelegate: FlutterSceneDelegate {
+  override func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    super.scene(scene, willConnectTo: session, options: connectionOptions)
+    guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
+    for context in connectionOptions.urlContexts {
+      var options: [UIApplication.OpenURLOptionsKey: Any] = [
+        .openInPlace: context.options.openInPlace
+      ]
+      if let source = context.options.sourceApplication { options[.sourceApplication] = source }
+      if let annotation = context.options.annotation { options[.annotation] = annotation }
+      _ = appDelegate.application(UIApplication.shared, open: context.url, options: options)
+    }
+    for activity in connectionOptions.userActivities {
+      _ = appDelegate.application(
+        UIApplication.shared, continue: activity, restorationHandler: { _ in })
+    }
+  }
 }

@@ -3,7 +3,7 @@ import 'dart:math';
 
 import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:flutter/services.dart';
-import 'package:just_audio/just_audio.dart';
+import 'package:omi/ella/services/admitted_audio_player.dart';
 
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/utils/logger.dart';

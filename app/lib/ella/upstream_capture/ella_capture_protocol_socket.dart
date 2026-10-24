@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:omi/ella/capture_host/ella_capture_protocol_trace.dart';
+import 'package:omi/ella/services/whisper_delivery_runtime.dart';
 
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
 import 'package:omi/services/sockets/transcription_service.dart' as ella_socket;
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/upstream_capture/backend/http/shared.dart' as upstream_http;
 import 'package:omi/upstream_capture/backend/schema/geolocation.dart';
 import 'package:omi/upstream_capture/models/custom_stt_config.dart';
 import 'package:omi/upstream_capture/services/sockets/pure_socket.dart';
@@ -30,9 +33,15 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
     String? sttConfigId,
     Geolocation? geolocation,
     Duration timeout = _protocolTimeout,
+    this.diagnosticTrace,
+    this.diagnosticAttempt,
     void Function(String reason, int? closeCode)? onAdmissionFailure,
     bool Function()? hasOriginAuthority,
+    Map<String, String> deliveryQuery = const {},
+    bool Function()? hasCurrentDeliveryBinding,
   })  : _timeout = timeout,
+        deliveryQuery = Map.unmodifiable(deliveryQuery),
+        _hasCurrentDeliveryBinding = hasCurrentDeliveryBinding ?? _alwaysCurrent,
         _onAdmissionFailure = onAdmissionFailure,
         _hasOriginAuthority = hasOriginAuthority ?? _alwaysCurrent,
         super.withSocket(
@@ -49,8 +58,55 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
         );
 
   final Duration _timeout;
+  final EllaCaptureProtocolTrace? diagnosticTrace;
+  final CaptureTraceAttempt? diagnosticAttempt;
+  void _diagnose(CaptureTraceEvent event,
+      {CaptureTraceValidation? validation,
+      CaptureTraceFailure? failure,
+      CaptureTraceCloseOrigin? closeOrigin,
+      CaptureTraceStopReason? stopReason,
+      int? closeCode,
+      Duration? deadline,
+      Map<dynamic, dynamic>? readyFields,
+      bool? tupleCurrent}) {
+    if (diagnosticTrace == null) return;
+    try {
+      diagnosticTrace!.record(diagnosticAttempt, event,
+          ownerCurrent: hasOriginAuthority,
+          deliveryCurrent: deliveryBindingCurrent,
+          wasReady: _ready,
+          validation: validation,
+          tupleCurrent: tupleCurrent,
+          tupleFingerprint: readyFields == null ? null : CaptureTraceTupleFingerprint.fromReadyFields(readyFields),
+          failure: failure,
+          closeOrigin: closeOrigin,
+          stopReason: stopReason,
+          closeCode: closeCode,
+          deadline: deadline,
+          conversationType:
+              readyFields == null ? null : EllaCaptureProtocolTrace.fieldType(readyFields, 'conversation_id'),
+          generationType: readyFields == null ? null : EllaCaptureProtocolTrace.fieldType(readyFields, 'generation'),
+          tokenType: readyFields == null ? null : EllaCaptureProtocolTrace.fieldType(readyFields, 'owner_token'),
+          versionType: readyFields == null ? null : EllaCaptureProtocolTrace.fieldType(readyFields, 'protocol_version'),
+          versionIsTwo: readyFields == null ? null : readyFields['protocol_version'] == _protocolVersion);
+    } catch (_) {}
+  }
+
   final void Function(String reason, int? closeCode)? _onAdmissionFailure;
   final bool Function() _hasOriginAuthority;
+  final Map<String, String> deliveryQuery;
+  final bool Function() _hasCurrentDeliveryBinding;
+  bool _deliveryBindingRetired = false;
+  bool get deliveryBindingCurrent => !_deliveryBindingRetired && _hasCurrentDeliveryBinding();
+
+  /// Stop admitting frames/callbacks synchronously, retaining only the exact
+  /// capture drain acknowledgement. The recorder/WAL remain upstream-owned.
+  void retireDeliveryBinding() {
+    _diagnose(CaptureTraceEvent.bindingRetired);
+    _deliveryBindingRetired = true;
+    if (!(_readyWaiter?.isCompleted ?? true)) _readyWaiter!.complete(false);
+  }
+
   Completer<bool>? _readyWaiter;
   Completer<bool>? _drainWaiter;
   ella_socket.CaptureProtocolAuthority? _authority;
@@ -64,12 +120,21 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
 
   ella_socket.CaptureProtocolAuthority? get captureAuthority => _authority;
   bool get drainAcknowledged => _drainAcknowledged;
-  bool get hasOriginAuthority => _hasOriginAuthority();
+  bool _originRetired = false;
+  bool get hasOriginAuthority => !_originRetired && _hasOriginAuthority();
+
+  /// Terminal runtime disposal cannot leave a drain or ready wait alive.
+  void retireCaptureOrigin() {
+    _diagnose(CaptureTraceEvent.originRetired);
+    _originRetired = true;
+    retireDeliveryBinding();
+    _completeWaiters();
+  }
 
   static bool _alwaysCurrent() => true;
 
   @override
-  SocketServiceState get state => _ready && super.state == SocketServiceState.connected
+  SocketServiceState get state => _ready && deliveryBindingCurrent && super.state == SocketServiceState.connected
       ? SocketServiceState.connected
       : SocketServiceState.disconnected;
 
@@ -77,8 +142,12 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
   Future start() async {
     _lastAttempt = EllaCaptureSocketAttempt(EllaCaptureSocketAttemptPhase.connecting, null, DateTime.now());
     _lastAdmissionFailure = null;
-    if (!_hasOriginAuthority()) {
+    if (!hasOriginAuthority) {
       _fail('capture_origin_retired');
+      return;
+    }
+    if (!deliveryBindingCurrent) {
+      retireDeliveryBinding();
       return;
     }
     _ready = false;
@@ -90,21 +159,44 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
     _retiredConversationIds.clear();
     final waiter = _readyWaiter = Completer<bool>();
     try {
+      _diagnose(CaptureTraceEvent.superStartBegin);
       await super.start();
+      _diagnose(CaptureTraceEvent.superStartEnd);
     } catch (_) {
+      _diagnose(CaptureTraceEvent.transportConnectFailed);
+      if (!hasOriginAuthority || !deliveryBindingCurrent) {
+        retireDeliveryBinding();
+        await stop(reason: 'capture binding retired during authentication');
+        return;
+      }
       _lastAttempt = EllaCaptureSocketAttempt(EllaCaptureSocketAttemptPhase.transportUnavailable, null, DateTime.now());
       rethrow;
     }
-    if (!_hasOriginAuthority()) {
+    if (!hasOriginAuthority) {
       _fail('capture_origin_retired');
       if (socket.status == PureSocketStatus.connected) await stop();
+      return;
+    }
+    if (!deliveryBindingCurrent) {
+      retireDeliveryBinding();
+      await stop(reason: 'delivery binding retired during connect');
       return;
     }
     if (socket.status != PureSocketStatus.connected) {
       _fail('transport_connect_failed');
       return;
     }
-    if (!await waiter.future.timeout(_timeout, onTimeout: () => false) || state != SocketServiceState.connected) {
+    _diagnose(CaptureTraceEvent.readyWaitBegin, deadline: _timeout);
+    final admitted = await waiter.future.timeout(_timeout, onTimeout: () {
+      _diagnose(CaptureTraceEvent.readyDeadline, closeOrigin: CaptureTraceCloseOrigin.readyDeadline);
+      return false;
+    });
+    if (!deliveryBindingCurrent) {
+      retireDeliveryBinding();
+      await stop(reason: 'delivery binding retired before ready');
+      return;
+    }
+    if (!admitted || state != SocketServiceState.connected) {
       _fail('capture_protocol_ready_unavailable');
       if (socket.status == PureSocketStatus.connected) await stop();
     }
@@ -112,13 +204,13 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
 
   @override
   Future send(dynamic message) async {
-    if (state != SocketServiceState.connected || !_hasOriginAuthority()) return;
+    if (state != SocketServiceState.connected || !hasOriginAuthority) return;
     await super.send(message);
   }
 
   @override
   Future sendText(String message) async {
-    if (state != SocketServiceState.connected || !_hasOriginAuthority()) return;
+    if (state != SocketServiceState.connected || !hasOriginAuthority) return;
     await super.sendText(message);
   }
 
@@ -126,9 +218,11 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
   Future<void> stop({String? reason}) => _stopFuture ??= _stop(reason);
 
   Future<void> _stop(String? reason) async {
+    _diagnose(CaptureTraceEvent.localCloseRequest,
+        closeOrigin: CaptureTraceCloseOrigin.localRequest, stopReason: EllaCaptureProtocolTrace.classifyStop(reason));
     _stopping = true;
     if (!_failed) _lastAttempt = null;
-    final canDrain = _ready && _hasOriginAuthority() && socket.status == PureSocketStatus.connected;
+    final canDrain = _ready && hasOriginAuthority && socket.status == PureSocketStatus.connected;
     _ready = false;
     final authority = _authority;
     if (canDrain && authority != null) {
@@ -139,7 +233,7 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
         if (transport is EllaCaptureCompositeSocket) {
           await transport.stopPrimaryForDrain();
         }
-        if (!_hasOriginAuthority() || transport.status != PureSocketStatus.connected) {
+        if (!hasOriginAuthority || transport.status != PureSocketStatus.connected) {
           throw StateError('origin retired');
         }
         socket.send(jsonEncode(authority.toDrainJson()));
@@ -155,7 +249,7 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
   @override
   void onConnected() {
     // A transport handshake is not capture authority.
-    if (!_failed && !_stopping && _hasOriginAuthority()) {
+    if (!_failed && !_stopping && hasOriginAuthority && deliveryBindingCurrent) {
       _lastAttempt = EllaCaptureSocketAttempt(EllaCaptureSocketAttemptPhase.transportConnected, null, DateTime.now());
     }
   }
@@ -164,7 +258,7 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
   void onMessage(dynamic event) {
     if (_stopping && _pendingDrain == null) return;
     if (_failed) return;
-    if (!_hasOriginAuthority()) {
+    if (!hasOriginAuthority) {
       _fail('capture_origin_retired');
       unawaited(stop());
       return;
@@ -176,9 +270,27 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
       } on FormatException {
         // Upstream remains responsible for ordinary message parsing.
       }
+      if (!deliveryBindingCurrent &&
+          !(decoded is Map && decoded['type'] == 'service_status' && decoded['status'] == 'capture_protocol_drained')) {
+        return;
+      }
+      if (decoded is Map && (decoded['type'] == 'memory_processing_started' || decoded['type'] == 'memory_created')) {
+        final current = _authority;
+        final memory = decoded['memory'];
+        if (current == null || memory is! Map || memory['id'] != current.conversationId) return;
+        // The bound socket is the attribution when legacy progress omits the
+        // tuple. If a tuple is supplied, every field must match exactly.
+        if (decoded.containsKey('generation') ||
+            decoded.containsKey('owner_token') ||
+            decoded.containsKey('protocol_version') ||
+            decoded.containsKey('conversation_id')) {
+          if (!_sameAuthority(current, _readAuthority(decoded))) return;
+        }
+      }
       if (decoded is Map && decoded['type'] == 'service_status') {
         final status = decoded['status'];
         if (status == 'capture_protocol_ready') {
+          _diagnose(CaptureTraceEvent.readyReceived, readyFields: decoded);
           final next = _readAuthority(decoded);
           final current = _authority;
           final isInitial = current == null;
@@ -191,12 +303,30 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
               current.conversationId != next.conversationId &&
               !_retiredConversationIds.contains(next.conversationId);
           if (next == null && isInitial) {
+            _diagnose(CaptureTraceEvent.readyValidated,
+                validation: CaptureTraceValidation.invalidFields, readyFields: decoded, tupleCurrent: false);
             _fail('invalid_capture_protocol_ready');
             unawaited(stop());
             return;
           }
-          if (next == null || (!isInitial && !isIdempotent && !isSuccessor)) return;
-          if (_stopping) return;
+          if (next == null || (!isInitial && !isIdempotent && !isSuccessor)) {
+            _diagnose(CaptureTraceEvent.readyValidated,
+                validation: CaptureTraceValidation.unrelated, readyFields: decoded, tupleCurrent: false);
+            return;
+          }
+          if (_stopping) {
+            _diagnose(CaptureTraceEvent.readyValidated,
+                validation: CaptureTraceValidation.stopping, readyFields: decoded, tupleCurrent: false);
+            return;
+          }
+          _diagnose(CaptureTraceEvent.readyValidated,
+              readyFields: decoded,
+              tupleCurrent: true,
+              validation: isInitial
+                  ? CaptureTraceValidation.initial
+                  : isIdempotent
+                      ? CaptureTraceValidation.idempotent
+                      : CaptureTraceValidation.successor);
           if (isSuccessor) _retiredConversationIds.add(current.conversationId);
           _authority = next;
           final firstReady = !_ready;
@@ -212,15 +342,18 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
         }
       }
     }
+    if (!deliveryBindingCurrent) return;
     if (_ready) super.onMessage(event);
   }
 
   @override
   void onClosed([int? closeCode]) {
+    _diagnose(CaptureTraceEvent.closeCallback, closeCode: closeCode);
     final wasReady = _ready;
     _ready = false;
     _completeWaiters();
-    if (!_stopping && _hasOriginAuthority()) {
+    if (!deliveryBindingCurrent) return;
+    if (!_stopping && hasOriginAuthority) {
       _fail(wasReady ? 'capture_socket_closed' : 'capture_socket_closed_before_ready', closeCode);
     }
     super.onClosed(closeCode);
@@ -230,7 +363,8 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
   void onError(Object err, StackTrace trace) {
     _ready = false;
     _completeWaiters();
-    if (!_stopping && _hasOriginAuthority()) _fail('capture_socket_error');
+    if (!deliveryBindingCurrent) return;
+    if (!_stopping && hasOriginAuthority) _fail('capture_socket_error');
     super.onError(err, trace);
   }
 
@@ -241,6 +375,8 @@ class EllaCaptureProtocolSocket extends TranscriptSegmentSocketService {
 
   void _fail(String reason, [int? closeCode]) {
     if (_failed || _stopping) return;
+    _diagnose(CaptureTraceEvent.failure,
+        failure: EllaCaptureProtocolTrace.classifyFailure(reason), closeCode: closeCode);
     _failed = true;
     _lastAdmissionFailure = EllaCaptureSocketFailure.fromReason(reason, closeCode, DateTime.now());
     final phase = switch (reason) {
@@ -389,8 +525,32 @@ class _DrainablePrimarySocket implements IPureSocket, IPureSocketListener {
 }
 
 /// Constructs the same upstream STT path with a v2 Omi secondary transport.
-Uri ellaCaptureProtocolUri(Uri upstreamUri) =>
-    upstreamUri.replace(queryParameters: {...upstreamUri.queryParameters, 'capture_protocol': '$_protocolVersion'});
+SocketHeadersProvider ellaCaptureSocketHeaders(
+  SocketHeadersProvider authenticatedHeaders, {
+  required bool Function() hasOriginAuthority,
+  required bool Function() hasCurrentDeliveryBinding,
+}) =>
+    () async {
+      void check() {
+        if (!hasOriginAuthority() || !hasCurrentDeliveryBinding()) {
+          throw StateError('capture socket binding retired');
+        }
+      }
+
+      check();
+      final headers = await authenticatedHeaders();
+      check();
+      return headers;
+    };
+
+Uri ellaCaptureProtocolUri(Uri upstreamUri, {Map<String, String>? deliveryQuery}) =>
+    upstreamUri.replace(queryParameters: {
+      for (final entry in upstreamUri.queryParameters.entries)
+        if (!entry.key.startsWith('delivery_')) entry.key: entry.value,
+      'capture_protocol': '$_protocolVersion',
+      ...?deliveryQuery,
+      if (deliveryQuery == null && whisperDeliveryProtocol1) ...WhisperDeliveryRuntime.shared.client.captureQuery
+    });
 
 EllaCaptureProtocolSocket createEllaCaptureProtocolSocket({
   required BleAudioCodec codec,
@@ -402,7 +562,13 @@ EllaCaptureProtocolSocket createEllaCaptureProtocolSocket({
   Geolocation? geolocation,
   void Function(String reason, int? closeCode)? onAdmissionFailure,
   bool Function()? hasOriginAuthority,
+  Map<String, String>? deliveryQuery,
+  bool Function()? hasCurrentDeliveryBinding,
+  EllaCaptureProtocolTrace? diagnosticTrace,
+  CaptureTraceAttempt? diagnosticAttempt,
 }) {
+  final query = Map<String, String>.unmodifiable(deliveryQuery ??
+      (whisperDeliveryProtocol1 ? WhisperDeliveryRuntime.shared.client.captureQuery : const <String, String>{}));
   final originAuthority = hasOriginAuthority ?? EllaCaptureProtocolSocket._alwaysCurrent;
   final template = customSttConfig != null && customSttConfig.isEnabled
       ? TranscriptSocketServiceFactory.createFromCustomConfig(
@@ -424,9 +590,39 @@ EllaCaptureProtocolSocket createEllaCaptureProtocolSocket({
         );
   final original = template.socket;
   PureSocket replace(PureSocket old) {
-    final url = ellaCaptureProtocolUri(Uri.parse(old.url)).toString();
+    final url = ellaCaptureProtocolUri(Uri.parse(old.url), deliveryQuery: query).toString();
     return PureSocket(
       url,
+      headersProvider: ellaCaptureSocketHeaders(
+        () => upstream_http.buildHeaders(requireAuthCheck: true, url: url, forWebSocket: true),
+        hasOriginAuthority: originAuthority,
+        hasCurrentDeliveryBinding: hasCurrentDeliveryBinding ?? EllaCaptureProtocolSocket._alwaysCurrent,
+      ),
+      diagnosticObserver: diagnosticTrace == null
+          ? null
+          : (event, generation, closeCode) {
+              try {
+                final kind = switch (event) {
+                  PureSocketDiagnosticEvent.listenerAttached => CaptureTraceEvent.listenerAttached,
+                  PureSocketDiagnosticEvent.transportConnected => CaptureTraceEvent.transportConnected,
+                  PureSocketDiagnosticEvent.cleanupCloseRequested => CaptureTraceEvent.localCloseRequest,
+                  PureSocketDiagnosticEvent.remoteClosed => CaptureTraceEvent.remoteCloseCallback,
+                  PureSocketDiagnosticEvent.transportError => CaptureTraceEvent.transportErrorCallback,
+                };
+                diagnosticTrace.record(diagnosticAttempt, kind,
+                    transportGeneration: generation,
+                    closeCode: closeCode,
+                    closeOrigin: event == PureSocketDiagnosticEvent.cleanupCloseRequested
+                        ? CaptureTraceCloseOrigin.cleanup
+                        : event == PureSocketDiagnosticEvent.remoteClosed
+                            ? CaptureTraceCloseOrigin.remoteCallback
+                            : event == PureSocketDiagnosticEvent.transportError
+                                ? CaptureTraceCloseOrigin.transportError
+                                : null,
+                    ownerCurrent: originAuthority(),
+                    deliveryCurrent: (hasCurrentDeliveryBinding ?? EllaCaptureProtocolSocket._alwaysCurrent)());
+              } catch (_) {}
+            },
       extraHeaders: {if (geolocation != null) 'X-Omi-Conversation-Geolocation': jsonEncode(geolocation.toJson())},
     );
   }
@@ -457,7 +653,11 @@ EllaCaptureProtocolSocket createEllaCaptureProtocolSocket({
     customSttMode: template.customSttMode,
     sttConfigId: template.sttConfigId,
     geolocation: geolocation,
+    diagnosticTrace: diagnosticTrace,
+    diagnosticAttempt: diagnosticAttempt,
     onAdmissionFailure: onAdmissionFailure,
     hasOriginAuthority: originAuthority,
+    deliveryQuery: query,
+    hasCurrentDeliveryBinding: hasCurrentDeliveryBinding,
   );
 }

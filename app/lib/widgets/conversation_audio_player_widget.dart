@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import 'package:just_audio/just_audio.dart';
+import 'package:omi/ella/services/admitted_audio_player.dart';
 
 import 'package:omi/backend/http/api/audio.dart';
 import 'package:omi/backend/schema/conversation.dart';

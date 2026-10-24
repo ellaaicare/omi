@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 import 'package:omi/upstream_capture/backend/http/api/conversations.dart';
 import 'package:omi/upstream_capture/backend/http/api/users.dart';
@@ -18,6 +19,20 @@ typedef SyncFilesUploader = Future<UploadFilesResult> Function(
   String? conversationId,
   bool claimLiveCapture,
   Geolocation? geolocation,
+});
+typedef ExactSyncFilesUploader = Future<UploadFilesResult> Function(
+  List<File> files, {
+  required ExactAccountAuthorityVerifier exactAuthority,
+  void Function(int)? onHttpStatus,
+  void Function()? onSendAttempt,
+});
+typedef RecoverySyncFilesUploader = Future<UploadFilesResult> Function(
+  List<File> files, {
+  required ExactAccountAuthorityVerifier exactAuthority,
+  String? conversationId,
+  bool claimLiveCapture,
+  Geolocation? geolocation,
+  Map<String, dynamic>? sourceCoverage,
 });
 typedef FairUseStatusLoader = Future<Map<String, dynamic>?> Function();
 typedef UploadTelemetryEmitter = void Function(String eventName, Map<String, dynamic> properties);
@@ -38,8 +53,12 @@ class SyncUploadGate {
     UploadTelemetryEmitter? telemetryEmitter,
     UploadAttemptIdFactory? attemptIdFactory,
     UploadClock? clock,
+    ExactSyncFilesUploader? exactUploader,
+    RecoverySyncFilesUploader? recoveryUploader,
   })  : _limiter = limiter,
         _uploader = uploader,
+        _exactUploader = exactUploader,
+        _recoveryUploader = recoveryUploader,
         _fairUseStatusLoader = fairUseStatusLoader,
         _telemetryEmitter = telemetryEmitter,
         _attemptIdFactory = attemptIdFactory ?? _defaultAttemptId,
@@ -48,6 +67,16 @@ class SyncUploadGate {
   static final SyncUploadGate instance = SyncUploadGate(
     limiter: SyncRateLimiter.instance,
     uploader: uploadLocalFilesV2,
+    exactUploader: (files, {required exactAuthority, onHttpStatus, onSendAttempt}) => uploadLocalFilesV2(files,
+        exactAuthority: exactAuthority, onHttpStatus: onHttpStatus, onSendAttempt: onSendAttempt),
+    recoveryUploader: (files,
+            {required exactAuthority, conversationId, claimLiveCapture = false, geolocation, sourceCoverage}) =>
+        uploadLocalFilesV2(files,
+            exactAuthority: exactAuthority,
+            conversationId: conversationId,
+            claimLiveCapture: claimLiveCapture,
+            geolocation: geolocation,
+            sourceCoverage: sourceCoverage),
     fairUseStatusLoader: getFairUseStatus,
     telemetryEmitter: _emitProductionTelemetry,
   );
@@ -56,6 +85,8 @@ class SyncUploadGate {
 
   final SyncRateLimiter _limiter;
   final SyncFilesUploader _uploader;
+  final ExactSyncFilesUploader? _exactUploader;
+  final RecoverySyncFilesUploader? _recoveryUploader;
   final FairUseStatusLoader _fairUseStatusLoader;
   final UploadTelemetryEmitter? _telemetryEmitter;
   final UploadAttemptIdFactory _attemptIdFactory;
@@ -148,11 +179,31 @@ class SyncUploadGate {
     List<File> files, {
     UploadProgressCallback? onUploadProgress,
     String? conversationId,
+    Map<String, dynamic>? sourceCoverage,
     bool claimLiveCapture = false,
     Geolocation? geolocation,
+    ExactAccountAuthorityVerifier? exactAuthority,
+    ExactAccountAuthorityVerifier? recoveryAuthority,
+    void Function(int)? onHttpStatus,
+    void Function()? onSendAttempt,
   }) async {
+    void verify() {
+      if (recoveryAuthority != null && !recoveryAuthority.isExactCurrent()) {
+        throw ExactAccountAuthorityChangedException('Recovery owner changed');
+      }
+      if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
+        throw ExactAccountAuthorityChangedException('Diagnostic owner changed');
+      }
+    }
+
+    verify();
     await _uploadMutex.acquire();
     try {
+      verify();
+      if (exactAuthority != null &&
+          (conversationId != null || claimLiveCapture || geolocation != null || _exactUploader == null)) {
+        throw StateError('Invalid diagnostic upload admission');
+      }
       if (!AccountCutoverRuntime.instance.allowsOfflineQueueUpload) {
         throw const SyncOfflineQueueQuarantinedException();
       }
@@ -187,13 +238,25 @@ class SyncUploadGate {
       );
 
       try {
-        final result = await _uploader(
-          files,
-          onUploadProgress: onUploadProgress,
-          conversationId: conversationId,
-          claimLiveCapture: claimLiveCapture,
-          geolocation: geolocation,
-        );
+        verify();
+        final result = recoveryAuthority != null && _recoveryUploader != null
+            ? await _recoveryUploader!(files,
+                exactAuthority: recoveryAuthority,
+                conversationId: conversationId,
+                claimLiveCapture: claimLiveCapture,
+                geolocation: geolocation,
+                sourceCoverage: sourceCoverage)
+            : exactAuthority != null
+                ? await _exactUploader!(files,
+                    exactAuthority: exactAuthority, onHttpStatus: onHttpStatus, onSendAttempt: onSendAttempt)
+                : await _uploader(
+                    files,
+                    onUploadProgress: onUploadProgress,
+                    conversationId: conversationId,
+                    claimLiveCapture: claimLiveCapture,
+                    geolocation: geolocation,
+                  );
+        verify();
         _limiter.clear();
         _emitTelemetry(
           RecordingUploadTelemetry.completedEvent,

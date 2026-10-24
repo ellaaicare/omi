@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:record/record.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
@@ -14,53 +15,7 @@ import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/services/v2v_turn_reconciler.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
-
-class _HydrationGateStore implements V2VTurnDurableStore {
-  _HydrationGateStore(this.delegate, this.releaseHydration);
-
-  final V2VTurnDurableStore delegate;
-  final Future<void> releaseHydration;
-  String loadedAuthorityFingerprint = '';
-
-  @override
-  Future<void> clearOwner({
-    required String uid,
-    required String ownerNamespace,
-    required String authorityFingerprint,
-    required V2VAuthorityCurrent isAuthorityCurrent,
-  }) =>
-      delegate.clearOwner(
-        uid: uid,
-        ownerNamespace: ownerNamespace,
-        authorityFingerprint: authorityFingerprint,
-        isAuthorityCurrent: isAuthorityCurrent,
-      );
-
-  @override
-  Future<List<V2VTranscriptTurn>> load({
-    required String uid,
-    required String ownerNamespace,
-    required String authorityFingerprint,
-    required V2VAuthorityCurrent isAuthorityCurrent,
-  }) async {
-    loadedAuthorityFingerprint = authorityFingerprint;
-    await releaseHydration;
-    return delegate.load(
-      uid: uid,
-      ownerNamespace: ownerNamespace,
-      authorityFingerprint: authorityFingerprint,
-      isAuthorityCurrent: isAuthorityCurrent,
-    );
-  }
-
-  @override
-  Future<void> put(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
-      delegate.put(turn, isAuthorityCurrent: isAuthorityCurrent);
-
-  @override
-  Future<void> remove(V2VTranscriptTurn turn, {required V2VAuthorityCurrent isAuthorityCurrent}) =>
-      delegate.remove(turn, isAuthorityCurrent: isAuthorityCurrent);
-}
+import 'package:omi/services/mic/audio_capture_ownership.dart';
 
 Future<void> _grantOperationalAuthority(String uid) async {
   final preferences = SharedPreferencesUtil()..uid = uid;
@@ -111,6 +66,14 @@ class _FakeV2VMicrophoneRecorder implements V2VMicrophoneRecorder {
   final StreamController<Uint8List> _controller = StreamController<Uint8List>.broadcast();
   RecordConfig? config;
   bool _stopped = false;
+  bool recording = false;
+  bool failStop = false;
+  bool? forcedRecordingProbe;
+  int probes = 0;
+  Completer<bool>? permissionGate;
+  Completer<void>? startGate;
+  Completer<void>? stopGate;
+  Completer<void>? disposeGate;
 
   @override
   Future<void> useEllaManagedAudioSession() async {
@@ -120,19 +83,24 @@ class _FakeV2VMicrophoneRecorder implements V2VMicrophoneRecorder {
   @override
   Future<bool> hasPermission() async {
     operations.add('recorder.permission');
-    return true;
+    return permissionGate == null ? true : await permissionGate!.future;
   }
 
   @override
   Future<Stream<Uint8List>> startStream(RecordConfig config) async {
     operations.add('recorder.startStream');
     this.config = config;
+    await startGate?.future;
+    recording = true;
     return _controller.stream;
   }
 
   @override
   Future<String?> stop() async {
     operations.add('recorder.stop');
+    await stopGate?.future;
+    if (failStop) throw StateError('owned native stop failed');
+    recording = false;
     if (!_stopped) {
       _stopped = true;
       await _controller.close();
@@ -141,9 +109,163 @@ class _FakeV2VMicrophoneRecorder implements V2VMicrophoneRecorder {
   }
 
   @override
+  Future<bool> isRecording() async {
+    probes++;
+    return forcedRecordingProbe ?? recording;
+  }
+
+  @override
   Future<void> dispose() async {
     operations.add('recorder.dispose');
+    await disposeGate?.future;
   }
+}
+
+class _DisposedBeforeReceiptPlayer implements AudioPlayer {
+  int disposeCalls = 0;
+  bool fail = true;
+  @override
+  Future<void> dispose() async {
+    disposeCalls++;
+    if (fail) throw StateError('native dispose acknowledgement missing');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _FakeV2VOutputPlayer implements V2VOutputPlayer {
+  final entered = Completer<void>();
+  final played = Completer<void>();
+  Completer<void>? loadGate;
+  Completer<bool>? stopGate;
+  Completer<bool>? disposeGate;
+  bool failStop = false, failDispose = false;
+  int plays = 0, stops = 0, disposals = 0;
+  @override
+  bool get reusableAfterStop => true;
+  @override
+  Future<void> setVolume(double volume) async {}
+  @override
+  Future<void> setFilePath(String path) async {
+    if (!entered.isCompleted) entered.complete();
+    await loadGate?.future;
+  }
+
+  @override
+  Future<void> play() async {
+    plays++;
+    await played.future;
+  }
+
+  @override
+  Future<bool> stopAndConfirm() async {
+    stops++;
+    if (failStop) throw StateError('exact output stop failed');
+    final confirmed = await (stopGate?.future ?? Future.value(true));
+    if (confirmed && !played.isCompleted) played.complete();
+    return confirmed;
+  }
+
+  @override
+  Future<bool> disposeAndConfirm() async {
+    disposals++;
+    if (failDispose) throw StateError('exact output dispose failed');
+    return await (disposeGate?.future ?? Future.value(true));
+  }
+}
+
+Stream<dynamic> _acknowledgedStream(Stream<dynamic> stream, String sessionId) async* {
+  yield jsonEncode({
+    'type': 'provider_ready',
+    'ready_protocol': 1,
+    'provider': 'grok-voice',
+    'session_id': sessionId,
+    'configured_model': 'fixture-grok-model'
+  });
+  yield* stream;
+}
+
+// Models a platform stream delivering one already-buffered callback during cancellation.
+class _LateDeliveryStream extends Stream<dynamic> {
+  _LateDeliveryStream(this.source);
+  final Stream<dynamic> source;
+  void Function(dynamic)? _listener;
+  void deliverLate(dynamic frame) => _listener?.call(frame);
+  @override
+  StreamSubscription<dynamic> listen(void Function(dynamic)? onData,
+      {Function? onError, void Function()? onDone, bool? cancelOnError}) {
+    _listener = onData;
+    return source.listen(onData, onError: onError, onDone: onDone, cancelOnError: cancelOnError);
+  }
+}
+
+class _ReadinessHarness {
+  _ReadinessHarness(
+      {bool negotiated = true,
+      Future<bool> Function()? startMic,
+      Future<void> Function()? onCancel,
+      Future<void> Function()? configureSession,
+      Stream<dynamic> Function(Stream<dynamic>)? wrapStream,
+      Duration timeout = const Duration(seconds: 16)}) {
+    socket = StreamController<dynamic>(sync: true, onListen: () => attached.complete(), onCancel: onCancel);
+    client = V2VClient(
+      onConnectionChanged: states.add,
+      onEvent: (event) {
+        events.add(event.type);
+        eventValues.add(event);
+      },
+      providerRegistryValidator: (_) async => null,
+      sessionCreator: (_, provider, __) async => {
+        'session_token': 'opaque-fixture-token',
+        'provider': provider,
+        'voice_endpoint': negotiated ? 'wss://example.invalid/voice?ready_protocol=1' : 'wss://example.invalid/voice',
+        if (negotiated) 'ready_protocol': 1,
+        'session_id': 'ready-session',
+      },
+      audioSessionConfigurator: configureSession ?? () async {},
+      audioSessionReleaser: () async {
+        releases++;
+      },
+      microphoneStarter: () async {
+        micStarts++;
+        return startMic == null ? true : await startMic();
+      },
+      wavPlayback: (_) async {
+        playbacks++;
+      },
+      webSocketConnector: (uri) {
+        endpoint = uri;
+        return V2VWebSocketTransport(
+            ready: Future<void>.value(),
+            stream: wrapStream == null ? socket.stream : wrapStream(socket.stream),
+            send: sent.add,
+            close: () async {
+              closes++;
+              if (!socket.isClosed) await socket.close();
+            });
+      },
+      providerReadinessTimeout: timeout,
+    );
+  }
+  late final V2VClient client;
+  late final StreamController<dynamic> socket;
+  final attached = Completer<void>();
+  final states = <bool>[];
+  final events = <String>[];
+  final eventValues = <V2VEvent>[];
+  final sent = <dynamic>[];
+  Uri? endpoint;
+  int micStarts = 0, playbacks = 0, closes = 0, releases = 0;
+  Map<String, dynamic> ready({String session = 'ready-session', String provider = 'grok-voice', Object version = 1}) =>
+      {
+        'type': 'provider_ready',
+        'ready_protocol': version,
+        'provider': provider,
+        'session_id': session,
+        'configured_model': 'fixture-model'
+      };
+  void emit(Map<String, dynamic> frame) => socket.add(jsonEncode(frame));
 }
 
 void main() {
@@ -446,6 +568,7 @@ void main() {
       expect(V2VClient.buildSessionRequestBody(uid: 'legacy-user-1', provider: 'grok-voice', includeUid: true), {
         'uid': 'legacy-user-1',
         'provider': 'grok-voice',
+        'ready_protocol': 1,
       });
     });
 
@@ -616,6 +739,477 @@ void main() {
       expect(writes, isEmpty);
     });
 
+    test('Grok registry requires advertised integer protocol1 without applying it to other providers', () {
+      Map<String, dynamic> registry(Object? versions) => {
+            'providers': [
+              {'id': 'grok-voice', 'type': 'v2v', 'available': true, 'ready_protocols': versions}
+            ]
+          };
+      expect(V2VClient.registrySupportsGrokReady(registry([1])), isTrue);
+      for (final versions in [
+        [],
+        ['1'],
+        [1.0],
+        [0],
+        null
+      ]) {
+        expect(V2VClient.registrySupportsGrokReady(registry(versions)), isFalse);
+      }
+      expect(
+          V2VClient.buildSessionRequestBody(uid: 'owner', provider: 'grok-voice', includeUid: false)['ready_protocol'],
+          1);
+      for (final provider in ['gemini-native-live', 'openclaw-direct']) {
+        expect(
+            V2VClient.buildSessionRequestBody(uid: 'owner', provider: provider, includeUid: false)
+                .containsKey('ready_protocol'),
+            isFalse);
+      }
+    });
+    test('missing readiness negotiation fails before route or microphone activation', () async {
+      grantCurrentConsent();
+      final h = _ReadinessHarness(negotiated: false);
+      final receipt = await h.client.connect(provider: 'grok-voice');
+      expect(receipt.errorCode, 'provider_ready_protocol_unsupported');
+      expect(h.micStarts, 0);
+      expect(h.endpoint, isNull);
+      expect(h.states, isEmpty);
+      await h.client.disconnect();
+    });
+    test('transport-open and pre-ready media remain pending; cancellation cannot auto-replay or reactivate', () async {
+      grantCurrentConsent();
+      final h = _ReadinessHarness();
+      final connect = h.client.connect(provider: 'grok-voice');
+      await h.attached.future;
+      h.socket.add(Uint8List.fromList([1, 2, 3, 4]));
+      h.emit({'type': 'transcript', 'text': 'must be dropped'});
+      h.emit({'type': 'speech_started'});
+      h.emit({'type': 'audio_done'});
+      await Future<void>.delayed(Duration.zero);
+      expect(h.client.isConnected, isFalse);
+      expect(h.micStarts, 0);
+      expect(h.states, isEmpty);
+      expect(h.events, isEmpty);
+      expect(h.playbacks, 0);
+      expect(h.sent, isEmpty);
+      await h.client.disconnect();
+      final receipt = await connect;
+      expect(receipt.connected, isFalse);
+      expect(receipt.errorCode, 'connect_cancelled');
+      h.client.handleMessageForTesting(jsonEncode(h.ready()));
+      expect(h.client.isConnected, isFalse);
+      expect(h.micStarts, 0);
+      expect(h.closes, 1);
+    });
+    test('buffered exact ACK starts microphone once; duplicates and pre-ready media do not replay', () async {
+      grantCurrentConsent();
+      final h = _ReadinessHarness();
+      h.socket.add(Uint8List.fromList([1, 2, 3, 4]));
+      h.emit(h.ready());
+      h.emit(h.ready());
+      final receipt = await h.client.connect(provider: 'grok-voice');
+      expect(receipt.connected, isTrue);
+      expect(h.micStarts, 1);
+      expect(h.states, [true]);
+      expect(h.playbacks, 0);
+      expect(h.endpoint!.queryParameters['ready_protocol'], '1');
+      h.emit(h.ready());
+      await Future<void>.delayed(Duration.zero);
+      expect(h.micStarts, 1);
+      expect(h.states, [true]);
+      await h.client.disconnect();
+      expect(h.states, [true, false]);
+      expect(h.closes, 1);
+    });
+    for (final mismatch in ['session', 'provider', 'version', 'model']) {
+      test('mismatched readiness $mismatch fails without microphone or connected pulse', () async {
+        grantCurrentConsent();
+        final h = _ReadinessHarness();
+        final connect = h.client.connect(provider: 'grok-voice');
+        await h.attached.future;
+        final ack = h.ready();
+        switch (mismatch) {
+          case 'session':
+            ack['session_id'] = 'old-session';
+          case 'provider':
+            ack['provider'] = 'gemini-native-live';
+          case 'version':
+            ack['ready_protocol'] = '1';
+          case 'model':
+            ack['configured_model'] = '';
+        }
+        h.emit(ack);
+        final receipt = await connect;
+        expect(receipt.errorCode, 'provider_ready_protocol_mismatch');
+        expect(h.micStarts, 0);
+        expect(h.states, isEmpty);
+        expect(h.closes, 1);
+      });
+    }
+    test('upstream403 preserves fixed failure code/status and drops raw error detail', () async {
+      grantCurrentConsent();
+      final h = _ReadinessHarness();
+      final connect = h.client.connect(provider: 'grok-voice');
+      await h.attached.future;
+      h.emit({
+        'type': 'error',
+        'ready_protocol': 1,
+        'provider': 'grok-voice',
+        'session_id': 'ready-session',
+        'terminal': true,
+        'code': 'provider_handshake_rejected',
+        'http_status': 403,
+        'message': 'secret arbitrary upstream text must not be retained'
+      });
+      final receipt = await connect;
+      expect(receipt.errorCode, 'provider_handshake_rejected');
+      expect(receipt.httpStatus, 403);
+      expect(receipt.safeDetail, isNot(contains('secret')));
+      expect(h.states, isEmpty);
+      expect(h.micStarts, 0);
+    });
+    test('readiness timeout cleans up once and never requests microphone', () async {
+      grantCurrentConsent();
+      final h = _ReadinessHarness(timeout: const Duration(milliseconds: 20));
+      final receipt = await h.client.connect(provider: 'grok-voice');
+      expect(receipt.errorCode, 'provider_ready_timeout');
+      expect(h.closes, 1);
+      expect(h.releases, 1);
+      expect(h.micStarts, 0);
+      expect(h.states, isEmpty);
+    });
+    test('owner retirement during pending readiness fails before microphone', () async {
+      grantCurrentConsent();
+      final h = _ReadinessHarness();
+      final connect = h.client.connect(provider: 'grok-voice');
+      await h.attached.future;
+      SharedPreferencesUtil().deferAiConsent();
+      final receipt = await connect.timeout(const Duration(seconds: 1));
+      expect(receipt.connected, isFalse);
+      expect(h.micStarts, 0);
+      expect(h.states, isEmpty);
+      expect(h.closes, 1);
+    });
+    test('ACK followed by mic failure cannot announce active or play queued audio', () async {
+      grantCurrentConsent();
+      final h = _ReadinessHarness(startMic: () async => false);
+      final connect = h.client.connect(provider: 'grok-voice');
+      await h.attached.future;
+      h.emit(h.ready());
+      h.socket.add(Uint8List.fromList([1, 2, 3, 4]));
+      final receipt = await connect;
+      expect(receipt.connected, isFalse);
+      expect(receipt.errorCode, 'microphone_unavailable');
+      expect(h.states, isEmpty);
+      expect(h.playbacks, 0);
+      expect(h.closes, 1);
+    });
+    for (final terminalType in ['error', 'session_end', 'socket_close']) {
+      test('ACK then $terminalType in one delivery cannot start microphone or announce active', () async {
+        grantCurrentConsent();
+        final h = _ReadinessHarness();
+        final connect = h.client.connect(provider: 'grok-voice');
+        await h.attached.future;
+        h.emit(h.ready());
+        if (terminalType == 'socket_close') {
+          unawaited(h.socket.close());
+        } else {
+          h.emit({
+            'type': terminalType,
+            'ready_protocol': 1,
+            'provider': 'grok-voice',
+            'session_id': 'ready-session',
+            'terminal': true,
+            'code': 'provider_handshake_rejected',
+            'http_status': 403,
+          });
+        }
+        final receipt = await connect;
+        expect(receipt.connected, isFalse);
+        expect(receipt.errorCode,
+            terminalType == 'socket_close' ? 'provider_startup_client_closed' : 'provider_handshake_rejected');
+        expect(h.states, isEmpty);
+        expect(h.micStarts, 0);
+        expect(h.closes, 1);
+      });
+    }
+    for (final interruption in ['error', 'socket_close', 'authority']) {
+      test('ACK then $interruption while microphone awaits cannot announce active or deliver media', () async {
+        grantCurrentConsent();
+        final micEntered = Completer<void>();
+        final micFinish = Completer<bool>();
+        final h = _ReadinessHarness(startMic: () {
+          micEntered.complete();
+          return micFinish.future;
+        });
+        final connect = h.client.connect(provider: 'grok-voice');
+        await h.attached.future;
+        h.emit(h.ready());
+        await micEntered.future;
+        if (interruption == 'socket_close') {
+          unawaited(h.socket.close());
+        } else if (interruption == 'authority') {
+          SharedPreferencesUtil().deferAiConsent();
+        } else {
+          h.emit({
+            'type': 'error',
+            'ready_protocol': 1,
+            'provider': 'grok-voice',
+            'session_id': 'ready-session',
+            'terminal': true,
+            'code': 'provider_session_configuration_rejected',
+          });
+        }
+        if (!h.socket.isClosed) {
+          h.emit({'type': 'transcript', 'text': 'must not reach UI'});
+          h.socket.add(Uint8List.fromList([1, 2, 3, 4]));
+        }
+        await Future<void>.delayed(Duration.zero);
+        micFinish.complete(true);
+        final receipt = await connect;
+        expect(receipt.connected, isFalse);
+        if (interruption == 'error') expect(receipt.errorCode, 'provider_session_configuration_rejected');
+        if (interruption == 'socket_close') expect(receipt.errorCode, 'provider_startup_client_closed');
+        expect(h.states, isEmpty);
+        expect(h.events.where((event) => event != 'connection_receipt'), isEmpty);
+        expect(h.playbacks, 0);
+        expect(h.closes, 1);
+      });
+    }
+
+    for (final acknowledged in [false, true]) {
+      for (final reason in ['quota_daily', 'ai_consent_required']) {
+        test('Grok $reason retains existing policy stop before/after ACK=$acknowledged', () async {
+          grantCurrentConsent();
+          final h = _ReadinessHarness();
+          final connect = h.client.connect(provider: 'grok-voice');
+          await h.attached.future;
+          if (acknowledged) {
+            h.emit(h.ready());
+            expect((await connect).connected, isTrue);
+          }
+          h.emit({
+            'type': 'session_end',
+            'detail': {'code': reason, 'resets_at': '2026-10-10T00:00:00Z'},
+            'message': 'arbitrary raw text must not reach UI',
+          });
+          if (!acknowledged) expect((await connect).errorCode, reason);
+          await h.client.disconnect();
+          expect(h.client.lastConnectionReceipt!.errorCode, reason);
+          if (reason == 'quota_daily') {
+            final event = h.eventValues.singleWhere((event) => event.type == 'session_end');
+            expect(event.policyReason, EllaVoicePolicyReason.quotaDaily);
+            expect(event.resetsAt!.toUtc(), DateTime.utc(2026, 10, 10));
+            expect(event.text, isNull);
+          } else {
+            expect(h.events, contains('consent_authority_lost'));
+          }
+          expect(h.closes, 1);
+          expect(h.playbacks, 0);
+          expect(h.states, acknowledged ? [true, false] : isEmpty);
+        });
+      }
+    }
+
+    for (final acknowledged in [false, true]) {
+      test('late callback during delayed cancellation is dropped after ACK=$acknowledged', () async {
+        grantCurrentConsent();
+        final cancelEntered = Completer<void>();
+        final cancelFinish = Completer<void>();
+        late _LateDeliveryStream lateStream;
+        final h = _ReadinessHarness(
+          wrapStream: (source) => lateStream = _LateDeliveryStream(source),
+          onCancel: () {
+            cancelEntered.complete();
+            return cancelFinish.future;
+          },
+        );
+        final connect = h.client.connect(provider: 'grok-voice');
+        await h.attached.future;
+        if (acknowledged) {
+          h.emit(h.ready());
+          expect((await connect).connected, isTrue);
+        }
+        final disconnect = h.client.disconnect();
+        await cancelEntered.future;
+        final eventCount = h.events.length;
+        lateStream.deliverLate(jsonEncode({'type': 'transcript', 'text': 'stale private text'}));
+        lateStream.deliverLate(Uint8List.fromList([1, 2, 3, 4]));
+        lateStream.deliverLate(jsonEncode(h.ready()));
+        expect(h.events.length, eventCount);
+        expect(h.playbacks, 0);
+        expect(h.client.isConnected, isFalse);
+        cancelFinish.complete();
+        await disconnect;
+        if (!acknowledged) expect((await connect).connected, isFalse);
+        expect(h.micStarts, acknowledged ? 1 : 0);
+        expect(h.closes, 1);
+      });
+    }
+
+    test('post-ready terminal failure closes and retains typed safe receipt', () async {
+      grantCurrentConsent();
+      final h = _ReadinessHarness();
+      h.emit(h.ready());
+      expect((await h.client.connect(provider: 'grok-voice')).connected, isTrue);
+      h.emit({
+        'type': 'error',
+        'ready_protocol': 1,
+        'provider': 'grok-voice',
+        'session_id': 'ready-session',
+        'terminal': true,
+        'code': 'provider_startup_failed'
+      });
+      await Future<void>.delayed(Duration.zero);
+      await h.client.disconnect();
+      expect(h.client.lastConnectionReceipt!.errorCode, 'provider_startup_failed');
+      expect(h.states, [true, false]);
+      expect(h.closes, 1);
+    });
+
+    test('remote socket close releases the owned microphone and interactive route', () async {
+      grantCurrentConsent();
+      final operations = <String>[];
+      final recorder = _FakeV2VMicrophoneRecorder(operations);
+      final socket = StreamController<dynamic>();
+      final released = Completer<void>();
+      final states = <bool>[];
+      final client = V2VClient(
+        onConnectionChanged: states.add,
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, provider, __) async => {
+          'session_token': 'opaque-test-token',
+          'voice_endpoint': 'wss://example.invalid/voice?ready_protocol=1',
+          'ready_protocol': 1,
+          'provider': provider,
+          'voice_mode': 'grok-voice',
+          'session_id': 'synthetic-close-session',
+        },
+        audioSessionConfigurator: () async {},
+        audioSessionReleaser: () async {
+          operations.add('route.release');
+          if (!released.isCompleted) released.complete();
+        },
+        audibleOutputEnforcer: () async => true,
+        microphoneRecorderFactory: () => recorder,
+        webSocketConnector: (_) => V2VWebSocketTransport(
+          ready: Future<void>.value(),
+          stream: _acknowledgedStream(socket.stream, 'synthetic-close-session'),
+          send: (_) {},
+          close: socket.close,
+        ),
+      );
+      addTearDown(client.disconnect);
+      expect((await client.connect(provider: 'grok-voice')).connected, isTrue);
+      expect(operations, contains('recorder.startStream'));
+      await socket.close();
+      await Future<void>.delayed(Duration.zero);
+      expect(operations, contains('recorder.stop'), reason: 'A remote close must stop owned mic capture');
+      expect(operations, contains('recorder.dispose'));
+      expect(operations, contains('route.release'));
+      expect(states, [true, false]);
+      expect(client.hasActiveConsentLeaseForTesting, isFalse);
+    });
+
+    for (final reuseClient in [true, false]) {
+      test('reconnect waits for remote-close cleanup (reuse client: $reuseClient)', () async {
+        grantCurrentConsent();
+        final firstSocket = StreamController<dynamic>();
+        final nextSocket = StreamController<dynamic>();
+        final releaseStarted = Completer<void>();
+        final allowRelease = Completer<void>();
+        var sessions = 0;
+        var micStarts = 0;
+        var releases = 0;
+        V2VClient makeClient() => V2VClient(
+              providerRegistryValidator: (_) async => null,
+              sessionCreator: (_, provider, __) async {
+                sessions++;
+                return {
+                  'session_token': 'opaque-test-token',
+                  'voice_endpoint': 'wss://example.invalid/voice?ready_protocol=1',
+                  'ready_protocol': 1,
+                  'provider': provider,
+                  'voice_mode': 'grok-voice',
+                  'session_id': 'synthetic-session-$sessions'
+                };
+              },
+              audioSessionConfigurator: () async {},
+              audioSessionReleaser: () async {
+                releases++;
+                if (releases == 1) {
+                  releaseStarted.complete();
+                  await allowRelease.future;
+                }
+              },
+              microphoneStarter: () async {
+                micStarts++;
+                return true;
+              },
+              webSocketConnector: (_) {
+                final socket = sessions == 1 ? firstSocket : nextSocket;
+                return V2VWebSocketTransport(
+                    ready: Future<void>.value(),
+                    stream: _acknowledgedStream(socket.stream, 'synthetic-session-$sessions'),
+                    send: (_) {},
+                    close: socket.close);
+              },
+            );
+        final firstClient = makeClient();
+        expect((await firstClient.connect(provider: 'grok-voice')).connected, isTrue);
+        await firstSocket.close();
+        await releaseStarted.future;
+        final secondClient = reuseClient ? firstClient : makeClient();
+        final reconnect = secondClient.connect(provider: 'grok-voice');
+        await Future<void>.delayed(Duration.zero);
+        expect(sessions, 1, reason: 'Old interactive route must be released before a new session starts');
+        expect(micStarts, 1);
+        allowRelease.complete();
+        expect((await reconnect).connected, isTrue);
+        expect(sessions, 2);
+        expect(micStarts, 2);
+        final cleanup = secondClient.disconnect();
+        expect(identical(cleanup, secondClient.disconnect()), isTrue);
+        await cleanup;
+      });
+    }
+
+    test('rejected socket handshake never announces connected or starts the microphone', () async {
+      grantCurrentConsent();
+      var micStarts = 0;
+      final states = <bool>[];
+      final client = V2VClient(
+        onConnectionChanged: states.add,
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, provider, __) async => {
+          'session_token': 'opaque-test-token',
+          'voice_endpoint': 'wss://example.invalid/voice?ready_protocol=1',
+          'ready_protocol': 1,
+          'provider': provider,
+          'voice_mode': 'grok-voice',
+          'session_id': 'synthetic-rejected-session',
+        },
+        audioSessionConfigurator: () async {},
+        audioSessionReleaser: () async {},
+        microphoneStarter: () async {
+          micStarts++;
+          return true;
+        },
+        webSocketConnector: (_) => V2VWebSocketTransport(
+          ready: Future<void>.error(StateError('synthetic handshake rejection')),
+          stream: const Stream<dynamic>.empty(),
+          send: (_) {},
+          close: () async {},
+        ),
+      );
+      final receipt = await client.connect(provider: 'grok-voice');
+      expect(receipt.connected, isFalse);
+      expect(receipt.stage, V2VConnectionStage.websocket);
+      expect(micStarts, 0);
+      expect(states, isEmpty);
+      expect(client.hasActiveConsentLeaseForTesting, isFalse);
+      await client.disconnect();
+    });
+
     test('canonical success with lost ACK survives restart and new-session proxy replay exactly once', () async {
       grantCurrentConsent();
       const terminalFrame = '{"type":"transcript_turn","contract_version":1,"terminal":true,'
@@ -670,7 +1264,8 @@ void main() {
         providerRegistryValidator: (_) async => null,
         sessionCreator: (_, provider, __) async => {
           'session_token': 'opaque-test-token',
-          'voice_endpoint': 'wss://example.invalid/voice',
+          'voice_endpoint': 'wss://example.invalid/voice?ready_protocol=1',
+          'ready_protocol': 1,
           'provider': provider,
           'voice_mode': 'grok-voice',
           'session_id': 'session-jti-1',
@@ -678,7 +1273,7 @@ void main() {
         audioSessionConfigurator: () async {},
         webSocketConnector: (_) => V2VWebSocketTransport(
           ready: Future<void>.value(),
-          stream: firstSocket.stream,
+          stream: _acknowledgedStream(firstSocket.stream, 'session-jti-1'),
           send: (value) => firstSentFrames.add(value as String),
           close: firstSocket.close,
         ),
@@ -705,7 +1300,8 @@ void main() {
         providerRegistryValidator: (_) async => null,
         sessionCreator: (_, provider, __) async => {
           'session_token': 'opaque-test-token',
-          'voice_endpoint': 'wss://example.invalid/voice',
+          'voice_endpoint': 'wss://example.invalid/voice?ready_protocol=1',
+          'ready_protocol': 1,
           'provider': provider,
           'voice_mode': 'grok-voice',
           'session_id': 'session-jti-2',
@@ -713,7 +1309,7 @@ void main() {
         audioSessionConfigurator: () async {},
         webSocketConnector: (_) => V2VWebSocketTransport(
           ready: Future<void>.value(),
-          stream: replaySocket.stream,
+          stream: _acknowledgedStream(replaySocket.stream, 'session-jti-2'),
           send: (value) => replaySentFrames.add(value as String),
           close: replaySocket.close,
         ),
@@ -831,6 +1427,8 @@ void main() {
           await releaseBoundary.future;
         },
         onProtectedEgress: protectedEgress.add,
+        providerRegistryValidator: (_) async => null,
+        sessionCreator: (_, __, ___) async => <String, dynamic>{},
       );
 
       final connectFuture = client.connect(provider: 'grok-voice');
@@ -959,6 +1557,50 @@ void main() {
       }
     });
 
+    test('actual V2V recorder keeps parent reservation while permission/start/stop are held', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a')!;
+      final recorder = _FakeV2VMicrophoneRecorder([])
+        ..permissionGate = Completer<bool>()
+        ..startGate = Completer<void>()
+        ..stopGate = Completer<void>();
+      final client = V2VClient(microphoneRecorderFactory: () => recorder, audibleOutputEnforcer: () async => true);
+      final starting = client.startAuthorizedMicrophoneForTesting(authority: authority, shouldContinue: () => true);
+      await Future<void>.delayed(Duration.zero);
+      expect(AudioCaptureOwnership.shared.reserve(source: 'dictation', hasAuthority: () => true), isNull);
+      recorder.permissionGate!.complete(true);
+      await Future<void>.delayed(Duration.zero);
+      final closing = client.disconnect();
+      expect(AudioCaptureOwnership.shared.isReserved, isTrue);
+      recorder.startGate!.complete();
+      await Future<void>.delayed(Duration.zero);
+      expect(AudioCaptureOwnership.shared.isReserved, isTrue);
+      recorder.stopGate!.complete();
+      await closing;
+      expect(await starting, isFalse);
+      expect(recorder.probes, greaterThan(0));
+      expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+    });
+
+    test('actual V2V failed stop or active probe retains exact recorder and owner until retry', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a')!;
+      final recorder = _FakeV2VMicrophoneRecorder([])..failStop = true;
+      final client = V2VClient(microphoneRecorderFactory: () => recorder, audibleOutputEnforcer: () async => true);
+      expect(
+          await client.startAuthorizedMicrophoneForTesting(authority: authority, shouldContinue: () => true), isTrue);
+      await expectLater(client.disconnect(), throwsStateError);
+      expect(AudioCaptureOwnership.shared.reserve(source: 'phone', hasAuthority: () => true), isNull);
+      expect(recorder.recording, isTrue);
+      recorder.failStop = false;
+      recorder.forcedRecordingProbe = true;
+      await expectLater(client.disconnect(), throwsStateError);
+      expect(AudioCaptureOwnership.shared.isReserved, isTrue);
+      recorder.forcedRecordingProbe = false;
+      await client.disconnect();
+      expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+    });
+
     test('real recorder adapter fails closed after start when post-start route verification fails', () async {
       grantCurrentConsent();
       final authority = AiConsentAuthoritySnapshot.capture(
@@ -1031,6 +1673,200 @@ void main() {
       await client.disconnect();
     });
 
+    Future<(V2VClient, _FakeV2VOutputPlayer, Future<void>, List<int>)> startOutput({
+      _FakeV2VOutputPlayer? output,
+      Future<bool> Function()? release,
+      Future<bool> Function()? route,
+    }) async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a')!;
+      final player = output ?? _FakeV2VOutputPlayer();
+      final starts = <int>[];
+      final client = V2VClient(
+        microphoneStarter: () async {
+          starts.add(1);
+          return true;
+        },
+        outputPlayerFactory: () => player,
+        audibleOutputEnforcer: () async => true,
+        playbackOutputEnforcer: route ?? () async => true,
+        audioSessionReleaseReceipt: release ?? () async => true,
+        liveChannelForTesting: () => true,
+        playbackMicCooldown: Duration.zero,
+      );
+      expect(
+          await client.startAuthorizedMicrophoneForTesting(authority: authority, shouldContinue: () => true), isTrue);
+      client.markConnectedForTesting();
+      client.bufferAudioChunkForTesting(Uint8List.fromList([1, 2]));
+      final finish = client.finishPlaybackForTesting();
+      return (client, player, finish, starts);
+    }
+
+    test('output teardown stock failed-dispose retry never treats a local no-op as silence', () async {
+      final raw = _DisposedBeforeReceiptPlayer();
+      final adapter = JustAudioV2VOutputPlayer(player: raw);
+      await expectLater(adapter.stopAndConfirm(), throwsStateError);
+      raw.fail = false;
+      expect(await adapter.disposeAndConfirm(), isFalse);
+      expect(await adapter.stopAndConfirm(), isFalse);
+      expect(raw.disposeCalls, 1);
+      final successfulRaw = _DisposedBeforeReceiptPlayer()..fail = false;
+      final successfulAdapter = JustAudioV2VOutputPlayer(player: successfulRaw);
+      expect(await successfulAdapter.stopAndConfirm(), isTrue);
+      expect(await successfulAdapter.disposeAndConfirm(), isTrue);
+      expect(successfulRaw.disposeCalls, 1);
+    });
+
+    test('output teardown raw quiesce waits initial session setup before any microphone or output', () async {
+      grantCurrentConsent();
+      final entered = Completer<void>(), released = Completer<void>();
+      final h = _ReadinessHarness(configureSession: () async {
+        entered.complete();
+        await released.future;
+      });
+      h.emit(h.ready());
+      final connection = h.client.connect(provider: 'grok-voice');
+      await entered.future;
+      final transition = AudioCaptureOwnership.shared.quiesceForAccountTransition();
+      await Future<void>.delayed(Duration.zero);
+      expect(AudioCaptureOwnership.shared.isReserved, isTrue);
+      expect(h.micStarts, 0);
+      expect(h.playbacks, 0);
+      expect(h.releases, 0);
+      released.complete();
+      await transition;
+      expect((await connection).connected, isFalse);
+      expect(h.micStarts, 0);
+      expect(h.playbacks, 0);
+      expect(h.releases, 1);
+      await h.client.disconnect();
+      expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+      // Startup never attaches this synthetic socket; consume its buffered
+      // ready frame before awaiting close so fixture cleanup cannot hang.
+      final unusedSocket = h.socket.stream.listen((_) {});
+      await h.socket.close();
+      await unusedSocket.cancel();
+    });
+
+    test('output teardown held stop blocks replacement, new playback and mic restart', () async {
+      final player = _FakeV2VOutputPlayer()..stopGate = Completer<bool>();
+      final (client, _, finish, starts) = await startOutput(output: player);
+      await player.entered.future;
+      await Future<void>.delayed(Duration.zero);
+      final interrupt = client.interruptPlayback();
+      await Future<void>.delayed(Duration.zero);
+      expect(AudioCaptureOwnership.shared.reserve(source: 'replacement', hasAuthority: () => true), isNull);
+      client.bufferAudioChunkForTesting(Uint8List.fromList([3, 4]));
+      await client.finishPlaybackForTesting();
+      expect(player.plays, 1);
+      expect(starts, hasLength(1));
+      player.stopGate!.complete(true);
+      await interrupt;
+      await finish;
+      expect(starts, hasLength(2));
+      await client.disconnect();
+      expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+    });
+
+    for (final failure in ['stop', 'dispose', 'route']) {
+      test('output teardown $failure failure holds exact parent until explicit retry', () async {
+        var routeConfirmed = failure != 'route';
+        final player = _FakeV2VOutputPlayer()
+          ..failStop = failure == 'stop'
+          ..failDispose = failure == 'dispose';
+        final (client, _, finish, starts) = await startOutput(output: player, release: () async => routeConfirmed);
+        await player.entered.future;
+        await Future<void>.delayed(Duration.zero);
+        await expectLater(client.disconnect(), throwsStateError);
+        expect(AudioCaptureOwnership.shared.isReserved, isTrue);
+        expect(AudioCaptureOwnership.shared.reserve(source: 'phone', hasAuthority: () => true), isNull);
+        expect(starts, hasLength(1));
+        client.bufferAudioChunkForTesting(Uint8List.fromList([5, 6]));
+        await client.finishPlaybackForTesting();
+        expect(player.plays, 1);
+        player.failStop = false;
+        player.failDispose = false;
+        routeConfirmed = true;
+        await client.disconnect();
+        await finish;
+        expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+        expect(starts, hasLength(1));
+      });
+    }
+
+    test('output teardown raw account quiesce retains through held native disposal and account drift', () async {
+      final player = _FakeV2VOutputPlayer()..disposeGate = Completer<bool>();
+      final (client, _, finish, starts) = await startOutput(output: player);
+      await player.entered.future;
+      await Future<void>.delayed(Duration.zero);
+      final transition = AudioCaptureOwnership.shared.quiesceForAccountTransition();
+      await Future<void>.delayed(Duration.zero);
+      expect(AudioCaptureOwnership.shared.isReserved, isTrue);
+      SharedPreferencesUtil().uid = 'uid-b';
+      client.bufferAudioChunkForTesting(Uint8List.fromList([7, 8]));
+      expect(AudioCaptureOwnership.shared.reserve(source: 'account-b', hasAuthority: () => true), isNull);
+      expect(starts, hasLength(1));
+      player.disposeGate!.complete(true);
+      await transition;
+      await finish;
+      await client.disconnect();
+      expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+      expect(player.plays, 1);
+    });
+
+    test('output teardown raw quiesce false disposal remains retryable on same exact lifetime', () async {
+      final player = _FakeV2VOutputPlayer()..disposeGate = Completer<bool>();
+      final (client, _, finish, starts) = await startOutput(output: player);
+      await player.entered.future;
+      await Future<void>.delayed(Duration.zero);
+      final transition = AudioCaptureOwnership.shared.quiesceForAccountTransition();
+      player.disposeGate!.complete(false);
+      await expectLater(transition, throwsStateError);
+      expect(AudioCaptureOwnership.shared.isReserved, isTrue);
+      expect(starts, hasLength(1));
+      player.disposeGate = null;
+      await AudioCaptureOwnership.shared.quiesceForAccountTransition();
+      await finish;
+      await client.disconnect();
+      expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+      expect(player.disposals, greaterThanOrEqualTo(2));
+    });
+
+    test('output teardown held player load cannot play after raw quiesce acknowledgement', () async {
+      final player = _FakeV2VOutputPlayer()..loadGate = Completer<void>();
+      final (client, _, finish, starts) = await startOutput(output: player);
+      await player.entered.future;
+      final transition = AudioCaptureOwnership.shared.quiesceForAccountTransition();
+      await Future<void>.delayed(Duration.zero);
+      expect(player.stops, 0);
+      expect(AudioCaptureOwnership.shared.isReserved, isTrue);
+      player.loadGate!.complete();
+      await transition;
+      await finish;
+      await client.disconnect();
+      expect(player.plays, 0);
+      expect(starts, hasLength(1));
+      expect(player.disposals, 1);
+    });
+
+    test('output teardown held route setup is fenced before player allocation', () async {
+      final entered = Completer<void>(), released = Completer<bool>();
+      final (client, player, finish, starts) = await startOutput(route: () {
+        entered.complete();
+        return released.future;
+      });
+      await entered.future;
+      final transition = AudioCaptureOwnership.shared.quiesceForAccountTransition();
+      await Future<void>.delayed(Duration.zero);
+      expect(AudioCaptureOwnership.shared.isReserved, isTrue);
+      released.complete(true);
+      await transition;
+      await finish;
+      await client.disconnect();
+      expect(player.plays, 0);
+      expect(starts, hasLength(1));
+    });
+
     test('PCM playback waits for WAV completion then restores the interactive route and mic', () async {
       grantCurrentConsent();
       final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a');
@@ -1094,6 +1930,37 @@ void main() {
       expect(client.micMutedForTesting, isFalse);
       expect(client.micSuspendedForPlaybackForTesting, isFalse);
       await client.disconnect();
+    });
+
+    test('ambiguous actual recorder playback pause prevents playback and mic restart until owned teardown', () async {
+      grantCurrentConsent();
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: SharedPreferencesUtil(), expectedUid: 'uid-a')!;
+      final operations = <String>[];
+      final recorder = _FakeV2VMicrophoneRecorder(operations)..failStop = true;
+      var playbacks = 0;
+      final client = V2VClient(
+        microphoneRecorderFactory: () => recorder,
+        audibleOutputEnforcer: () async => true,
+        playbackOutputEnforcer: () async => true,
+        wavPlayback: (_) async {
+          playbacks++;
+        },
+        liveChannelForTesting: () => true,
+        playbackMicCooldown: Duration.zero,
+      );
+      expect(
+          await client.startAuthorizedMicrophoneForTesting(authority: authority, shouldContinue: () => true), isTrue);
+      client.markConnectedForTesting();
+      client.bufferAudioChunkForTesting(Uint8List.fromList([1, 2, 3, 4]));
+      await client.finishPlaybackForTesting();
+      await client.interruptPlayback();
+      expect(playbacks, 0);
+      expect(operations.where((operation) => operation == 'recorder.startStream'), hasLength(1));
+      expect(client.micMutedForTesting, isTrue);
+      expect(AudioCaptureOwnership.shared.reserve(source: 'dictation', hasAuthority: () => true), isNull);
+      recorder.failStop = false;
+      await client.disconnect();
+      expect(AudioCaptureOwnership.shared.isReserved, isFalse);
     });
 
     test('WAV playback failure reports the error and reopens the authorized mic', () async {
@@ -1163,6 +2030,10 @@ void main() {
           playbackEntered.complete();
           await releasePlayback.future;
         },
+        injectedPlaybackStopReceipt: () async {
+          if (!releasePlayback.isCompleted) releasePlayback.complete();
+          return true;
+        },
         liveChannelForTesting: () => true,
         playbackMicCooldown: Duration.zero,
       );
@@ -1177,7 +2048,7 @@ void main() {
       await playbackEntered.future;
 
       await client.disconnect();
-      releasePlayback.complete();
+      if (!releasePlayback.isCompleted) releasePlayback.complete();
       await finish;
 
       expect(playbackStarts, 1);

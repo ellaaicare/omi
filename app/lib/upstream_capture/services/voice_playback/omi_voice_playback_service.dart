@@ -1,3 +1,4 @@
+import 'package:omi/ella/services/app_output_admission.dart';
 // Plays Omi's spoken response when the user talks to the device via the
 // hardware button. Ports the chunking + pipelined-playback architecture from
 // `desktop/Desktop/Sources/FloatingControlBar/FloatingBarVoicePlaybackService.swift`.
@@ -8,7 +9,7 @@ import 'dart:async';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:just_audio/just_audio.dart';
+import 'package:omi/ella/services/admitted_audio_player.dart';
 
 import 'package:omi/upstream_capture/backend/http/api/tts.dart';
 import 'package:omi/upstream_capture/backend/preferences.dart';
@@ -116,7 +117,10 @@ class OmiVoicePlaybackService {
   bool get isSpeaking =>
       _previewActive || (_sessionActive && (_isPlayingQueue || _audioQueue.isNotEmpty || _synthesizing));
 
+  AppOutputPermit? _outputPermit;
+
   Future<void> _ensureInitialized() async {
+    _outputPermit ??= AppOutputAdmission.shared.reserveOutput('upstream-voice-output');
     if (_initialized) return;
     if (debugHooks != null) {
       _initialized = true;
@@ -567,6 +571,7 @@ class OmiVoicePlaybackService {
   }
 
   Future<void> _activateSession() async {
+    _outputPermit ??= AppOutputAdmission.shared.reserveOutput('upstream-voice-output');
     if (_sessionActive) return;
     _sessionActive = true;
     if (debugHooks != null) return;

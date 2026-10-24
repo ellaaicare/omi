@@ -4,6 +4,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/widgets/ella_v7_companion_card.dart';
+import 'package:omi/ella/widgets/ella_v7_surfaces.dart';
 import 'package:omi/services/auth_service.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -53,214 +55,214 @@ class _EllaWelcomeState extends State<EllaWelcome> {
   @override
   Widget build(BuildContext context) {
     final enabled = _nameController.text.trim().isNotEmpty;
-    return Scaffold(
-      backgroundColor: EllaColors.bgPrimary,
-      body: SafeArea(
-        child: GestureDetector(
-          onTap: () => FocusScope.of(context).unfocus(),
-          behavior: HitTestBehavior.opaque,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  const SizedBox(height: 24),
-                  Text(
-                    context.l10n.ellaOnboardingStep(1, 3),
-                    style: const TextStyle(fontSize: 16, color: EllaColors.textTertiary),
-                  ),
-                  const SizedBox(height: 16),
-                  // Hero illustration
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(24),
-                    child: Image.asset(
-                      'assets/images/ella_onboarding_1.png',
-                      height: 180,
-                      fit: BoxFit.contain,
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Text(
-                    context.l10n.ellaWelcomeGreeting,
-                    style: const TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                      color: EllaColors.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    context.l10n.ellaWelcomeDescription,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 18,
-                      color: EllaColors.textSecondary,
-                      height: 1.4,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  // Name field
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      context.l10n.ellaWelcomeNamePrompt,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                        color: EllaColors.textPrimary,
+    return Theme(
+        data: ellaThemeData(),
+        child: Scaffold(
+          backgroundColor: EllaColors.bgPrimary,
+          body: SafeArea(
+            child: GestureDetector(
+              onTap: () => FocusScope.of(context).unfocus(),
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      const SizedBox(height: 24),
+                      Text(
+                        context.l10n.ellaOnboardingStep(1, 3),
+                        style: const TextStyle(fontSize: 16, color: EllaColors.textTertiary),
                       ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 56,
-                    child: TextField(
-                      controller: _nameController,
-                      autofocus: false,
-                      textCapitalization: TextCapitalization.words,
-                      style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
-                      decoration: InputDecoration(
-                        hintText: context.l10n.ellaWelcomeNamePlaceholder,
-                        hintStyle: const TextStyle(fontSize: 20, color: EllaColors.textDisabled),
-                        filled: true,
-                        fillColor: Colors.white,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: const BorderSide(color: EllaColors.primary, width: 1.5),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                      ),
-                      textInputAction: TextInputAction.next,
-                      onChanged: (_) => setState(() {}),
-                    ),
-                  ),
-                  // Email (from Google sign-in, read-only)
-                  if (_email.isNotEmpty) ...[
-                    const SizedBox(height: 16),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        context.l10n.ellaAddCaregiverEmail,
+                      const SizedBox(height: 16),
+                      // The selected live character is shared with Chat and the editor.
+                      const EllaV7Lume(size: 160),
+                      const SizedBox(height: 20),
+                      Text(
+                        context.l10n.ellaWelcomeGreeting,
                         style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w400,
-                          color: EllaColors.textTertiary,
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: EllaColors.textPrimary,
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    Container(
-                      height: 56,
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                      decoration: BoxDecoration(
-                        color: EllaColors.bgTertiary,
-                        borderRadius: BorderRadius.circular(16),
+                      const SizedBox(height: 8),
+                      Text(
+                        context.l10n.ellaWelcomeDescription,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          color: EllaColors.textSecondary,
+                          height: 1.4,
+                        ),
                       ),
-                      alignment: Alignment.centerLeft,
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              _email,
-                              style: const TextStyle(fontSize: 18, color: EllaColors.textSecondary),
+                      const SizedBox(height: 24),
+                      const EllaV7CompanionCard(),
+                      const SizedBox(height: 24),
+                      // Name field
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          context.l10n.ellaWelcomeNamePrompt,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                            color: EllaColors.textPrimary,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(minHeight: 56),
+                        child: TextField(
+                          controller: _nameController,
+                          autofocus: false,
+                          textCapitalization: TextCapitalization.words,
+                          style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
+                          decoration: InputDecoration(
+                            hintText: context.l10n.ellaWelcomeNamePlaceholder,
+                            hintStyle: const TextStyle(fontSize: 20, color: EllaColors.textDisabled),
+                            filled: true,
+                            fillColor: Colors.white,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(16),
+                              borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(16),
+                              borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(16),
+                              borderSide: const BorderSide(color: EllaColors.primary, width: 1.5),
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                          ),
+                          textInputAction: TextInputAction.next,
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ),
+                      // Email (from Google sign-in, read-only)
+                      if (_email.isNotEmpty) ...[
+                        const SizedBox(height: 16),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            context.l10n.ellaAddCaregiverEmail,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w400,
+                              color: EllaColors.textTertiary,
                             ),
                           ),
-                          if (widget.onSignOut != null)
-                            GestureDetector(
-                              onTap: () async {
-                                await AuthService.instance.signOut();
-                                widget.onSignOut?.call();
-                              },
-                              child: Text(
-                                context.l10n.ellaNotYou,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  color: EllaColors.primary,
-                                  fontWeight: FontWeight.w600,
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          height: 56,
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                          decoration: BoxDecoration(
+                            color: EllaColors.bgTertiary,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          alignment: Alignment.centerLeft,
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  _email,
+                                  style: const TextStyle(fontSize: 18, color: EllaColors.textSecondary),
                                 ),
                               ),
+                              if (widget.onSignOut != null)
+                                GestureDetector(
+                                  onTap: () async {
+                                    await AuthService.instance.signOut();
+                                    widget.onSignOut?.call();
+                                  },
+                                  child: Text(
+                                    context.l10n.ellaNotYou,
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      color: EllaColors.primary,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                      // Phone number field
+                      const SizedBox(height: 16),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          context.l10n.ellaAddCaregiverPhone,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w400,
+                            color: EllaColors.textTertiary,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(minHeight: 56),
+                        child: TextField(
+                          controller: _phoneController,
+                          keyboardType: TextInputType.phone,
+                          style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
+                          decoration: InputDecoration(
+                            hintText: context.l10n.ellaAddCaregiverPhonePlaceholder,
+                            hintStyle: const TextStyle(fontSize: 20, color: EllaColors.textDisabled),
+                            filled: true,
+                            fillColor: Colors.white,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(16),
+                              borderSide: const BorderSide(color: EllaColors.bgTertiary),
                             ),
-                        ],
-                      ),
-                    ),
-                  ],
-                  // Phone number field
-                  const SizedBox(height: 16),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      context.l10n.ellaAddCaregiverPhone,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w400,
-                        color: EllaColors.textTertiary,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 56,
-                    child: TextField(
-                      controller: _phoneController,
-                      keyboardType: TextInputType.phone,
-                      style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
-                      decoration: InputDecoration(
-                        hintText: context.l10n.ellaAddCaregiverPhonePlaceholder,
-                        hintStyle: const TextStyle(fontSize: 20, color: EllaColors.textDisabled),
-                        filled: true,
-                        fillColor: Colors.white,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(16),
+                              borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(16),
+                              borderSide: const BorderSide(color: EllaColors.primary, width: 1.5),
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                          ),
+                          textInputAction: TextInputAction.done,
+                          onSubmitted: (_) => _handleNext(),
                         ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                      ),
+                      const SizedBox(height: 24),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: enabled ? _handleNext : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: enabled ? EllaColors.primary : EllaColors.bgTertiary,
+                            foregroundColor: enabled ? Colors.white : EllaColors.textDisabled,
+                            disabledForegroundColor: EllaColors.inkSoft,
+                            disabledBackgroundColor: EllaColors.cardDeep,
+                            minimumSize: const Size(double.infinity, 64),
+                            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            elevation: 0,
+                          ),
+                          child: Text(
+                            context.l10n.ellaNext,
+                            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                          ),
                         ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: const BorderSide(color: EllaColors.primary, width: 1.5),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
                       ),
-                      textInputAction: TextInputAction.done,
-                      onSubmitted: (_) => _handleNext(),
-                    ),
+                      const SizedBox(height: 32),
+                    ],
                   ),
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 64,
-                    child: ElevatedButton(
-                      onPressed: enabled ? _handleNext : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: enabled ? EllaColors.primary : EllaColors.bgTertiary,
-                        foregroundColor: enabled ? Colors.white : EllaColors.textDisabled,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                        elevation: 0,
-                      ),
-                      child: Text(
-                        context.l10n.ellaNext,
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-                ],
+                ),
               ),
             ),
           ),
-        ),
-      ),
-    );
+        ));
   }
 }

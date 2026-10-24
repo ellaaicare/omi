@@ -1365,6 +1365,16 @@ class DeviceProvider extends ChangeNotifier with WidgetsBindingObserver implemen
     await periodicConnect(reason, boundDeviceOnly: true, operationGeneration: generation);
   }
 
+  /// Home mounting is not an instruction to start capture without a device.
+  /// Upstream capture owns its consent-bound connection and must never acquire
+  /// a second legacy consumer through this launch checkpoint.
+  Future<void> resumeConnectedCaptureAtHomeLaunch() async {
+    if (EllaCaptureHost.legacyCaptureSuppressed || _deviceService is IAuthoritativeDeviceService) return;
+    final device = connectedDevice;
+    if (device == null || device.id.isEmpty || !isConnected) return;
+    await _resumeCaptureForConnectedDevice(device, _deviceOperationGeneration);
+  }
+
   Future<void> _resumeCaptureForConnectedDevice(
     BtDevice device,
     int operationGeneration, {

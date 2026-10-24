@@ -24,53 +24,62 @@ class V2VFallbackDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final providerName = localizedV2VProviderName(context, receipt.provider);
-    final canRetry = allowStandardFallback || !receipt.isPermanentScopedFailure;
+    final palette = EllaPalette.of(context);
+    final canRetry = !receipt.isPermanentScopedFailure;
     return AlertDialog(
-      backgroundColor: EllaColors.card,
+      scrollable: true,
+      backgroundColor: palette.card,
+      surfaceTintColor: palette.card,
+      elevation: 0,
+      shadowColor: Colors.transparent,
       title: Text(
         allowStandardFallback
-            ? context.l10n.voiceV2vUnavailableTitle(providerName)
+            ? context.l10n.ellaVoiceConnectionUnavailableTitle
             : context.l10n.scopedTalkUnavailableTitle,
-        style: EllaTextStyles.display.copyWith(fontSize: 22),
+        style:
+            TextStyle(fontFamily: EllaTextStyles.uiFont, fontSize: 22, fontWeight: FontWeight.w600, color: palette.ink),
       ),
-      content: Text(
-        allowStandardFallback
-            ? context.l10n.voiceV2vUnavailableBody(receipt.stage.name, receipt.safeDetail)
-            : canRetry
-                ? context.l10n.scopedTalkRetryableBody
-                : context.l10n.scopedTalkUnavailableBody,
-        style: EllaTextStyles.body,
-      ),
+      content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(
+            allowStandardFallback
+                ? canRetry
+                    ? context.l10n.ellaVoiceConnectionUnavailableBody
+                    : context.l10n.ellaVoiceConnectionCloseBody
+                : canRetry
+                    ? context.l10n.scopedTalkRetryableBody
+                    : context.l10n.scopedTalkUnavailableBody,
+            style: EllaTextStyles.body.copyWith(color: palette.ink)),
+        ExpansionTile(
+          key: const Key('v2v-failure-details'),
+          tilePadding: EdgeInsets.zero,
+          title: Text(context.l10n.irisStatusDetails, style: TextStyle(color: palette.ink, fontSize: 17)),
+          iconColor: palette.ink,
+          collapsedIconColor: palette.ink,
+          children: [
+            SelectableText('${receipt.stage.name} (${receipt.safeDetail})',
+                style: TextStyle(color: palette.inkSoft, fontFamily: EllaTextStyles.uiFont, fontSize: 16))
+          ],
+        ),
+      ]),
       actions: [
         OutlinedButton.icon(
           key: const ValueKey('v2v-failure-cancel'),
           onPressed: () => Navigator.of(context).pop(V2VFailureChoice.stop),
           style: OutlinedButton.styleFrom(
-            foregroundColor: EllaColors.tealDeep,
-            side: const BorderSide(color: EllaColors.tealDeep),
+            foregroundColor: palette.ink,
+            side: BorderSide(color: palette.ink),
             minimumSize: const Size(0, EllaSizes.minTouchTarget),
           ),
           icon: const Icon(Icons.close),
-          label: Text(allowStandardFallback ? context.l10n.cancel : context.l10n.close),
+          label: Text(context.l10n.close),
         ),
-        if (allowStandardFallback)
-          TextButton(
-            key: const ValueKey('v2v-failure-elevenlabs'),
-            onPressed: () => Navigator.of(context).pop(V2VFailureChoice.useElevenLabs),
-            style: TextButton.styleFrom(
-              foregroundColor: EllaColors.tealDeep,
-              minimumSize: const Size(0, EllaSizes.minTouchTarget),
-            ),
-            child: Text(context.l10n.voiceUseElevenLabs),
-          ),
         if (canRetry)
           FilledButton(
             key: const ValueKey('v2v-failure-retry'),
             onPressed: () => Navigator.of(context).pop(V2VFailureChoice.retry),
             style: FilledButton.styleFrom(
-              backgroundColor: EllaColors.tealDeep,
-              foregroundColor: EllaColors.paper,
+              backgroundColor: palette.ink,
+              foregroundColor: palette.paper,
               minimumSize: const Size(0, EllaSizes.minTouchTarget),
             ),
             child: Text(context.l10n.retry),

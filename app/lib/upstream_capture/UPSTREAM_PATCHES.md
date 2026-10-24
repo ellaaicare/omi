@@ -704,3 +704,191 @@ has to reach past `composeCaptureProvider`. Draft PR body for BasedHardware/omi:
 > alongside `_admitsCapture(revision)` in the phone `onByteReceived`, the BLE
 > `onAudioBytesReceived` and before `_socket.send` of audio frames; `null` means
 > always-admitted (no behavior change).
+
+## Local synthetic VAD diagnostic candidate (source review pending)
+
+Explicit coordinator-authorized debug diagnostic, separate from frozen signed915.
+The upstream entry point registers an Ella-owned transport seam; default entry points
+remain outside the upstream graph. Optional exact-owner fences preserve ordinary
+callers (null default), and check header construction, token refresh side effects,
+request/replay egress and response commit. The normal shared upload mutex, account
+cutover and cooldown remain enforced. Diagnostic-only capture quiescence observes
+queued/staged effects and actual session ownership without starting/stopping capture.
+The coordinator/controller layers this read-only predicate on prior accepted patches.
+No backend policy, WAL queue insertion, default upload policy, native hosts or signing
+changes. These exact candidate blobs require independent review before hardware use;
+the unchanged pin blobs remain authoritative source lineage. Identity tests continue
+checking every other upstream file and exact local bytes.
+
+| Local file | Unchanged pin blob | Exact candidate local blob |
+| --- | --- | --- |
+| `app/lib/upstream_capture/backend/http/api/conversations.dart` | `f23bfdca3b0ac80ed765676e126133e3d230e11c` | `7e269fb1e16fc25bc0522af62788ef6317c35101` |
+| `app/lib/upstream_capture/backend/http/shared.dart` | `ca60d60ea9bb2344b12d501f75e9429fcb23a295` | `91b8a1d3827b0b34fea79eb91fc635151b9c8970` |
+| `app/lib/upstream_capture/services/capture/capture_controller.dart` | `dee714b169e4f4e45777399f72db4672599fed3a` | `4d683621467bedce75388ffd2aca3affabbaa6fd` |
+| `app/lib/upstream_capture/services/capture/capture_coordinator.dart` | `17c33870dd18366a03cd599bcec9befb512f0b39` | `799d18ea58ed5f6bb9c283c7a4bf55f4d45d1e01` |
+| `app/lib/upstream_capture/services/wals/sync_upload_gate.dart` | `fd19e943b3b6a2f62b807e502d957b35ce279b65` | `2bb8b5122407bf2ef6e57b0fb4aae6bbf6c01c4a` |
+
+## Iris v6.1 guarded live Pause/Resume follow-on (independent review pending)
+
+Coordinator-authorized local UI/runtime integration preserves pinned upstream lineage and unguarded legacy behavior. Optional exact-owner/window guards apply at queued execution and each async boundary. Explicit phone Pause uses native stop acknowledgement plus a stopped-state read, with a10second deadline; the underlying confirmation fence remains until actual late stop/state-probe settlement. No optimistic Paused label, batch takeover, Whisper change or backend policy change. Shared confirmed-stop interface is fork code outside the vendored tree. Native test fixtures add held/error stop and held state-probe scenarios. Exact local blobs below are provisional until independent review accepts them. Identity checker unchanged.
+
+| Local file | Unchanged pin blob | Exact follow-on local blob |
+| --- | --- | --- |
+| `app/lib/upstream_capture/services/capture/capture_controller.dart` | `dee714b169e4f4e45777399f72db4672599fed3a` | `7af159792c4f1c047cddc491b4347a9e236821d4` |
+| `app/lib/upstream_capture/services/capture/capture_coordinator.dart` | `17c33870dd18366a03cd599bcec9befb512f0b39` | `996440112b411ce4835763a3204e4445b6f7824f` |
+| `app/lib/upstream_capture/services/mic/mic_arbiter.dart` | `e306f58379cd6030909add0f87545d7699b119bb` | `fa7e98dfd10c670f01ad8f4933aee7bc72ede8ef` |
+| `app/lib/upstream_capture/services/mic/native_mic_recorder_service.dart` | `7bcd548b68d7a01d076f880afa8d4f1f2c80c37e` | `995204eb80f851c7878e158a34b66305aaced6c6` |
+| `app/test/upstream_capture/support/capture/capture_replay_world.dart` | `c0e6dfe04276296ad53aaa4756466655d2b327f1` | `3abf6a7f7b7b3b099df78d541acd82f9871d88b4` |
+| `app/test/upstream_capture/unit/native_mic_recorder_service_test.dart` | `76b9cf68d305eea43695cf0519875b9a5f294460` | `c013594d7af84a9b89b54c9d077333b4a9634bbf` |
+
+
+## Iris guarded Resume cancellation and native permission retirement (review pending)
+
+Local follow-on retains the original upstream pin. Explicit guarded Resume uses a20-second operation cancellation token; native start has a12-second deadline. Stop bypasses the dock's pending Resume operation with its own revision fence. Cancel immediately denies frame admission and requests native stop. Every unresolved effect and timed-out deny/snapshot remains in diagnostic/lifetime drain and shared production activation quarantine through its actual receipt; a replacement provider cannot activate around it. Disconnect/call/identity handling remains deny-only while quarantined, and Stop cannot restore a suspended pendant. Late compensating work never touches ports/preferences after disposal. Phone and pendant use the same visible Stop escape. Errors remain unconfirmed, not false physical Stop PASS.
+
+PhoneMicController.swift is now explicitly patched: Stop in `.starting` immediately finishes teardown and resolves pending start/stop callbacks without waiting for permission. Command revision fences late permission and initial retry callbacks across Stop/new-start ABA. Source-specific native replay tests use exact production controller, seams and emitter with fake permission/engine I/O; they do not prove physical hardware.
+
+Native/Dart Whisper local output stop is outside this vendored capture patch: rotates exact-owner output lease, cancels polling/TTS/player/download/retry/report work, preserves capture and configured mode, and keeps a per-owner durable backlog barrier. Resume of eligible future output remains blocked until the sole backend owner supplies an atomic discard/cursor acknowledgement contract; no client-only backlog guarantee is claimed.
+
+
+## Whisper lifecycle audio durability (successor, release HOLD)
+
+Transcript progress and local transport sends do not acknowledge durable frame coverage. The local WAL retains all captured frames; a matching conversation result wakes the existing claimed full-window recovery upload. Exact local capture-window IDs prevent wall-clock/source overlap and same-second file collisions; legacy records and paths remain unchanged. Runtime retirement marks the interruption before old traffic is fenced. Recovery admission, authentication, response commit and job reconciliation retain the original account binding epoch. Claimed uploads fail closed without a matching manifest or full-window admission, rather than appending unclaimed overlap. Existing upload/job states and retry budgets remain authoritative.
+
+Recovery checkpoints flush/atomically rename the active copy before drain and after replacement readiness without rotating the recording window. Same-second active/unclaimed checkpoints append atomically; stamped/uploaded files remain immutable. Original nonbatch Omi/OpenGlass packets are retained for every inspected codec; backend decode and acoustic qualification remain separate. Purely offline audio with no transport overlap retains its existing recovery path; overlapping windows fail closed without a full matching claim.
+
+Each new immutable chunk has a persisted sequence identity, used in the file's device-name token while preserving the existing framed-bin filename grammar. This prevents same-window timestamp collisions, chronological reordering and duplicate manifest filenames. Index device/codec/sample metadata remains unchanged; old inventory paths/IDs are unchanged.
+
+Recorded local blobs (final formatted revision):
+
+- `app/lib/upstream_capture/backend/http/api/conversations.dart`: `0365bd16a4da3e5d9519daef5e0c5d2b5fc0a045`
+- `app/lib/upstream_capture/backend/http/shared.dart`: `4208fd6872fac8508db7bbcd92bf19c1144abc0a`
+- `app/lib/upstream_capture/services/capture/capture_controller.dart`: `0c681d16ab904d409250baf89e7f2415c31cdfad`
+- `app/lib/upstream_capture/services/wals/local_wal_sync.dart`: `c06c6bfd47630731d8c7a6970e4ade4a90be1c7c`
+- `app/lib/upstream_capture/services/wals/sync_upload_gate.dart`: `4a3b3c54f51af7055ea3c1e295a6492455348e21`
+- `app/lib/upstream_capture/services/wals/wal.dart`: `c56cb3149150455f62f70d5cd5f17e277642f93f`
+- `app/test/upstream_capture/unit/capture_recovery_replay_scenarios_test.dart`: `75300f6f497464305c9b5a6c6fa07d40ad100997`
+
+The restart test enumerates audio files recursively. Ella WAL tests explicitly model matching authenticated finalization receipts for overlapping windows and retain the null-result offline-only case. Patch declarations/hard-coded local blob expectations are updated; upstream pin bytes are unchanged.
+
+Complete-source recovery acceptance hold (client-only, contract pending): legacy sync receipts do not prove file/frame coverage or overlap replacement; new retained capture windows cannot become synced until the agreed supported contract exists. Synchronous unproven completions persist uploaded-without-job hold and manual Retry cannot replay them; async completions retain their job/source. No positive receipt schema is invented. Local blob pinned in UPSTREAM_OWNED.txt.
+
+
+### New-capture v2 whole-source revision (isolated review successor)
+
+Authorized client repair adds optional captured-order provenance to new WALs only. Audio sources retain original sync keys and actual valid PCM bytes before zero padding. Capture interruptions reset the source epoch; transport rebinds preserve captured order with an explicit gap marker. Ella helpers implement canonical exact-file claims and deterministic UUIDv5 revision receipt validation. Local WAL sync persists immutable operation claims before HTTP, rereads bytes after receipt, and acknowledges only the exact synchronous append-only source revision. Legacy metadata stays absent; no wall-clock continuity, live replacement, deduplication, enrichment or UI adoption is claimed. The response schema preserves the coverage receipt and the signed multipart uploader carries coverage as a text field.
+
+The ownership table binds all nine changed vendored Dart files to their local git blobs; the four newly patched audio/response files retain their original upstream pin. New contract helpers live in Ella's namespace. Native files and the upstream source pin remain unchanged. Release, hardware and deployment are held for independent review.
+
+
+### Production synchronous HTTP coverage receipt preservation
+
+Review found that the production 200 upload branch bypassed the extension-preserving response factory. The production HTTP decoder now calls `SyncLocalFilesResponse.fromJson`, preserving the exact `coverage_receipt` while retaining generated legacy fields and existing status/failure classification. The same decoder is exercised from the exact backend HTTP response bytes through the upload gate and disk WAL acknowledgement; omitted receipt holds source. No async completion contract, native inputs, capture provenance, credentials or signing state changed.
+
+## Bounded capture transport diagnostics
+
+`services/sockets/pure_socket.dart` exposes an optional closed-enum observer at actual stream listener attachment, successful transport readiness, remote stream completion, transport error and local channel cleanup. Observer exceptions are swallowed. Existing connection invalidation, timeout, callbacks and teardown order remain unchanged. Local disconnect is not labelled remote stream completion. Cleanup reports the retired channel generation before invalidation, not the next generation. No raw URL, headers, payload, exception or close reason enters the observer. Ella supplies a bounded memory-only collector outside the vendored tree.
+
+| File | Pin blob | Reviewed local blob |
+| --- | --- | --- |
+| `app/lib/services/sockets/pure_socket.dart` | `f60fdecbfd651eccaac4091aaf8ae8273e6425d2` | `c293423f1807d57411027ab663171dd7adaaed92` |
+
+## Exact audio owner reservations (isolated successor; Chat still unavailable)
+
+`app/lib/services/mic/mic_arbiter.dart` retains upstream pin blob
+`e306f58379cd6030909add0f87545d7699b119bb` and records local patched blob `d5ca88ebadcf19003ae36e461c2f1577b9edf7dd`.
+The arbiter delegates to a shared exact-lease registry outside the vendored tree.
+Reusable source strings no longer authorize native stop or release; stale callbacks
+are gated by their exact lease. Permission callers can reserve synchronously before
+awaiting. Native start failure retains ownership, and stop awaits start settlement
+then confirmed physical teardown. Unowned stop never invokes the underlying mic.
+Absent/failed confirmed-stop support retains the reservation and reports failure.
+New regression tests are Ella-owned `audio_capture_ownership_test.dart` and
+`arbitrated_mic_ownership_test.dart`; no vendored test baseline is changed.
+This is an isolated ownership successor, not authorization to enable Chat dictation.
+
+### Late native start receipt before stop confirmation
+
+`app/lib/services/mic/native_mic_recorder_service.dart` retains upstream pin
+`7bcd548b68d7a01d076f880afa8d4f1f2c80c37e`, local patched blob `46846c659e0aefd440011d294288819fa951ad4b`.
+Confirmed stop now waits for the raw native start receipt and existing stop
+receipts before issuing a fresh host stop and querying physical recording state.
+The 10-second caller deadline remains; timeout retains the outer exact owner
+until late host settlement and explicit successful stop retry. Without this
+ordering, the Dart 12-second start timeout could make an early false recording
+probe look final while native start was still pending. The regression is
+Ella-owned `native_owned_mic_receipt_test.dart`; upstream tests stay unchanged.
+
+## Exact unused phone permission preflight (isolated successor)
+
+The phone controller reserves the Ella-gated exact arbiter owner before public dispatch, permission and phone session setup. Cancellation releases only an unused exact token and never stops an active or replacement recorder. Permission/account refusal and coordinator cleanup retire only that token. Live and batch restart await confirmed native stop before replacement. Unsupported non-Ella recorder interfaces confer no shared ownership qualification. Native streaming tail/device capture remain HOLD; Chat dictation stays unavailable.
+
+- `app/lib/upstream_capture/services/capture/capture_controller.dart`: prior reviewed local `d2254279493c8fd72708fa2b2712e2507fd6bf4b`, new isolated local `54a47c4b6d3a4737950ed4071059fa11a3eddfcd`.
+- `app/lib/upstream_capture/services/mic/mic_arbiter.dart`: prior reviewed local `d5ca88ebadcf19003ae36e461c2f1577b9edf7dd`, new isolated local `109cf038a2b5cea48b3688a217d6935195b4f7a0`.
+
+## Optional exact owned prepared streaming controller (isolated candidate)
+
+NativeMicRecorderService optionally accepts a captured immutable OwnedCaptureController; no caller/ServiceManager selects it by default. MicArbiter adopts its exact shared lease synchronously during preflight and delegates start to that same lease, without an outer duplicate start. Owned start uses capability/store preparation, real native reservation, exact store bind, and permission before engine installation. Owned stop retains the lease for local staged/durable tail plus fresh physical proof; idle owned stop never calls global legacy native stop. Legacy null-controller and batch paths remain preserved. The controller is one captured window; production authority/retention registration, restart inventory/adoption, composed descriptor/native proof and runtime qualification remain HOLD. Tests: test/ella/owned/, unchanged native recorder and arbitration regressions. Each modified vendored file has its exact local Git blob declared in UPSTREAM_OWNED.txt; upstream pin remains unchanged.
+
+## Reviewed application output exclusion (foreground dictation successor)
+
+The upstream voice playback service now uses the reviewed admitted_audio_player wrapper and reserves one exact application output permit before TTS initialization or audio-session activation. Unsupported SDK teardown retains the permit; Stop or a timeout does not assert physical silence. The original upstream pin and blob remain unchanged; the exact local patched Git blob is 1380c5b3af56d562d11181fd0be08e28c6ba190a. The identity regression removes only these declared imports, permit field and two pre-effect reservations and verifies the full restored relocated source SHA256 ca4a1c4edb3ef13f125a730523c92bda69652e2d2cea0ef463e5fd5aa5f87431. No changes beyond these exact declared pre-effect admission deltas are accepted by that check; capture, transcript, request and resampling code remain unchanged.
+
+## Passive capture health observations (upstream-parity successor)
+
+NativeBleTransport adds memory-only counts/timestamps and a closed health map. Original subscription controllers, first-packet timer cancellation, initial/reconnect watchdog and CCCD decisions are retained. No timer is armed by the observations. SharedPreferences adds a read-only in-memory policy-origin diagnostic; it does not reset, unmute or rewrite the policy. Exact local blobs are declared in UPSTREAM_OWNED.txt.
+
+Official UI source is pinned separately in lib/stock_capture/SOURCE_PINS.json at canonical d9bdbbcb44f045f202f3aca90dabe5df757a10f0. Eight official widget/token/dependency files have only declared import relocation; a narrow Ella export bridge avoids importing unrelated product flows. This does not rebase the 204-file capture core from f16699 and is not complete latest-core parity.
+
+## Separate native account/consent denial (parity security boundary)
+
+Ella no longer implements account revocation by writing the upstream durable user mute policy, nor auto-unmutes that policy on rebind. A separate process-scoped native authorization generation starts denied in the shipping build. The existing host verifies an allow request against the current native Firebase UID; Dart checks the exact current consent/account binding before and after the bridge. BLE and phone batch writers stamp ingress work and recheck the generation at the actual file write, under the same lock used to acknowledge denial. Reauthorization cannot revive previously queued work. Unknown denial/stop retains the account-transition barrier until a fresh explicit retirement succeeds. This security exception does not change GATT, scan/reconnect, upstream user pause, firmware, segmentation or capture retries. The native host and three batch files are the only native deltas. No ambiguous old mute preference is migrated or reset.
+
+## Explicit pendant Disconnect finalization (Main experience V5)
+
+The installed Main957 Ella runtime called only `stopStreamDeviceRecording` from
+explicit Disconnect. Protocol-v2 drain intentionally does not request server
+processing, so this omitted the existing Finish processing stage. The actual
+runtime imports the upstream CaptureController; the similarly named legacy
+provider's `stopStreamDeviceRecordingAndFinalize` is not in this graph.
+
+Only the explicit Disconnect caller opts into `FinishRequested.stopDeviceIngress`.
+The coordinator first closes BLE subscriptions and native background streaming
+using the existing cleanup operation, without retiring the capture owner. It then
+runs its existing serialized ProcessConversationStage. The original protocol
+socket is pinned by the runtime before awaiting; its exact authority/tuple and
+bounded authenticated finalization API remain unchanged. The subsequent guarded
+DeviceStopRequested clears only the original recording/device identity. Existing
+Finish callers, interruptions, revocation and transport-only stops do not opt in.
+
+Explicit processing-stage failures now propagate to the caller while retaining
+the existing error-consuming observation for fire-and-forget upstream callers.
+The runtime joins in-flight Finish/Disconnect and retains one result per exact
+socket, including unknown outcomes, rather than issuing another POST. It attempts
+owned BLE cleanup in finally; account/binding/recording replacement prevents old
+cleanup from stopping a successor. A new explicit Connect waits for that cleanup.
+No consent, persistent mute policy, admission, native source or server guard changes.
+
+The following local patch blobs replace the prior reviewed local blobs; upstream
+pin blob identities and every other manifest entry remain unchanged:
+
+- `app/lib/upstream_capture/services/capture/capture_controller.dart`: `54a47c4b6d3a4737950ed4071059fa11a3eddfcd` → `978c52f9fec7f0f0d5f2acb8857125d67e006f0f`.
+- `app/lib/upstream_capture/services/capture/capture_coordinator.dart`: `a249bc5e797299918daab910c0c3bfd473c61dcd` → `eff479fd9729921d2acc8c4931b89c78f39e31a6`.
+
+A reentrant Disconnect can observe the newly resumed pendant while the previous
+phone Finish future remains pending. It now waits for that distinct recording's
+Finish before admitting its own transaction, then rechecks the originally captured
+account/provider/device/recording and exact capture window. A retired or replaced
+producer is not adopted. Same-recording Finish joins and unknown-outcome fences
+remain unchanged; a queued replacement rejected by the existing Finish authority
+guard still propagates failure and is never stopped by the old Disconnect.
+
+
+## 2026-10-23 per-pass discovery provenance (isolated candidate)
+
+The NativeBluetoothDiscoverer and DeviceService diagnostic-only additions report
+current pass source labels, known-ID input count and retained subscription rows.
+They preserve the classifier, scanning/retrieval inputs, sort, connection and
+codec behavior. No peripheral identifiers or names are serialized. A fixed Friend
+match contributes counts only. Existing pin and raw upstream blob IDs remain
+unchanged; local approved patch blob IDs reflect these additional diagnostics.

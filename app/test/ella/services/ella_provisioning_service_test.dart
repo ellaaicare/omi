@@ -25,6 +25,166 @@ void main() {
 
   tearDown(EllaProvisioningAuthorityCoordinator.resetForTesting);
 
+  test('independent accepted retryable blocked response must retain bounded status polling', () async {
+    final scheduled = <_FakePollHandle>[];
+    final transport = _FakeTransport(ensureResponses: [
+      EllaProvisioningResponse(
+        statusCode: 202,
+        receipt: EllaProvisioningReceipt.fromJson({
+          'state': 'retryable',
+          'retryable': true,
+          'support_code': 'ELLA-FICTIONAL',
+          'error': {'code': 'account_enrichment_worker_unavailable'}
+        }),
+      )
+    ]);
+    final provider = EllaProvisioningProvider(
+        transport: transport,
+        scheduler: (delay, callback) {
+          final handle = _FakePollHandle(delay, callback);
+          scheduled.add(handle);
+          return handle;
+        });
+    try {
+      await provider.start(uid: 'uid-a', requestContext: _requestContext);
+      expect(provider.isOperational, isFalse);
+      expect(transport.ensureCalls, 1);
+      expect(scheduled, hasLength(1), reason: 'accepted explicitly retryable response must not silently stop recovery');
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  test('backend retryable lifecycle decodes without admitting protected work', () {
+    final receipt = EllaProvisioningReceipt.fromJson({
+      'state': 'retryable',
+      'retryable': true,
+      'error': {'code': 'account_enrichment_worker_unavailable'}
+    });
+    expect(receipt.state, EllaProvisioningState.degraded);
+    expect(receipt.retryable, isTrue);
+    expect(receipt.errorCode, 'account_enrichment_worker_unavailable');
+    expect(receipt.isOperational, isFalse);
+    expect(EllaProvisioningReceipt.fromJson({'state': 'invented', 'retryable': true}).state,
+        EllaProvisioningState.blocked);
+  });
+
+  test('backend retryable lifecycle remains bounded at status poll budget', () async {
+    final scheduled = <_FakePollHandle>[];
+    final receipt = EllaProvisioningReceipt.fromJson({'state': 'retryable', 'retryable': true});
+    final transport = _FakeTransport(
+        ensureResponses: [EllaProvisioningResponse(statusCode: 202, receipt: receipt)],
+        statusResponses: [EllaProvisioningResponse(statusCode: 202, receipt: receipt)]);
+    final provider = EllaProvisioningProvider(
+        transport: transport,
+        maxPollAttempts: 1,
+        scheduler: (delay, callback) {
+          final h = _FakePollHandle(delay, callback);
+          scheduled.add(h);
+          return h;
+        });
+    try {
+      await provider.start(uid: 'uid-a', requestContext: _requestContext);
+      expect(scheduled, hasLength(1));
+      scheduled.single.fire();
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(transport.statusCalls, 1);
+      expect(provider.errorCode, 'provisioning_timeout');
+      expect(scheduled, hasLength(1));
+      expect(provider.isOperational, isFalse);
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  test('terminal authentication response is not polled even with retryable body', () async {
+    final scheduled = <_FakePollHandle>[];
+    final transport = _FakeTransport(ensureResponses: [
+      EllaProvisioningResponse(
+          statusCode: 403, receipt: EllaProvisioningReceipt.fromJson({'state': 'retryable', 'retryable': true}))
+    ]);
+    final provider = EllaProvisioningProvider(
+        transport: transport,
+        scheduler: (delay, callback) {
+          final h = _FakePollHandle(delay, callback);
+          scheduled.add(h);
+          return h;
+        });
+    try {
+      await provider.start(uid: 'uid-a', requestContext: _requestContext);
+      expect(provider.state, EllaProvisioningState.blocked);
+      expect(provider.isOperational, isFalse);
+      expect(scheduled, isEmpty);
+      expect(transport.statusCalls, 0);
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  test('retryable callback cannot cross retired account ownership', () async {
+    final scheduled = <_FakePollHandle>[];
+    final transport = _FakeTransport(ensureResponses: [
+      EllaProvisioningResponse(
+          statusCode: 202, receipt: EllaProvisioningReceipt.fromJson({'state': 'retryable', 'retryable': true}))
+    ]);
+    final provider = EllaProvisioningProvider(
+        transport: transport,
+        scheduler: (delay, callback) {
+          final h = _FakePollHandle(delay, callback);
+          scheduled.add(h);
+          return h;
+        });
+    try {
+      await provider.start(uid: 'uid-a', requestContext: _requestContext);
+      expect(scheduled, hasLength(1));
+      provider.reset();
+      scheduled.single.fire();
+      await Future<void>.delayed(Duration.zero);
+      expect(transport.statusCalls, 0);
+      expect(provider.isOperational, isFalse);
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  test('accepted retryable readiness applies increasing capped backoff and stops at its budget', () async {
+    final scheduled = <_FakePollHandle>[];
+    final receipt = EllaProvisioningReceipt.fromJson({'state': 'retryable', 'retryable': true, 'retry_after_ms': 500});
+    final response = EllaProvisioningResponse(statusCode: 202, receipt: receipt);
+    final transport = _FakeTransport(ensureResponses: [response], statusResponses: List.filled(7, response));
+    final provider = EllaProvisioningProvider(
+        transport: transport,
+        maxPollAttempts: 7,
+        scheduler: (delay, callback) {
+          final h = _FakePollHandle(delay, callback);
+          scheduled.add(h);
+          return h;
+        });
+    try {
+      await provider.start(uid: 'uid-a', requestContext: _requestContext);
+      for (var i = 0; i < 7; i++) {
+        expect(scheduled, hasLength(i + 1));
+        scheduled.last.fire();
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+      }
+      final delays = scheduled.map((h) => h.delay.inMilliseconds).toList();
+      expect(delays.first, 1000);
+      expect(delays[1], greaterThan(delays[0]));
+      expect(delays[2], greaterThan(delays[1]));
+      expect(delays[3], greaterThan(delays[2]));
+      expect(delays[4], 15000);
+      expect(delays.every((d) => d <= 15000), isTrue);
+      expect(scheduled, hasLength(7));
+      expect(transport.statusCalls, 7);
+      expect(provider.errorCode, 'provisioning_timeout');
+      expect(provider.isOperational, isFalse);
+    } finally {
+      provider.dispose();
+    }
+  });
+
   test('authenticated provisioning gate is enabled by default', () {
     expect(isHermesProvisioningGateEnabled, isTrue);
   });

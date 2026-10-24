@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:omi/ella/services/whisper_delivery_runtime.dart';
 
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
@@ -133,7 +134,12 @@ Future<EllaServiceResult<void>> setGuardianModeTwoTier(
 
     if (response != null && response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      if (data['success'] == true) return const EllaServiceResult.success();
+      if (data['success'] == true) {
+        if (state.isOff && whisperDeliveryProtocol1 && context.authority.isExactCurrent()) {
+          await WhisperDeliveryRuntime.shared.client.savedOffConfirmed(context.authority);
+        }
+        return const EllaServiceResult.success();
+      }
       return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
     }
     Logger.debug('setGuardianMode: ${response?.statusCode}');

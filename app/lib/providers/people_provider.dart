@@ -1,4 +1,4 @@
-import 'package:just_audio/just_audio.dart';
+import 'package:omi/ella/services/admitted_audio_player.dart';
 
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';

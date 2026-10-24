@@ -126,6 +126,12 @@ class HomeProvider extends ChangeNotifier {
   }
 
   void setIndex(int index) {
+    if (index != selectedIndex) {
+      // IndexedStack keeps the editor alive; tab changes must retire its input
+      // connection instead of bringing Chat's keyboard into Journal or More.
+      FocusManager.instance.primaryFocus?.unfocus();
+      isChatFieldFocused = false;
+    }
     selectedIndex = index;
     onSelectedIndexChanged?.call(index);
     notifyListeners();

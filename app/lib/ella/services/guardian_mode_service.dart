@@ -1,4 +1,6 @@
+import 'package:omi/ella/services/app_output_admission.dart';
 import 'dart:async';
+import 'package:omi/ella/services/whisper_delivery_runtime.dart';
 
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
@@ -176,7 +178,13 @@ class GuardianModeService {
       (_stateController ??= StreamController<GuardianModeState>.broadcast()).stream;
 
   GuardianModeState _currentState = GuardianModeState.idle;
-  GuardianModeState get currentState => _currentState;
+  GuardianModeState get currentState => whisperDeliveryProtocol1
+      ? WhisperDeliveryRuntime.shared.client.ready
+          ? GuardianModeState.active
+          : WhisperDeliveryRuntime.shared.failed
+              ? GuardianModeState.error
+              : GuardianModeState.idle
+      : _currentState;
   bool get isAvailable => allowsGuardianSurface();
 
   Timer? _testAudioTimer;
@@ -192,16 +200,24 @@ class GuardianModeService {
   ];
 
   /// Start Guardian Mode
-  Future<void> start() async {
+  AppOutputPermit? _outputPermit;
+
+  Future<void> start({bool explicitOn = false}) async {
     if (!isAvailable) {
       _updateState(GuardianModeState.idle);
       throw StateError('Guardian is unavailable in this build');
+    }
+    if (whisperDeliveryProtocol1) {
+      await WhisperDeliveryRuntime.shared.startOutput(explicitOn: explicitOn);
+      _updateState(GuardianModeState.active);
+      return;
     }
     if (_currentState == GuardianModeState.active) {
       print('GuardianMode: Already active');
       return;
     }
 
+    _outputPermit ??= AppOutputAdmission.shared.reserveOutput('native-guardian-legacy');
     try {
       await _channel.invokeMethod('configureAvailability', {'enabled': true});
       // Call iOS native to start silent loop
@@ -224,9 +240,31 @@ class GuardianModeService {
     }
   }
 
+  /// Stops local playback/queued callbacks while preserving the configured mode
+  /// and capture. The server discard acknowledgement is intentionally separate.
+  Future<({bool localOutputStopped, bool serverDiscardVerified, String operationId})> stopCurrentOutput() async {
+    if (whisperDeliveryProtocol1) {
+      await WhisperDeliveryRuntime.shared.stopOutput();
+      final receipt = WhisperDeliveryRuntime.shared.client.acknowledgedStopRequest;
+      if (receipt == null) throw StateError('Whisper discard acknowledgement pending');
+      return (localOutputStopped: true, serverDiscardVerified: true, operationId: receipt);
+    }
+    final receipt =
+        await _channel.invokeMapMethod<String, dynamic>('stopCurrentOutput').timeout(const Duration(seconds: 10));
+    if (receipt == null || receipt['localOutputStopped'] != true || receipt['operationId'] is! String) {
+      throw StateError('Whisper local output stop not confirmed');
+    }
+    return (
+      localOutputStopped: true,
+      serverDiscardVerified: receipt['serverDiscardVerified'] == true,
+      operationId: receipt['operationId'] as String
+    );
+  }
+
   /// Stop Guardian Mode
   Future<void> stop() async {
     try {
+      if (whisperDeliveryProtocol1) await WhisperDeliveryRuntime.shared.stopOutput(resume: false);
       // Stop test audio timer
       _stopTestAudioTimer();
 
@@ -251,6 +289,11 @@ class GuardianModeService {
 
   Future<void> _stopForAccountTransition() async {
     _stopTestAudioTimer();
+    if (whisperDeliveryProtocol1) {
+      try {
+        await WhisperDeliveryRuntime.shared.client.retireAuthority();
+      } catch (_) {}
+    }
     try {
       await _channel.invokeMethod('configureAvailability', {'enabled': false});
       await _channel.invokeMethod('stop');
@@ -302,6 +345,7 @@ class GuardianModeService {
       print('GuardianMode: Injecting bundled test clip $_testClipCounter: $fileName');
 
       // Pass filename to native side - it will look it up in app bundle
+      _outputPermit ??= AppOutputAdmission.shared.reserveOutput('native-guardian-legacy');
       await _channel.invokeMethod('injectBundledAudioClip', {'fileName': fileName});
       print('GuardianMode: Injected clip $_testClipCounter');
     } catch (e) {

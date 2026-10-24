@@ -3,7 +3,7 @@ description: A new Flutter project.
 
 publish_to: "none" # Remove this line if you wish to publish to pub.dev
 
-version: 1.0.572+871
+version: 1.0.572+966
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -151,6 +151,8 @@ dependencies:
   flutter_soloud: ^3.5.0
 
 dependency_overrides:
+  speech_to_text:
+    path: ../vendor/speech_to_text
   js: ^0.7.1
   uuid: ^4.4.0
   opus_flutter_ios:
@@ -197,7 +199,9 @@ flutter:
     - assets/images/stars.png
     - assets/images/herologo.png
     - assets/fonts/
+    - assets/fonts/instrument-serif/
     - assets/images/
+    - assets/images/ella-v7/
     - assets/images/ella-memory-topics/
     - assets/images/ella-hardware/png/
     - assets/integration_app_logos/
@@ -205,26 +209,10 @@ flutter:
     - shorebird.yaml
     - assets/device_assets/frame_lib.lua
   fonts:
-    - family: "SF Pro Display"
+    - family: InstrumentSerif
       fonts:
-        - asset: assets/fonts/SFPRODISPLAYTHINITALIC.OTF
-          weight: 100
-          style: italic
-        - asset: assets/fonts/SFPRODISPLAYLIGHTITALIC.OTF
-          weight: 300
-          style: italic
-        - asset: assets/fonts/SFPRODISPLAYREGULAR.OTF
-        - asset: assets/fonts/SFPRODISPLAYHEAVYITALIC.OTF
-          style: italic
-        - asset: assets/fonts/SFPRODISPLAYMEDIUM.OTF
-          weight: 500
-        - asset: assets/fonts/SFPRODISPLAYSEMIBOLDITALIC.OTF
-          weight: 600
-          style: italic
-        - asset: assets/fonts/SFPRODISPLAYBOLD.OTF
-          weight: 700
-        - asset: assets/fonts/SFPRODISPLAYBLACKITALIC.OTF
-          weight: 900
+        - asset: assets/fonts/instrument-serif/InstrumentSerif-Regular.ttf
+        - asset: assets/fonts/instrument-serif/InstrumentSerif-Italic.ttf
           style: italic
     - family: "Manrope"
       fonts:

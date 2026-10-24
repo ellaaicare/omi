@@ -22,7 +22,14 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
+import 'package:omi/services/devices.dart';
 import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
+
+// Registration must never invoke a device operation in either build profile.
+class _RegistrationOnlyDeviceService implements IDeviceService {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError('Device operation during registration');
+}
 
 final _app = Directory.current.path; // flutter test runs in app/
 final _import = RegExp(r'''^\s*(?:import|export|part)\s+['"]([^'"]+)['"]([^;]*);''', multiLine: true);
@@ -183,14 +190,30 @@ void main() {
       expect(entry, contains('legacy.main()'));
     });
 
-    test('the Dart activation refuses to install unless the define from the xcconfig is true', () {
-      expect(EllaCaptureHost.upstreamCaptureDefine, isFalse, reason: 'tests run with the default OFF define');
+    test('Dart activation requires the enabled define and a shared device adapter', () {
+      EllaCaptureHost.resetForTesting();
+      addTearDown(EllaCaptureHost.resetForTesting);
       expect(
         () => EllaCaptureHost.installUpstreamCapture(homeCaptureDockBuilder: (_) => const SizedBox()),
         throwsStateError,
       );
       expect(EllaCaptureHost.upstreamCaptureActive, isFalse);
       expect(EllaCaptureHost.legacyCaptureSuppressed, isFalse);
+      final adapter = _RegistrationOnlyDeviceService();
+      void install() => EllaCaptureHost.installUpstreamCapture(
+            homeCaptureDockBuilder: (_) => const SizedBox(),
+            deviceService: adapter,
+          );
+      if (EllaCaptureHost.upstreamCaptureDefine) {
+        install();
+        expect(EllaCaptureHost.upstreamCaptureActive, isTrue);
+        expect(EllaCaptureHost.legacyCaptureSuppressed, isTrue);
+        expect(EllaCaptureHost.deviceService, same(adapter));
+      } else {
+        expect(install, throwsStateError);
+        expect(EllaCaptureHost.upstreamCaptureActive, isFalse);
+        expect(EllaCaptureHost.legacyCaptureSuppressed, isFalse);
+      }
     });
 
     test('flag-ON registration swaps the home dock and suppresses the legacy capture starters', () {
@@ -306,13 +329,15 @@ void main() {
 
     test('AppDelegate registers the upstream Pigeon hosts only under the ON condition', () {
       final delegate = _read('ios/Runner/AppDelegate.swift');
+      expect(delegate, contains('func didInitializeImplicitFlutterEngine'));
+      expect(delegate, contains('let messenger = engineBridge.applicationRegistrar.messenger()'));
       final blocks = RegExp(
         r'#if ELLA_UPSTREAM_CAPTURE_ENABLED_YES\n(.*?)#endif',
         dotAll: true,
       ).allMatches(delegate).toList();
       expect(
         blocks.map((m) => m.group(1)!).join(),
-        contains('EllaUpstreamCaptureNativeHost.shared.register(binaryMessenger: controller.binaryMessenger)'),
+        contains('EllaUpstreamCaptureNativeHost.shared.register(binaryMessenger: messenger)'),
       );
       final outside = delegate.replaceAll(
         RegExp(r'#if ELLA_UPSTREAM_CAPTURE_ENABLED_YES\n.*?#endif', dotAll: true),

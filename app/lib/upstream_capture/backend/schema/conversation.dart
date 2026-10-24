@@ -755,6 +755,7 @@ class SyncLocalFilesResponse {
   int failedSegments;
   int totalSegments;
   List<String> errors;
+  Map<String, dynamic>? coverageReceipt;
 
   /// Client-side batches that could not be uploaded. Unlike [failedSegments],
   /// these failures leave WALs retryable locally and must re-arm foreground
@@ -774,6 +775,7 @@ class SyncLocalFilesResponse {
     this.failedSegments = 0,
     this.totalSegments = 0,
     this.errors = const [],
+    this.coverageReceipt,
     this.localUploadFailures = 0,
     this.localUploadPermanentFailures = 0,
     this.localUploadPermanentError,
@@ -782,7 +784,9 @@ class SyncLocalFilesResponse {
   bool get hasPartialFailure => failedSegments > 0;
 
   factory SyncLocalFilesResponse.fromJson(Map<String, dynamic> json) {
-    return SyncLocalFilesResponse.fromGenerated(wire.GeneratedSyncLocalFilesResultResponse.fromJson(json));
+    final result = SyncLocalFilesResponse.fromGenerated(wire.GeneratedSyncLocalFilesResultResponse.fromJson(json));
+    if (json['coverage_receipt'] is Map) result.coverageReceipt = Map<String, dynamic>.from(json['coverage_receipt']);
+    return result;
   }
 
   factory SyncLocalFilesResponse.fromGenerated(wire.GeneratedSyncLocalFilesResultResponse generated) {

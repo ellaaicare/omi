@@ -1503,7 +1503,15 @@ void main() {
     expect(requests, 0);
     expect(jsonAuthority.uid, multipartAuthority.uid);
     expect(prefs.uid, 'uid-a');
-    expect(prefs.aiConsentAuthorityGeneration, greaterThan(originalGeneration));
+    if (SharedPreferencesUtil.isPublicBuild) {
+      // Public builds reject this internal-only authority at the first check,
+      // before the fixture's deliberate generation drift can run.
+      expect(jsonAuthority.checks, 1);
+      expect(multipartAuthority.checks, 1);
+      expect(prefs.aiConsentAuthorityGeneration, originalGeneration);
+    } else {
+      expect(prefs.aiConsentAuthorityGeneration, greaterThan(originalGeneration));
+    }
   });
 
   test('real streaming helper verifies exact authority throughout response delivery', () async {

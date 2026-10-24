@@ -636,8 +636,9 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                       data.sttProvider != null ||
                                       widget.onSegmentTap != null) ...[
                                     const SizedBox(height: 4),
-                                    Row(
-                                      mainAxisAlignment: MainAxisAlignment.end,
+                                    Wrap(
+                                      alignment: WrapAlignment.end,
+                                      crossAxisAlignment: WrapCrossAlignment.center,
                                       children: [
                                         if (data.sttProvider != null) ...[
                                           Text(

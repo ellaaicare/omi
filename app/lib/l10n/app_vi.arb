@@ -2617,5 +2617,20 @@
   "upstreamCaptureConnectNecklace": "Connect necklace",
   "upstreamCaptureStop": "Stop recording",
   "upstreamCaptureRecordingPhone": "Recording with your phone",
-  "upstreamCaptureSearching": "Looking for your necklace…"
+  "upstreamCaptureSearching": "Looking for your necklace…",
+  "ellaDictationTitle": "Dictate a draft",
+  "ellaDictationLocalDraft": "Speech stays on this device. Finish adds text to your unchanged draft. Nothing is sent automatically.",
+  "ellaDictationBusy": "Another capture or voice output is active. Finish it before starting dictation.",
+  "ellaDictationStarting": "Waiting for microphone and speech permission…",
+  "ellaDictationListening": "Listening on this device. Tap Finish to add your words to the draft.",
+  "ellaDictationFinishing": "Finishing dictation…",
+  "ellaDictationFinished": "Dictation finished. Review your draft before sending.",
+  "ellaDictationStart": "Start",
+  "ellaDictationFinish": "Finish",
+  "ellaDictationPermissionRequired": "Microphone and speech access are needed for dictation. Review permissions in Settings.",
+  "ellaDictationCleanupPending": "Cleanup is still unconfirmed. Tap Cancel to retry. New dictation remains unavailable.",
+  "ellaCompanionEditorTitle": "Your companion",
+  "ellaVoiceConnectionUnavailableTitle": "Ella’s voice couldn’t connect",
+  "ellaVoiceConnectionUnavailableBody": "You can try again or close this call.",
+  "ellaVoiceConnectionCloseBody": "Close this call and keep using Ella."
 }

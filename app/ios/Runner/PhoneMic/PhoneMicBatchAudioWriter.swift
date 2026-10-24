@@ -70,6 +70,7 @@ final class PhoneMicBatchAudioWriter: BaseBatchAudioWriter {
     /// (`omibatchphone` / `omibatchphoneauto`) and only shapes the file name.
     func append(opusPackets: [Data], marker: String) {
         if opusPackets.isEmpty { return }
+        guard let authorization = EllaNativeCaptureAuthorization.snapshot() else { return }
         let admission = CaptureAdmissionPolicy.load(from: defaults)
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
 
@@ -100,7 +101,8 @@ final class PhoneMicBatchAudioWriter: BaseBatchAudioWriter {
         // A policy transition can race the audio queue after ingress. Retire
         // the packet before opening a file or admitting any encoded bytes.
         let beforeOpen = CaptureAdmissionPolicy.load(from: defaults)
-        guard beforeOpen.permits(admittedRevision: admission.revision) else {
+        guard EllaNativeCaptureAuthorization.permits(authorization),
+              beforeOpen.permits(admittedRevision: admission.revision) else {
             if beforeOpen.muted, isOpen { lastAppendMs = nowMs }
             return
         }
@@ -128,7 +130,7 @@ final class PhoneMicBatchAudioWriter: BaseBatchAudioWriter {
             if beforeWrite.muted, isOpen { lastAppendMs = nowMs }
             return
         }
-        guard writeFramesLocked(opusPackets) else { return }
+        guard EllaNativeCaptureAuthorization.withAdmission(authorization, write: { writeFramesLocked(opusPackets) }) else { return }
         // Location capture intentionally starts after native audio. Retry until
         // its fenced preference arrives; an existing sidecar always wins.
         persistCurrentGeolocationSidecar()

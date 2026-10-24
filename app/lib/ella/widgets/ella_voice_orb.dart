@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 
 import 'package:omi/ella/ella_theme.dart';
@@ -84,7 +82,7 @@ class _EllaVoiceOrbState extends State<EllaVoiceOrb> with TickerProviderStateMix
     final reduceMotion = MediaQuery.of(context).disableAnimations;
     final mic = widget.audioLevel.clamp(0.0, 1.0);
     final isActive = widget.state == VoiceOrbState.listening || widget.state == VoiceOrbState.speaking;
-    final orbColor = EllaColors.primary;
+    final orbColor = EllaPalette.of(context).primary;
 
     return GestureDetector(
       onTap: widget.onTap,
@@ -168,7 +166,7 @@ class _EllaVoiceOrbState extends State<EllaVoiceOrb> with TickerProviderStateMix
                     child: Center(
                       child: Icon(
                         _iconForState(),
-                        color: Colors.white.withOpacity(0.9),
+                        color: EllaPalette.of(context).dark ? EllaPalette.of(context).paper : Colors.white,
                         size: 48,
                       ),
                     ),

@@ -3,6 +3,10 @@ import 'dart:typed_data';
 
 import 'package:omi/upstream_capture/gen/phone_mic_pigeon.g.dart';
 import 'package:omi/upstream_capture/services/services.dart';
+import 'package:omi/services/mic/confirmed_mic_stop.dart';
+import 'package:omi/services/mic/audio_capture_ownership.dart';
+import 'package:omi/services/mic/lease_scoped_owned_mic.dart';
+import 'package:omi/services/mic/owned/owned_capture_controller.dart';
 import 'package:omi/utils/logger.dart';
 
 /// iOS/Android [IMicRecorderService] backed by the native PhoneMic module — an
@@ -24,7 +28,8 @@ import 'package:omi/utils/logger.dart';
 /// re-emits its current state under it, so `running` reaches the new session even
 /// without a fresh `starting`. stop() always forwards to native (killing any
 /// orphaned session) and only runs local teardown once.
-class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterApi {
+class NativeMicRecorderService
+    implements IMicRecorderService, PhoneMicFlutterApi, ConfirmedMicStop, LeaseScopedOwnedMic {
   static const Duration _stallThreshold = Duration(seconds: 3);
   static const Duration _stallCheckInterval = Duration(seconds: 1);
   // Batch has no frames; liveness is the arrival of onBatchProgress (1Hz), which
@@ -35,6 +40,7 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
   final PhoneMicHostApi _hostApi;
   final Timer Function(Duration, void Function(Timer)) _periodic;
   final DateTime Function() _now;
+  final OwnedCaptureController? _ownedController;
 
   Function(Uint8List bytes)? _onByteReceived;
   Function()? _onRecording;
@@ -46,6 +52,9 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
   Function(String code, String message)? _onError;
 
   bool _sessionActive = false;
+  Future<void>? _confirmedStopInFlight;
+  Future<void>? _nativeStartInFlight;
+  final Set<Future<void>> _stopReceipts = {};
   // Dart-minted session identity, bumped on every start()/startBatch(). Events
   // are dropped unless they carry this id (see the FlutterApi handlers below).
   int _sessionId = 0;
@@ -63,12 +72,40 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
     bool registerFlutterApi = true,
     DateTime Function() now = DateTime.now,
     Timer Function(Duration, void Function(Timer))? periodic,
+    OwnedCaptureController? ownedController,
   })  : _hostApi = hostApi ?? PhoneMicHostApi(),
+        _ownedController = ownedController,
         _now = now,
         _periodic = periodic ?? Timer.periodic {
     if (registerFlutterApi) {
       PhoneMicFlutterApi.setUp(this);
     }
+  }
+
+  @override
+  bool get ownedStreamConfigured => _ownedController != null;
+  @override
+  void reserveOwnedStreamLease(AudioCaptureLease lease) {
+    if (_sessionActive || _nativeStartInFlight != null || _confirmedStopInFlight != null)
+      throw StateError('legacy native capture remains unsettled');
+    _ownedController!.adoptLease(lease);
+  }
+  @override
+  Future<void> startWithCaptureLease(
+    AudioCaptureLease lease, {
+    required void Function(Uint8List) onByteReceived,
+    void Function()? onRecording,
+    void Function()? onInitializing,
+  }) {
+    if (_sessionActive || _nativeStartInFlight != null || _confirmedStopInFlight != null)
+      return Future.error(StateError('legacy native capture remains unsettled'));
+    _batchMode = false;
+    return _ownedController!.start(
+      lease: lease,
+      onByteReceived: onByteReceived,
+      onRecording: onRecording,
+      onInitializing: onInitializing,
+    );
   }
 
   @override
@@ -80,6 +117,24 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
     Function()? onStalled,
     Function(bool began)? onInterruption,
   }) async {
+    final owned = _ownedController;
+    if (owned != null) {
+      if (_sessionActive || _nativeStartInFlight != null || _confirmedStopInFlight != null)
+        throw StateError('legacy native capture remains unsettled');
+      _batchMode = false;
+      await owned.start(
+        onByteReceived: (bytes) => onByteReceived(bytes),
+        onRecording: onRecording,
+        onInitializing: onInitializing,
+      );
+      return;
+    }
+    if (_confirmedStopInFlight == null && _nativeStartInFlight == null && _stopReceipts.isNotEmpty) {
+      await Future.wait(_stopReceipts.toList()).timeout(const Duration(seconds: 10));
+    }
+    if (_confirmedStopInFlight != null || _nativeStartInFlight != null || _stopReceipts.isNotEmpty) {
+      throw StateError('native microphone receipt pending');
+    }
     _onByteReceived = onByteReceived;
     _onRecording = onRecording;
     _onStop = onStop;
@@ -94,11 +149,13 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
       // Throws a PlatformException (permission_denied, session_config_failed,
       // format_invalid, converter_init_failed, engine_start_failed) instead of
       // recording silence.
-      await _hostApi.start(PhoneMicCaptureMode.stream, sessionId);
+      await _awaitNativeStart(PhoneMicCaptureMode.stream, sessionId);
     } catch (e) {
-      _sessionActive = false;
-      _cancelStallWatchdog();
-      _clearCallbacks();
+      if (_sessionId == sessionId) {
+        _sessionActive = false;
+        _cancelStallWatchdog();
+        _clearCallbacks();
+      }
       rethrow;
     }
   }
@@ -110,6 +167,13 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
     Function()? onBatchStalled,
     Function(String code, String message)? onError,
   }) async {
+    if (_ownedController?.hasReservation == true) throw StateError('owned stream prevents batch replacement');
+    if (_confirmedStopInFlight == null && _nativeStartInFlight == null && _stopReceipts.isNotEmpty) {
+      await Future.wait(_stopReceipts.toList()).timeout(const Duration(seconds: 10));
+    }
+    if (_confirmedStopInFlight != null || _nativeStartInFlight != null || _stopReceipts.isNotEmpty) {
+      throw StateError('native microphone receipt pending');
+    }
     _onStop = onStop;
     _onInterruption = onInterruption;
     _onBatchStalled = onBatchStalled;
@@ -121,32 +185,94 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
     try {
       // Batch adds opus_init_failed / batch_dir_unavailable to the stream error
       // codes; the native writer stores .bin files instead of streaming frames.
-      await _hostApi.start(PhoneMicCaptureMode.batch, sessionId);
+      await _awaitNativeStart(PhoneMicCaptureMode.batch, sessionId);
     } catch (e) {
-      _sessionActive = false;
-      _batchMode = false;
-      _cancelBatchWatchdog();
-      _clearCallbacks();
+      if (_sessionId == sessionId) {
+        _sessionActive = false;
+        _batchMode = false;
+        _cancelBatchWatchdog();
+        _clearCallbacks();
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _awaitNativeStart(PhoneMicCaptureMode mode, int sessionId) async {
+    late final Future<void> receipt;
+    receipt = _hostApi.start(mode, sessionId).whenComplete(() {
+      if (identical(_nativeStartInFlight, receipt)) _nativeStartInFlight = null;
+    });
+    _nativeStartInFlight = receipt;
+    try {
+      await receipt.timeout(const Duration(seconds: 12));
+      if (!_sessionActive || _sessionId != sessionId) throw StateError('native microphone start retired');
+    } catch (_) {
+      if (_sessionId == sessionId) stop();
       rethrow;
     }
   }
 
   @override
   void stop() {
+    final owned = _ownedController;
+    if (owned != null && !_batchMode) {
+      if (owned.hasReservation) unawaited(owned.stop().catchError((Object error) {
+        Logger.error('[NativeMic] owned drain held: ${error.runtimeType}');
+      }));
+      return;
+    }
     // Always forward to native — even when Dart already thinks the session is
     // inactive. A de-synced Dart state must never leave a native session
     // capturing forever; native resolves harmlessly when it is already idle.
-    () async {
-      try {
-        await _hostApi.stop();
-      } catch (e) {
-        Logger.error('[NativeMic] native stop failed: $e');
-      }
-    }();
+    late final Future<void> receipt;
+    receipt = Future<void>.sync(() => _hostApi.stop()).catchError((Object error) {
+      Logger.error('[NativeMic] native stop failed: $error');
+    }).whenComplete(() => _stopReceipts.remove(receipt));
+    _stopReceipts.add(receipt);
     // Local teardown (and onStop) run only once, on the transition out of an
     // active session — so a second stop() (or a stop() after a native idle) does
     // not double-fire callbacks.
-    if (!_sessionActive) return;
+    _retireLocalSession()?.call();
+  }
+
+  @override
+  Future<void> stopAndConfirm() async {
+    final owned = _ownedController;
+    if (owned != null && !_batchMode) {
+      if (owned.hasReservation) await owned.stop();
+      return;
+    }
+    if (_confirmedStopInFlight != null) throw StateError('native microphone stop pending');
+    final session = _sessionId;
+    final onStop = _retireLocalSession();
+    late final Future<void> stop;
+    stop = (() async {
+      // A timeout retires the Dart start waiter, not the native host request.
+      // Confirm silence only after that exact request can no longer start late.
+      final pendingStart = _nativeStartInFlight;
+      if (pendingStart != null) {
+        try {
+          await pendingStart;
+        } catch (_) {
+          // A rejected start still requires an acknowledged physical stop.
+        }
+      }
+      final pendingStops = _stopReceipts.toList(growable: false);
+      if (pendingStops.isNotEmpty) await Future.wait(pendingStops);
+      await _hostApi.stop();
+      final recording = await _hostApi.isRecording();
+      if (_sessionId != session || recording) throw StateError('native microphone stop not confirmed');
+    })()
+        .whenComplete(() {
+      if (identical(_confirmedStopInFlight, stop)) _confirmedStopInFlight = null;
+    });
+    _confirmedStopInFlight = stop;
+    await stop.timeout(const Duration(seconds: 10));
+    onStop?.call();
+  }
+
+  Function()? _retireLocalSession() {
+    if (!_sessionActive) return null;
     _sessionActive = false;
     _interrupted = false;
     _batchMode = false;
@@ -154,7 +280,7 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
     _cancelBatchWatchdog();
     final onStop = _onStop;
     _clearCallbacks();
-    onStop?.call();
+    return onStop;
   }
 
   // PhoneMicFlutterApi

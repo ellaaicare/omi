@@ -22,6 +22,32 @@ class _VoiceReceiptAuthority implements ExactAccountAuthorityVerifier {
 }
 
 void main() {
+  test('Talk tab dependency changes never schedule a provider or microphone session', () {
+    final source = File('lib/ella/pages/ella_voice_chat_page.dart').readAsStringSync();
+    final dependencies =
+        source.substring(source.indexOf('void didChangeDependencies()'), source.indexOf('void didUpdateWidget('));
+    expect(dependencies, isNot(contains('_activateSelectedVoice(')));
+    expect(dependencies, isNot(contains('Future.delayed(')));
+    // Exit still pauses a user-started session instead of leaving it active.
+    expect(dependencies, contains('!isOnVoiceTab && _wasOnVoiceTab && _voiceModeActive'));
+    expect(dependencies, contains('_stopV2V();'));
+    expect(dependencies, contains('_pauseVoiceMode();'));
+  });
+
+  test('explicit orb and memory-scoped Talk retain guarded voice activation', () {
+    final source = File('lib/ella/pages/ella_voice_chat_page.dart').readAsStringSync();
+    final initialize =
+        source.substring(source.indexOf('void initState()'), source.indexOf('void didChangeDependencies()'));
+    final orb =
+        source.substring(source.indexOf('Future<void> _onOrbTap()'), source.indexOf('Future<void> _onOrbTap()') + 650);
+    expect(initialize, contains('widget.sessionScope != null && widget.demoState == null'));
+    expect(initialize, isNot(contains('_initSpeech(')));
+    expect(initialize, contains('if (mounted && !_voiceModeActive) _activateSelectedVoice();'));
+    expect(orb, contains('if (!_voiceModeActive)'));
+    expect(orb, contains('await _activateSelectedVoice();'));
+    expect(source, contains('if (!await _ensureVoiceConsent() || !mounted) return;'));
+  });
+
   test('Demo voice fixtures never initialize speech recognition', () {
     expect(
       EllaVoiceChatPage.shouldInitializeSpeech(

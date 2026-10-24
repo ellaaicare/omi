@@ -1,7 +1,13 @@
+import 'package:omi/ella/widgets/ella_v7_appearance.dart';
+import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/pages/guardian_alert_history_page.dart';
+import 'package:omi/pages/action_items/action_items_page.dart';
 import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:omi/ella/widgets/iris_whisper_stop_bar.dart';
 
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:provider/provider.dart';
@@ -130,7 +136,9 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
         readyChild: HomePageWrapper._provisioned(navigateToRoute: _navigateToRoute, autoMessage: _autoMessage),
       );
     }
-    return HomePage(navigateToRoute: _navigateToRoute, autoMessage: _autoMessage);
+    return EllaV7ThemeScope(
+      child: HomePage(navigateToRoute: _navigateToRoute, autoMessage: _autoMessage),
+    );
   }
 }
 
@@ -173,6 +181,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     context.read<AppProvider>().getPopularApps();
   }
 
+  void _selectIrisDestination(int index, bool isRepeat) {
+    if (index == 4) {
+      if (allowsInheritedOmiSurface()) {
+        Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const ActionItemsPage()));
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.irisRemindersUnavailable)));
+      }
+      return;
+    }
+    if (index == 5) {
+      if (allowsGuardianSurface()) {
+        setState(() {
+          _pages[5] = const GuardianAlertHistoryPage(embedded: true);
+        });
+        context.read<HomeProvider>().setIndex(5);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.todayWhispersUnavailable)));
+      }
+      return;
+    }
+    if (isRepeat) {
+      _scrollToTop(index);
+    } else {
+      context.read<HomeProvider>().setIndex(index);
+    }
+  }
+
   void _scrollToTop(int pageIndex) {
     if (pageIndex == 0) {
       _todayPageKey.currentState?.scrollToTop();
@@ -185,16 +220,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     String event = '';
     if (state == AppLifecycleState.paused) {
       event = 'App is paused';
+      if (mounted) context.read<ConversationProvider>().setSummaryPresentationActive(false);
     } else if (state == AppLifecycleState.resumed) {
       event = 'App is resumed';
 
       // Reload convos
       if (mounted) {
-        Provider.of<ConversationProvider>(context, listen: false).refreshConversations();
+        final summaries = Provider.of<ConversationProvider>(context, listen: false);
+        summaries.setSummaryPresentationActive(true);
+        summaries.forceRefreshConversations();
         Provider.of<CaptureProvider>(context, listen: false).refreshInProgressConversations();
       }
     } else if (state == AppLifecycleState.hidden) {
       event = 'App is hidden';
+      if (mounted) context.read<ConversationProvider>().setSummaryPresentationActive(false);
     } else if (state == AppLifecycleState.detached) {
       event = 'App is detached';
     } else {
@@ -224,13 +263,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   @override
   void initState() {
-    _pages = widget.pagesOverride ??
-        [
-          TodayPage(key: _todayPageKey),
-          const ChatPage(isPivotBottom: true),
-          const EllaVoiceChatPage(),
-          const EllaSettingsPage(),
-        ];
+    _pages = widget.pagesOverride != null
+        ? List<Widget>.of(widget.pagesOverride!)
+        : [
+            TodayPage(key: _todayPageKey),
+            const ChatPage(isPivotBottom: true),
+            const EllaVoiceChatPage(),
+            const EllaSettingsPage(),
+          ];
+    _pages.addAll([const SizedBox.shrink(), const SizedBox.shrink()]);
     if (widget.runtimeSideEffectsEnabled) {
       SharedPreferencesUtil().onboardingCompleted = true;
       updateUserOnboardingState(completed: true);
@@ -239,7 +280,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     // Navigate uri
     Uri? navigateToUri;
     var pageAlias = "home";
-    var homePageIdx = 0;
+    var homePageIdx = 1;
     String? detailPageId;
 
     final allowedNavigateToRoute = allowedEllaNavigationRoute(widget.navigateToRoute);
@@ -255,6 +296,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       }
 
       switch (pageAlias) {
+        case "home":
+        case "today":
+          homePageIdx = 0;
+          break;
         case "chat":
           homePageIdx = 1;
           break;
@@ -284,10 +329,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
           await Provider.of<HomeProvider>(context, listen: false).setUserPeople();
         }
         if (mounted) {
-          await Provider.of<CaptureProvider>(
-            context,
-            listen: false,
-          ).streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
+          await context.read<DeviceProvider>().resumeConnectedCaptureAtHomeLaunch();
         }
       }
 
@@ -594,50 +636,61 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       },
       child: Consumer<HomeProvider>(
         builder: (context, homeProvider, _) {
+          final rail = EllaNavigationRail.fits(context);
           return Scaffold(
             backgroundColor: Theme.of(context).colorScheme.primary,
-            resizeToAvoidBottomInset: false,
+            // Chat owns its editor inset. Other tabs must still clear the OS
+            // keyboard while its dismissal animation finishes (or their own search opens).
+            resizeToAvoidBottomInset: homeProvider.selectedIndex != 1,
             appBar: null,
-            body: DefaultTabController(
-              length: 4,
-              initialIndex: homeProvider.selectedIndex,
-              child: GestureDetector(
-                onTap: () {
-                  primaryFocus?.unfocus();
-                  // context.read<HomeProvider>().memoryFieldFocusNode.unfocus();
-                  // context.read<HomeProvider>().chatFieldFocusNode.unfocus();
-                },
-                child: Stack(
-                  children: [
-                    Column(
-                      children: [
-                        Expanded(
-                          child: IndexedStack(index: context.watch<HomeProvider>().selectedIndex, children: _pages),
-                        ),
-                        // Settings and other non-home tabs just need nav bar clearance
-                        if (context.watch<HomeProvider>().selectedIndex == 3)
-                          SizedBox(
-                              height: BottomNavBar.navigationHeight(context) + MediaQuery.of(context).padding.bottom),
-                      ],
-                    ),
-                    Consumer<HomeProvider>(
-                      builder: (context, home, child) {
-                        if (home.isChatFieldFocused) {
-                          return const SizedBox.shrink();
-                        }
-
-                        return BottomNavBar(
-                          onTabTap: (index, isRepeat) {
-                            if (isRepeat) {
-                              _scrollToTop(index);
-                            } else {
-                              home.setIndex(index);
-                            }
-                          },
-                        );
-                      },
-                    ),
-                  ],
+            body: EllaIrisBackdrop(
+              child: DefaultTabController(
+                length: 6,
+                initialIndex: homeProvider.selectedIndex,
+                child: GestureDetector(
+                  onTap: () {
+                    primaryFocus?.unfocus();
+                    // context.read<HomeProvider>().memoryFieldFocusNode.unfocus();
+                    // context.read<HomeProvider>().chatFieldFocusNode.unfocus();
+                  },
+                  child: Stack(
+                    children: [
+                      Column(
+                        children: [
+                          Expanded(
+                            child: Row(
+                              children: [
+                                if (rail) EllaNavigationRail(onTabTap: _selectIrisDestination),
+                                Expanded(
+                                  child: LayoutBuilder(
+                                    builder: (context, constraints) {
+                                      final pages = MediaQuery(
+                                        data: MediaQuery.of(
+                                          context,
+                                        ).copyWith(size: Size(constraints.maxWidth, constraints.maxHeight)),
+                                        child: EllaCaptureDockPlacementScope(
+                                          child: IndexedStack(
+                                            index: context.watch<HomeProvider>().selectedIndex,
+                                            children: _pages,
+                                          ),
+                                        ),
+                                      );
+                                      return EllaRailScope(
+                                        enabled: rail,
+                                        child: EllaBottomNavigationPlacementScope(child: pages),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (homeProvider.selectedIndex != 1) const IrisWhisperStopBar(),
+                          if (!rail && !homeProvider.isChatFieldFocused) BottomNavBar(onTabTap: _selectIrisDestination),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

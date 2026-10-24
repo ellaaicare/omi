@@ -11281,5 +11281,315 @@
   "hermesSummarySourceDescription": "This memory's current summary was enriched by Hermes.",
   "@hermesSummarySourceDescription": {
     "description": "Accessible source attribution for a version-matched, canonically confirmed Hermes summary"
-  }
+  },
+  "ellaChatHistoryUnavailableTitle": "Earlier messages couldn’t load",
+  "@ellaChatHistoryUnavailableTitle": {
+    "description": "Chat history loading failure; does not describe an outgoing send."
+  },
+  "ellaChatHistoryUnavailableBody": "Retry loading the chat history.",
+  "@ellaChatHistoryUnavailableBody": {
+    "description": "History retry button instruction, independent of message delivery; also works with an empty timeline."
+  },
+  "ellaChatWaitingResponse": "Waiting for a response",
+  "@ellaChatWaitingResponse": {
+    "description": "Outgoing chat request is pending. This label makes no claim of backend progress or completion timing."
+  },
+  "ellaChatElapsedSeconds": "{seconds}s",
+  "@ellaChatElapsedSeconds": {
+    "description": "Local elapsed wait time only; not server progress.",
+    "placeholders": {
+      "seconds": {
+        "type": "int"
+      }
+    }
+  },
+  "diagnosticsReadVoiceSettings": "Read account and voice settings",
+  "@diagnosticsReadVoiceSettings": {
+    "description": "Explicit read-only support action for local diagnostic candidates; no speech or settings change"
+  },
+  "upstreamCaptureControlsTitle": "Capture",
+  "@upstreamCaptureControlsTitle": {
+    "description": "Title of the capture controls sheet opened from the compact status capsule."
+  },
+  "upstreamCaptureIdle": "Not recording",
+  "@upstreamCaptureIdle": {
+    "description": "Idle capture status when the real capture provider is not recording."
+  },
+  "irisMemoryArtifactLabel": "Memory",
+  "irisMemorySourceAction": "Memory and source",
+  "irisMemorySourceUnavailable": "The source could not be opened. Try again.",
+  "irisMemorySummaryLabel": "Ella’s summary",
+  "irisMemoriesNotes": "Memories & Notes",
+  "irisReminders": "Reminders",
+  "irisMore": "More",
+  "irisMenu": "Menu",
+  "irisRemindersUnavailable": "Ella could not load reminders. Try again.",
+  "irisOriginalWords": "Original words",
+  "irisMemoryDetails": "Date, duration and folder",
+  "irisMemorySourceLabel": "Source",
+  "irisMemoryControls": "Memory controls",
+  "ellaSyntheticUploadDiagnostic": "Synthetic upload diagnostic — one fixture",
+  "ellaSyntheticPickPolicy": "Choose the sealed synthetic test policy",
+  "ellaSyntheticPickFixture": "Choose the exact sealed synthetic audio fixture",
+  "ellaSyntheticInternalLabel": "Internal diagnostic — one synthetic fixture; arming does not upload",
+  "ellaSyntheticArm": "Arm this diagnostic",
+  "ellaSyntheticSelect": "Select policy and fixture",
+  "ellaSyntheticSubmit": "Submit once",
+  "diagnosticsEllaServer": "Ella server",
+  "diagnosticsReachable": "Reachable (HTTP {status})",
+  "diagnosticsNotReachable": "Not reachable",
+  "diagnosticsNetwork": "Network",
+  "diagnosticsAvailable": "Available",
+  "diagnosticsUnavailable": "Unavailable",
+  "diagnosticsSupportSummary": "For support. Server reachability does not verify necklace connection, recording, transcription, or enrichment.",
+  "diagnosticsDiscoveryTotals": "Discovery totals since app launch: {seen} seen, {admitted} admitted.",
+  "diagnosticsDiscoveryCancelled": "Device selection was cancelled; no discovery error was reported.",
+  "diagnosticsCopyForSupport": "Copy for support",
+  "diagnosticsAppBuild": "Ella app version · build",
+  "diagnosticsRefreshVoiceSettings": "Refresh account & voice settings",
+  "diagnosticsTranscription": "Transcription transport · sent since app launch",
+  "diagnosticsSupportSubtitle": "For support and developers · network, capture, transcription, and AI processing permission",
+  "diagnosticsPermission": "AI processing permission lease",
+  "ellaRetainedSummaryLabel": "Original summary (retained version)",
+  "ellaRetainedSummaryNotice": "May describe an earlier transcript revision.",
+  "ellaRetainedSummaryChoose": "Choose a retained version",
+  "ellaRetainedSummaryVersion": "Retained version: {id}",
+  "@ellaRetainedSummaryVersion": {
+    "placeholders": {
+      "id": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaRetainedSummaryProvenance": "Stored original · Historical, unverified",
+  "irisCaptureListening": "Listening",
+  "@irisCaptureListening": {
+    "description": "Capture is active with an admitted transcription session; no recent words proven"
+  },
+  "irisCaptureTranscribing": "Transcribing",
+  "@irisCaptureTranscribing": {
+    "description": "New transcript text was observed in the current capture session recently"
+  },
+  "irisCaptureStop": "Stop listening",
+  "@irisCaptureStop": {
+    "description": "Stops capture, distinct from stopping Whisper audio"
+  },
+  "@irisOriginalWords": {
+    "description": "Heading for unmodified transcript evidence"
+  },
+  "irisFullConversation": "Full conversation",
+  "@irisFullConversation": {
+    "description": "Deliberate drilldown into the existing complete conversation detail"
+  },
+  "irisOriginalWordsPreview": "Original words · first 3 segments",
+  "irisSpeaker": "Speaker {number}",
+  "@irisSpeaker": {
+    "placeholders": {
+      "number": {
+        "type": "int"
+      }
+    }
+  },
+  "irisCaptureOn": "Necklace connected",
+  "irisHearingTitle": "Is Ella hearing you?",
+  "irisCaptureEvidenceUnavailable": "Sound arrival is not confirmed.",
+  "irisLastWordsSeconds": "Last new words {seconds} seconds ago",
+  "irisStatusDetails": "Details",
+  "irisNewestWords": "Newest words",
+  "irisList": "List",
+  "@irisLastWordsSeconds": {
+    "placeholders": {
+      "seconds": {
+        "type": "int"
+      }
+    }
+  },
+  "irisCaptureOff": "Not listening",
+  "irisCapturePaused": "Paused",
+  "irisPauseListening": "Pause listening",
+  "irisResumeListening": "Resume listening",
+  "irisPausingCapture": "Pausing…",
+  "irisResumingCapture": "Resuming…",
+  "irisCapturePauseFailed": "Ella could not confirm the change. Check status and try again.",
+  "irisJournal": "Journal",
+  "irisWhisperStop": "Stop Whisper",
+  "irisWhisperTextOnly": "Text-only",
+  "irisWhisperAudio": "Audio",
+  "irisWhisperPlaying": "Whisper playing",
+  "irisWhisperDiscardPending": "Whisper output is paused. Try again to confirm the queue was cleared.",
+  "irisLiveVoice": "Talk to Ella (live voice)",
+  "irisNecklaceConnected": "Necklace connected",
+  "irisPhoneMicrophoneOn": "Phone microphone on",
+  "irisFallbackAnswer": "Your Necklace is connected. Ella can’t show yet whether sound is arriving.",
+  "irisPhoneFallbackAnswer": "Your phone microphone is on. Ella can’t show yet whether sound is arriving.",
+  "irisPausedAnswer": "No. Listening is paused.",
+  "irisPausedExplanation": "Ella isn’t hearing anything until you resume.",
+  "irisSound": "Sound",
+  "irisWords": "Words",
+  "irisConnectionToElla": "Connection to Ella",
+  "irisWaitingToSend": "Waiting to send",
+  "irisNotShownYet": "Not shown yet",
+  "irisShowNewestWords": "Show newest words on Home",
+  "irisListening": "Listening",
+  "irisOn": "On",
+  "irisThingsKept": "Things Ella keeps will appear here.",
+  "irisReminderExample": "Try: “Remind me to call Sam on Friday.”",
+  "irisJournalFooter": "For any day, you can also ask Ella, like “What did I say last Thursday?”",
+  "irisMoreReminderNote": "Reminders live in Journal now, with everything else Ella kept.",
+  "irisWhisperStopAccessibility": "Whisper playing. Stop button.",
+  "irisSendSupportReport": "Send a support report",
+  "irisNotListening": "Not listening",
+  "irisCompanion": "Companion",
+  "irisLumeCompanion": "Lume is Ella’s companion.",
+  "irisStatusSupport": "Status & support",
+  "irisPrivacyData": "Privacy & data",
+  "irisStop": "Stop",
+  "irisComingUp": "Coming up",
+  "irisPast": "Past",
+  "irisNoDueTime": "No due time",
+  "irisDue": "Due {time}",
+  "@irisDue": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "irisWasDue": "Was due {time}",
+  "@irisWasDue": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "irisReminderListPartial": "More reminders are available.",
+  "irisAll": "All",
+  "irisAskElla": "Ask Ella",
+  "irisUnverifiedCaptureAnswer": "Your Necklace is connected. Ella can't show yet whether sound is arriving.",
+  "irisWhisperLabel": "Ella · Whisper",
+  "irisNecklaceNotConnected": "Necklace not connected",
+  "irisNecklaceDisconnectedAnswer": "No. Your Necklace isn't connected.",
+  "irisNecklaceDisconnectedExplanation": "Ella can't hear you until it's connected again. Everything already kept is safe.",
+  "irisNecklaceSettings": "Necklace settings",
+  "irisNotes": "Notes",
+  "irisJournalNotesUnavailable": "Notes are not available in this version yet.",
+  "irisJournalFilterLoadedItems": "Filter loaded Journal items",
+  "irisLoadMoreReminders": "Load more reminders",
+  "ellaV7Appearance": "Appearance",
+  "ellaV7DayNight": "Day & night",
+  "ellaV7AlwaysLight": "Always light",
+  "ellaV7AlwaysDark": "Always dark",
+  "ellaV7DayNightExplanation": "Day starts at 7 AM and night at 7 PM, blending over 30 minutes. No location access.",
+  "ellaV7CompanionDefaultName": "Lume",
+  "ellaV7CompanionCustomize": "Your companion · tap to change",
+  "ellaV7CompanionShape": "Choose a companion style",
+  "ellaV7CompanionColorOriginal": "Original",
+  "ellaV7CompanionColorWarm": "Warm",
+  "ellaV7CompanionColorCool": "Cool",
+  "ellaV7CompanionSaveFailed": "Ella couldn’t save this change. Please try again.",
+  "ellaEarlierHistoryLoad": "Load earlier messages",
+  "ellaEarlierHistoryLoading": "Loading earlier messages…",
+  "ellaEarlierHistoryFailed": "Earlier messages couldn’t load. Try again.",
+  "ellaEarlierHistoryRefreshRequired": "Refresh the chat to start a new history session.",
+  "ellaEarlierHistoryRefresh": "Refresh chat",
+  "ellaHistoryAdmissionDiagnostic": "Chat history admission (local metadata)",
+  "ellaHistoryOlderViewport": "Show older messages",
+  "ellaHistoryNewerViewport": "Show newer messages",
+  "ellaV7CompanionStyleLume": "Lume",
+  "ellaV7CompanionStyleLeaf": "Leaf spirit",
+  "ellaV7CompanionStyleStar": "Star spirit",
+  "voiceLiveUnavailableBody": "The live voice session failed at {stage} ({detail}). You can retry or close this call.",
+  "@voiceLiveUnavailableBody": {
+    "placeholders": {
+      "stage": {
+        "type": "String"
+      },
+      "detail": {
+        "type": "String"
+      }
+    }
+  },
+  "irisWhisperOutputUnconfirmed": "Whisper output could not be confirmed. Try again or turn Whispers off.",
+  "irisWhisperDeliveryHint": "Whispers appear here when Ella delivers one. Turning Whispers on does not confirm a delivery.",
+  "ellaDictationUnavailable": "Dictation unavailable",
+  "ellaDictationUnavailableBody": "Dictation is unavailable right now. You can type your message.",
+  "ellaDictationTitle": "Dictate a draft",
+  "ellaDictationLocalDraft": "Speech stays on this device. Finish adds text to your unchanged draft. Nothing is sent automatically.",
+  "ellaDictationBusy": "Another capture or voice output is active. Finish it before starting dictation.",
+  "ellaDictationStarting": "Waiting for microphone and speech permission…",
+  "ellaDictationListening": "Listening on this device. Tap Finish to add your words to the draft.",
+  "ellaDictationFinishing": "Finishing dictation…",
+  "ellaDictationFinished": "Dictation finished. Review your draft before sending.",
+  "ellaDictationStart": "Start",
+  "ellaDictationFinish": "Finish",
+  "ellaDictationPermissionRequired": "Microphone and speech access are needed for dictation. Review permissions in Settings.",
+  "ellaDictationCleanupPending": "Cleanup is still unconfirmed. Tap Cancel to retry. New dictation remains unavailable.",
+  "ellaCompanionEditorTitle": "Your companion",
+  "ellaVoiceConnectionUnavailableTitle": "Ella’s voice couldn’t connect",
+  "ellaVoiceConnectionUnavailableBody": "You can try again or close this call.",
+  "ellaVoiceConnectionCloseBody": "Close this call and keep using Ella.",
+  "ellaProvisioningServiceTitle": "Setup is waiting for Ella",
+  "ellaProvisioningServiceBody": "Ella’s background processing service is not ready. We’ll check again for a limited time.",
+  "ellaProvisioningServiceTimeoutBody": "Ella’s background processing service is still unavailable. Automatic checks have stopped. Try again later, or use the support code below.",
+  "ellaHomeAudioStalled": "Audio stalled — check necklace",
+  "ellaHomeAudioReceiving": "Receiving necklace audio",
+  "ellaHomeNecklaceConnected": "Necklace connected · waiting for audio",
+  "ellaHomeAudioUnconfirmed": "Necklace audio not confirmed",
+  "ellaHomeAudioNever": "Last audio: not observed",
+  "ellaHomeAudioTime": "Last audio: {time}",
+  "ellaHomeTranscribing": "Transcription connected",
+  "@ellaHomeAudioTime": {
+    "placeholders": {
+      "time": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaHomeTranscriptionUnconfirmed": "Transcription not confirmed",
+  "ellaHomeTranscriptEmpty": "No live transcript yet",
+  "captureRecordedBy": "Recorded by {devices}",
+  "@captureRecordedBy": {
+    "description": "Accessibility label for the device icons on a conversation recorded by several devices",
+    "placeholders": {
+      "devices": {
+        "type": "String"
+      }
+    }
+  },
+  "captureSourceCall": "Call",
+  "@captureSourceCall": {
+    "description": "Capture source label when an Omi phone call is being recorded, on the live card (e.g. 'Call · Listening · 3:10'). A noun."
+  },
+  "captureSourceDesktop": "Desktop",
+  "@captureSourceDesktop": {
+    "description": "The Omi desktop app as the device that recorded a conversation"
+  },
+  "captureSourcePendant": "Pendant",
+  "@captureSourcePendant": {
+    "description": "Name of the Omi wearable pendant as a capture source (which device recorded a conversation)"
+  },
+  "pause": "Pause",
+  "@pause": {
+    "description": "Button label that pauses audio playback"
+  },
+  "resume": "Resume",
+  "@resume": {
+    "description": "Button that resumes a paused recording."
+  },
+  "ellaSetupAuthTitle": "Setup could not verify your sign-in",
+  "ellaSetupAuthBody": "Ella could not refresh or confirm your sign-in verification. Try again before continuing.",
+  "ellaSetupAccountTitle": "Setup is waiting for account validation",
+  "ellaSetupAccountBody": "The service could not validate this account’s setup. This does not confirm a problem with your internet connection.",
+  "ellaSetupResponseTitle": "Setup received an unexpected response",
+  "ellaSetupResponseBody": "Ella could not verify the setup response from the service. Try again, or use the support code if one is shown.",
+  "ellaSetupThrottleTitle": "Setup checks are being limited",
+  "ellaSetupThrottleBody": "The service is limiting setup requests. Wait before trying again.",
+  "ellaSetupBackendTitle": "Setup service is unavailable",
+  "ellaSetupBackendBody": "The service returned an error while checking setup. Try again when the service is available.",
+  "ellaSetupTimeoutTitle": "Setup request timed out",
+  "ellaSetupTimeoutBody": "The setup check did not finish in time. This does not confirm whether the cause is the network or the service.",
+  "ellaSetupUnknownTitle": "Setup could not complete its check",
+  "ellaSetupUnknownBody": "Ella could not confirm the setup check’s result. Try again, or use the support code if one is shown.",
+  "ellaSetupChecksStopped": "Automatic checks have stopped. You can try again when ready."
 }

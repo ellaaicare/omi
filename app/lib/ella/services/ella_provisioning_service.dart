@@ -1,5 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+
+import 'package:http/http.dart' as http;
+import 'package:omi/backend/http/client_api_failure.dart';
+import 'package:omi/backend/http/http_pool_manager.dart';
 
 import 'package:flutter/foundation.dart';
 
@@ -235,6 +240,7 @@ class EllaProvisioningReceipt {
       case 'completed':
         return EllaProvisioningState.ready;
       case 'degraded':
+      case 'retryable':
       case 'retrying':
         return EllaProvisioningState.degraded;
       case 'blocked':
@@ -247,13 +253,27 @@ class EllaProvisioningReceipt {
   }
 }
 
+/// Invocation-local classification only. Never grants readiness or changes auth.
+enum EllaProvisioningClientFailure { authenticationRefresh, timeout, network, unavailable, invalidResponse }
+
+extension EllaProvisioningClientFailureCode on EllaProvisioningClientFailure {
+  String get code => switch (this) {
+        EllaProvisioningClientFailure.authenticationRefresh => 'authentication_refresh_unavailable',
+        EllaProvisioningClientFailure.timeout => 'request_timeout',
+        EllaProvisioningClientFailure.network => 'network_unavailable',
+        EllaProvisioningClientFailure.unavailable => 'transport_unavailable',
+        EllaProvisioningClientFailure.invalidResponse => 'invalid_provisioning_response',
+      };
+}
+
 class EllaProvisioningResponse {
-  const EllaProvisioningResponse({required this.statusCode, this.receipt});
+  const EllaProvisioningResponse({required this.statusCode, this.receipt, this.clientFailure});
 
   final int statusCode;
   final EllaProvisioningReceipt? receipt;
+  final EllaProvisioningClientFailure? clientFailure;
 
-  bool get isAccepted => statusCode == 200 || statusCode == 201 || statusCode == 202;
+  bool get isAccepted => clientFailure == null && (statusCode == 200 || statusCode == 201 || statusCode == 202);
 }
 
 abstract class EllaProvisioningTransport {
@@ -262,50 +282,86 @@ abstract class EllaProvisioningTransport {
   Future<EllaProvisioningResponse> status();
 }
 
-class EllaProvisioningHttpTransport implements EllaProvisioningTransport {
-  const EllaProvisioningHttpTransport();
+typedef EllaProvisioningHttpRequest = Future<http.Response?> Function({
+  required String url,
+  required Map<String, String> headers,
+  required String body,
+  required String method,
+  Duration? timeout,
+  int? retries,
+  void Function(HttpTransportDiagnostic)? onTransportDiagnostic,
+});
 
+class EllaProvisioningHttpTransport implements EllaProvisioningTransport {
+  const EllaProvisioningHttpTransport({this.request = makeApiCall});
+  final EllaProvisioningHttpRequest request;
   static const _headers = {'X-Ella-Client': 'ios-app', 'X-Ella-Route-Source': 'authenticated-provisioning'};
 
   @override
-  Future<EllaProvisioningResponse> ensure(EllaProvisioningRequestContext context) async {
-    final response = await makeApiCall(
-      url: buildEllaProvisioningEnsureUrl(Env.apiBaseUrl),
-      headers: _headers,
-      body: jsonEncode(context.toJson()),
-      method: 'POST',
-      timeout: const Duration(seconds: 20),
-      retries: 0,
-    );
-    return _decode(response?.statusCode ?? 0, response?.body);
-  }
+  Future<EllaProvisioningResponse> ensure(EllaProvisioningRequestContext context) => _send(
+        url: buildEllaProvisioningEnsureUrl(Env.apiBaseUrl),
+        body: jsonEncode(context.toJson()),
+        method: 'POST',
+        timeout: const Duration(seconds: 20),
+      );
 
   @override
-  Future<EllaProvisioningResponse> status() async {
-    final response = await makeApiCall(
-      url: buildEllaProvisioningStatusUrl(Env.apiBaseUrl),
-      headers: _headers,
-      body: '',
-      method: 'GET',
-      timeout: const Duration(seconds: 10),
-      retries: 0,
-    );
-    return _decode(response?.statusCode ?? 0, response?.body);
+  Future<EllaProvisioningResponse> status() => _send(
+        url: buildEllaProvisioningStatusUrl(Env.apiBaseUrl),
+        body: '',
+        method: 'GET',
+        timeout: const Duration(seconds: 10),
+      );
+
+  Future<EllaProvisioningResponse> _send(
+      {required String url, required String body, required String method, required Duration timeout}) async {
+    // Do not read global last-request diagnostics: another API can overwrite it.
+    HttpTransportFailure? failure;
+    try {
+      final response = await request(
+          url: url,
+          headers: _headers,
+          body: body,
+          method: method,
+          timeout: timeout,
+          retries: 0,
+          onTransportDiagnostic: (value) {
+            if (value.failure != null) failure = value.failure;
+          });
+      if (response == null) {
+        return EllaProvisioningResponse(
+            statusCode: 0,
+            clientFailure: switch (failure) {
+              HttpTransportFailure.authentication => EllaProvisioningClientFailure.authenticationRefresh,
+              HttpTransportFailure.timeout => EllaProvisioningClientFailure.timeout,
+              HttpTransportFailure.network => EllaProvisioningClientFailure.network,
+              _ => EllaProvisioningClientFailure.unavailable,
+            });
+      }
+      return _decode(response.statusCode, response.body);
+    } catch (error) {
+      final kind = switch (error) {
+        ClientApiFailure(kind: ClientApiFailureKind.authenticationRequired || ClientApiFailureKind.accountChanged) =>
+          EllaProvisioningClientFailure.authenticationRefresh,
+        TimeoutException() => EllaProvisioningClientFailure.timeout,
+        SocketException() || HandshakeException() || http.ClientException() => EllaProvisioningClientFailure.network,
+        _ => EllaProvisioningClientFailure.unavailable,
+      };
+      return EllaProvisioningResponse(statusCode: 0, clientFailure: kind);
+    }
   }
 
   EllaProvisioningResponse _decode(int statusCode, String? body) {
-    if (body == null || body.isEmpty) {
-      return EllaProvisioningResponse(statusCode: statusCode);
+    if (body != null && body.isNotEmpty) {
+      try {
+        final value = jsonDecode(body);
+        if (value is Map<String, dynamic>) {
+          return EllaProvisioningResponse(statusCode: statusCode, receipt: EllaProvisioningReceipt.fromJson(value));
+        }
+      } catch (_) {/* A bad response is not evidence of lost connectivity. */}
     }
-    try {
-      final json = jsonDecode(body);
-      if (json is! Map<String, dynamic>) {
-        return EllaProvisioningResponse(statusCode: statusCode);
-      }
-      return EllaProvisioningResponse(statusCode: statusCode, receipt: EllaProvisioningReceipt.fromJson(json));
-    } catch (_) {
-      return EllaProvisioningResponse(statusCode: statusCode);
-    }
+    return EllaProvisioningResponse(
+        statusCode: statusCode, clientFailure: EllaProvisioningClientFailure.invalidResponse);
   }
 }
 

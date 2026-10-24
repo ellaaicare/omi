@@ -219,6 +219,8 @@ class DeviceService {
     _subscriptions.putIfAbsent(context.hashCode, () => subscription);
 
     // Retains
+    DebugLogManager.discoveryProvenance.retainedPublication(
+      DebugLogManager.discoveryProvenance.current, _devices.map((d) => d.id));
     subscription.onDevices(_devices);
     subscription.onStatusChanged(_status);
   }

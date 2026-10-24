@@ -182,6 +182,12 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUpAll(() async {
+    await (FontLoader('Manrope')
+          ..addFont(rootBundle.load('assets/fonts/Manrope-400.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/Manrope-500.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/Manrope-600.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/Manrope-700.ttf')))
+        .load();
     ConnectivityPlatform.instance = _TestConnectivityPlatform();
     try {
       await ServiceManager.init();
@@ -541,6 +547,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 350));
 
     Future<void> openHomeControls() async {
+      homeProvider.setIndex(0);
+      await tester.pump();
       await tester.tap(find.byKey(const Key('today-dock-status')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 250));
@@ -553,12 +561,14 @@ void main() {
     expect(find.text('Your Ella workspace is not ready', skipOffstage: false), findsNothing);
     expect(find.textContaining('private workspace', skipOffstage: false), findsNothing);
     expect(catalogCalls, SharedPreferencesUtil.isPublicBuild ? 0 : 1);
+    homeProvider.setIndex(0); // Select Memories before checking its actual controls.
+    await tester.pump();
     final expectedNow = previewEnabled ? previewNow : runtimeNow;
-    expect(find.text(DateFormat('EEEE · MMMM d').format(expectedNow).toUpperCase()), findsOneWidget);
+    expect(find.text(DateFormat('EEEE · MMMM d').format(expectedNow).toUpperCase()), findsNothing);
     expect(find.text('Record'), findsOneWidget);
     expect(find.text('iPhone · Ready', skipOffstage: false), findsOneWidget);
     expect(find.text('Voice'), findsNothing);
-    expect(find.text('Talk'), findsOneWidget);
+    expect(find.text('Talk'), findsNothing);
     expect(find.text('Preview reminder'), findsNothing);
     expect(find.text('Runtime reminder'), findsNothing);
 
@@ -798,7 +808,8 @@ void main() {
       expect(tester.takeException(), isNull);
 
       final nav = find.byType(BottomNavBar);
-      final labels = ['Home', 'Chat', 'Talk', 'Settings'];
+      final labels = ['Chat', 'Memories', 'More'];
+      final indices = [1, 0, 3];
       final navBounds = tester.getRect(find.descendant(of: nav, matching: find.byType(Row)).first);
       for (var index = 0; index < labels.length; index++) {
         final label = find.descendant(of: nav, matching: find.text(labels[index]));
@@ -820,13 +831,13 @@ void main() {
             label: labels[index],
             isButton: true,
             hasSelectedState: true,
-            isSelected: home.selectedIndex == index,
+            isSelected: home.selectedIndex == indices[index],
             hasTapAction: true,
           ),
         );
         await tester.tap(target);
         await tester.pump();
-        expect(home.selectedIndex, index);
+        expect(home.selectedIndex, indices[index]);
         // ignore: deprecated_member_use
         expect(tester.getSemantics(label), containsSemantics(isSelected: true));
         expect(tester.takeException(), isNull);
@@ -876,7 +887,7 @@ void main() {
         expect(measuredHeight, greaterThanOrEqualTo(EllaSizes.navBarHeight));
         if (scale == 1) expect(measuredHeight, lessThan(96));
         if (scale == 3) expect(measuredHeight, greaterThan(EllaSizes.navBarHeight));
-        for (final label in ['Home', 'Chat', 'Talk', 'Settings']) {
+        for (final label in ['Chat', 'Memories', 'More']) {
           final text = find.descendant(of: row, matching: find.text(label));
           expect(bounds.contains(tester.getRect(text).topLeft), isTrue);
           expect(bounds.contains(tester.getRect(text).bottomRight - const Offset(0.01, 0.01)), isTrue);
@@ -929,12 +940,7 @@ void main() {
       final row = find.descendant(of: nav, matching: find.byType(Row)).first;
       final bounds = tester.getRect(row);
       expect(bounds.height, measuredHeight);
-      for (final label in [
-        labels.bottomNavHome,
-        labels.bottomNavChat,
-        labels.bottomNavTalk,
-        labels.bottomNavSettings
-      ]) {
+      for (final label in [labels.bottomNavChat, labels.memories, labels.irisMore]) {
         final text = find.descendant(of: row, matching: find.text(label));
         final target = find.ancestor(of: text, matching: find.byType(InkWell));
         expect(tester.getRect(target).width, greaterThanOrEqualTo(48));

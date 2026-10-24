@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:video_player/video_player.dart';
+import 'package:omi/ella/services/admitted_video_player.dart';
 
 class DeviceOnboardingPage extends StatefulWidget {
   final int slideIndex;
@@ -84,6 +84,7 @@ class _DeviceOnboardingPageState extends State<DeviceOnboardingPage> with Single
     _videoController = VideoPlayerController.asset('assets/images/$videoIndex.mov');
     try {
       await _videoController.initialize();
+      if (!mounted) return;
       setState(() {
         _isVideoInitialized = true;
       });

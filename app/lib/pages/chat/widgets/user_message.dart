@@ -29,7 +29,7 @@ class HumanMessage extends StatelessWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.only(left: 40),
+      padding: EdgeInsets.zero,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
@@ -47,13 +47,13 @@ class HumanMessage extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.subdirectory_arrow_right, size: 14, color: EllaColors.textTertiary),
+                    Icon(Icons.subdirectory_arrow_right, size: 14, color: EllaPalette.of(context).textTertiary),
                     const SizedBox(width: 8),
                     Flexible(
                       child: Text(
                         contextText.length > 50 ? '${contextText.substring(0, 50)}...' : contextText,
-                        style: const TextStyle(
-                          color: EllaColors.textTertiary,
+                        style: TextStyle(
+                          color: EllaPalette.of(context).textTertiary,
                           fontSize: 13,
                         ),
                         maxLines: 2,
@@ -67,21 +67,23 @@ class HumanMessage extends StatelessWidget {
           Align(
             alignment: Alignment.centerRight,
             child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.78),
+              constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.86),
               child: Container(
                 decoration: BoxDecoration(
-                  color: EllaColors.teal,
+                  color: EllaPalette.of(context).userBubbleFill,
                   borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(18),
-                    topRight: Radius.circular(18),
-                    bottomLeft: Radius.circular(18),
-                    bottomRight: Radius.circular(4),
+                    topLeft: Radius.circular(20),
+                    topRight: Radius.circular(20),
+                    bottomLeft: Radius.circular(20),
+                    bottomRight: Radius.circular(6),
                   ),
                 ),
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
                 child: SelectableText(
                   messageText.trimRight(),
-                  style: EllaTextStyles.body.copyWith(color: EllaColors.paper),
+                  style: EllaTypography.of(context)
+                      .body
+                      .copyWith(color: EllaPalette.of(context).userBubbleInk, fontSize: 16.5),
                   contextMenuBuilder: (context, editableTextState) {
                     return omiSelectionMenuBuilder(context, editableTextState, (text) {
                       onAskOmi?.call(text);
@@ -100,7 +102,7 @@ class HumanMessage extends StatelessWidget {
                 children: [
                   Text(
                     context.l10n.ellaChatCouldntSend,
-                    style: EllaTextStyles.caption.copyWith(color: EllaColors.error),
+                    style: EllaTypography.of(context).caption.copyWith(color: EllaPalette.of(context).error),
                   ),
                   const SizedBox(width: 8),
                   TextButton(onPressed: onRetry, child: Text(context.l10n.retry)),

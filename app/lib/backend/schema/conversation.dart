@@ -254,6 +254,11 @@ class ServerConversation {
   final Map<String, dynamic>? ellaSignal;
   final Map<String, dynamic>? enrichmentState;
   final String? activeSummaryVersionId;
+  // Preserve raw historical metadata, including malformed values, for fail-closed selection.
+  final Object? summaryVersions;
+  final Object? summaryVersionActiveAuthority;
+  final Object? summaryVersionBodyUid;
+  final bool summaryVersionBodyUidPresent;
   final String? processingRetryEnrichmentVectorStatus;
   final String? processingError;
   final DateTime? processingErrorAt;
@@ -303,6 +308,10 @@ class ServerConversation {
     this.ellaSignal,
     this.enrichmentState,
     this.activeSummaryVersionId,
+    this.summaryVersions,
+    this.summaryVersionActiveAuthority,
+    this.summaryVersionBodyUid,
+    this.summaryVersionBodyUidPresent = false,
     this.processingRetryEnrichmentVectorStatus,
     this.processingError,
     this.processingErrorAt,
@@ -344,6 +353,10 @@ class ServerConversation {
       ellaSignal: json['ella_signal'] is Map ? Map<String, dynamic>.from(json['ella_signal']) : null,
       enrichmentState: json['enrichment_state'] is Map ? Map<String, dynamic>.from(json['enrichment_state']) : null,
       activeSummaryVersionId: json['active_summary_version_id']?.toString(),
+      summaryVersions: json['summary_versions'] == null ? null : jsonDecode(jsonEncode(json['summary_versions'])),
+      summaryVersionActiveAuthority: json['active_summary_version_id'],
+      summaryVersionBodyUid: json['uid'],
+      summaryVersionBodyUidPresent: json.containsKey('uid'),
       processingRetryEnrichmentVectorStatus: json['processing_retry_enrichment_vector_status'],
       processingError: json['processing_error'],
       processingErrorAt:
@@ -382,7 +395,8 @@ class ServerConversation {
       'ella_tags': ellaTags,
       'ella_signal': ellaSignal,
       'enrichment_state': enrichmentState,
-      'active_summary_version_id': activeSummaryVersionId,
+      'active_summary_version_id': summaryVersionActiveAuthority ?? activeSummaryVersionId,
+      if (summaryVersions != null) 'summary_versions': jsonDecode(jsonEncode(summaryVersions)),
       'processing_retry_enrichment_vector_status': processingRetryEnrichmentVectorStatus,
       'processing_error': processingError,
       'processing_error_at': processingErrorAt?.toUtc().toIso8601String(),

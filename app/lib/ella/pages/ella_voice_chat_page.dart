@@ -1,11 +1,13 @@
+import 'package:omi/ella/services/whisper_delivery_runtime.dart';
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'package:just_audio/just_audio.dart';
+import 'package:omi/ella/services/admitted_audio_player.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
@@ -28,6 +30,7 @@ import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/ella_voice_audio_route.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/standard_voice_turn.dart';
+import 'package:omi/ella/services/standard_speech_ownership.dart';
 import 'package:omi/ella/services/today_card_repository.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/services/v2v_turn_reconciler.dart';
@@ -46,6 +49,25 @@ import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 typedef MemoryScopeConversationLoader = Future<ServerConversation?> Function(String conversationId);
+
+/// Shared by the actual page timer completion and its held native-tail tests.
+void finishStandardSpeechTimerTurn({
+  required String retainedWords,
+  required void Function(String) processTranscript,
+  required void Function() restartListening,
+}) {
+  if (retainedWords.trim().isNotEmpty) {
+    processTranscript(retainedWords);
+  } else {
+    restartListening();
+  }
+}
+
+String? retainedFinalStandardSpeechWords(String json) {
+  final result = SpeechRecognitionResult.fromJson(Map<String, dynamic>.from(jsonDecode(json) as Map));
+  return result.finalResult ? result.recognizedWords : null;
+}
+
 typedef MemoryVoiceReceiptOperation = Future<ConversationCorrectionReceipt?> Function({
   required String conversationId,
   required String correctionId,
@@ -277,7 +299,7 @@ class EllaVoiceChatPage extends StatefulWidget {
 class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKeepAliveClientMixin {
   VoiceOrbState _orbState = VoiceOrbState.idle;
   double _audioLevel = 0.0;
-  String _statusText = 'Tap to Pause';
+  String _statusText = '';
   String _lastUserText = '';
   String _lastEllaText = '';
 
@@ -288,6 +310,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   final AudioPlayer _audioPlayer = AudioPlayer();
   StreamSubscription? _playerSub;
   final SpeechToText _speech = SpeechToText();
+  late final StandardSpeechOwnership _standardSpeech =
+      StandardSpeechOwnership(port: DarwinStandardSpeechReceiptPort(stopSpeech: _speech.stop));
   final StandardVoiceTurnCoordinator _standardVoiceTurn = const StandardVoiceTurnCoordinator();
   bool _standardTurnInFlight = false;
   final VoicePhoneCaptureTakeoverCoordinator _phoneCaptureTakeover = VoicePhoneCaptureTakeoverCoordinator();
@@ -380,7 +404,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _fixtureMemoryEventSubscription = widget.memoryReinterpretationEvents?.listen(_handleMemoryReinterpretation);
     }
     _policyReason = widget.demoState?.policyReason;
-    // Voice mode auto-starts when the Voice tab becomes active (see didChangeDependencies)
+    // The general Talk tab waits for an explicit orb tap. Memory-scoped Talk
+    // below retains the explicit "Talk about this" action's startup.
     _playerSub = _audioPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed && _orbState == VoiceOrbState.speaking) {
         // Immediately transition out of speaking to prevent duplicate triggers
@@ -393,9 +418,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
       }
     });
-    if (EllaVoiceChatPage.shouldInitializeSpeech(widget.demoState)) {
-      _initSpeech();
-    }
+    // Speech initialization can request OS permissions. The existing guarded
+    // explicit listening path initializes it lazily after consent/authority.
     if (widget.sessionScope != null && widget.demoState == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         Future.delayed(const Duration(milliseconds: 300), () {
@@ -408,20 +432,15 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    if (_statusText.isEmpty) _statusText = context.l10n.voiceTapToTalk;
     _applyDemoStatus();
     if (widget.sessionScope != null) return;
-    // Auto-start listening when user navigates TO the Voice tab (index 2)
+    // Navigation is not consent to start a microphone/provider session.
+    // Keep teardown on leaving Talk, but never schedule startup on entry.
     try {
       final homeProvider = Provider.of<HomeProvider>(context);
       final isOnVoiceTab = homeProvider.selectedIndex == 2;
-      if (isOnVoiceTab && !_wasOnVoiceTab && !_voiceModeActive) {
-        debugPrint('[VoiceChat] Voice tab became active, auto-starting');
-        Future.delayed(const Duration(milliseconds: 300), () {
-          if (mounted && _orbState == VoiceOrbState.idle) {
-            _activateSelectedVoice();
-          }
-        });
-      } else if (!isOnVoiceTab && _wasOnVoiceTab && _voiceModeActive) {
+      if (!isOnVoiceTab && _wasOnVoiceTab && _voiceModeActive) {
         // Navigated away — pause voice mode
         debugPrint('[VoiceChat] Left voice tab, pausing');
         if (_isV2VMode) {
@@ -468,33 +487,88 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _initSpeech() async {
-    _speechAvailable = await _speech.initialize(
-      onError: (error) {
-        debugPrint('[VoiceChat] Speech error: ${error.errorMsg}');
-        if (error.errorMsg == 'error_no_match' && _orbState == VoiceOrbState.listening) {
+    // Legacy untagged callbacks may update plugin internals, but cannot mutate
+    // this call. Only the fork's exact-generation channel reaches our handlers.
+    _speechAvailable = await _speech.initialize(onError: (_) {}, onStatus: (_) {});
+  }
+
+  void _onOwnedSpeechCallback(String method, Object? payload) {
+    if (!mounted || !_voiceModeActive || _isV2VMode || !_standardSpeech.isCurrent) return;
+    try {
+      switch (method) {
+        case 'textRecognition':
+          if (payload is! String) return;
+          _onSpeechResult(SpeechRecognitionResult.fromJson(Map<String, dynamic>.from(jsonDecode(payload) as Map)));
+          break;
+        case 'soundLevelChange':
+          if (payload is! num || _orbState != VoiceOrbState.listening) return;
+          setState(() => _audioLevel = ((payload + 2) / 12).clamp(0.0, 1.0).toDouble());
+          break;
+        case 'notifyStatus':
+          if (payload != 'notListening' || _orbState != VoiceOrbState.listening) return;
           if (_currentWords.isNotEmpty) {
-            _processTranscript(_currentWords);
-          } else if (_voiceModeActive) {
-            debugPrint('[VoiceChat] No match, restarting listening');
-            _startListening();
+            unawaited(_processTranscript(_currentWords));
           } else {
-            _returnToIdle();
+            unawaited(_startListening());
           }
-        }
-      },
-      onStatus: (status) {
-        debugPrint('[VoiceChat] Speech status: $status');
-        if (status == 'notListening' && _orbState == VoiceOrbState.listening) {
-          if (_currentWords.isNotEmpty) {
-            _processTranscript(_currentWords);
-          } else if (_voiceModeActive) {
-            debugPrint('[VoiceChat] Silence timeout, restarting listening');
-            _startListening();
+          break;
+        case 'notifyError':
+          if (payload is! String) return;
+          final error = jsonDecode(payload) as Map;
+          if (error['errorMsg'] == 'ella_stop_ambiguous') {
+            _showStandardSpeechUnavailable();
+            return;
           }
-        }
-      },
+          if (error['errorMsg'] == 'error_no_match' && _orbState == VoiceOrbState.listening) {
+            if (_currentWords.isNotEmpty) {
+              unawaited(_processTranscript(_currentWords));
+            } else {
+              unawaited(_startListening());
+            }
+          }
+          break;
+      }
+    } catch (error) {
+      debugPrint('[VoiceChat] Tagged speech callback rejected: ${error.runtimeType}');
+    }
+  }
+
+  Future<void> _endOwnedStandardSpeech() async {
+    try {
+      await _standardSpeech.end();
+    } catch (error) {
+      // Ownership remains held when physical teardown is ambiguous.
+      debugPrint('[VoiceChat] Standard speech teardown unconfirmed: ${error.runtimeType}');
+    }
+  }
+
+  void _showStandardSpeechUnavailable() {
+    _cancelStandardVoiceListeningStartup();
+    _voiceModeActive = false;
+    unawaited(_endOwnedStandardSpeech());
+    if (!mounted) return;
+    setState(() {
+      _orbState = VoiceOrbState.idle;
+      _statusText = context.l10n.voiceError;
+      _audioLevel = 0;
+    });
+  }
+
+  void _retainOwnedFinalSpeech(String json) {
+    if (!mounted || !_voiceModeActive || !_standardSpeech.isCurrent) return;
+    final words = retainedFinalStandardSpeechWords(json);
+    if (words == null) return;
+    // This is local retained text only; terminal completion decides publication.
+    _currentWords = words;
+  }
+
+  void _finishOwnedStandardSpeechTimerTurn() {
+    if (!mounted || !_voiceModeActive || !_standardSpeech.isCurrent) return;
+    finishStandardSpeechTimerTurn(
+      retainedWords: _currentWords,
+      processTranscript: (text) => unawaited(_processTranscript(text)),
+      restartListening: () => unawaited(_startListening()),
     );
-    debugPrint('[VoiceChat] Speech available: $_speechAvailable');
   }
 
   @override
@@ -512,9 +586,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _playerSub?.cancel();
     _audioPlayer.dispose();
     _transcriptScrollController.dispose();
-    if (_speech.isListening) {
-      _speech.stop();
-    }
+    unawaited(_endOwnedStandardSpeech());
     final client = _v2vClient;
     _v2vClient = null;
     if (client != null) unawaited(client.disconnect());
@@ -577,7 +649,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       await _startV2V(provider, startupGeneration: startupGeneration);
     } else {
       if (!_startStandardVoiceConsentLease()) {
-        await _handleStandardVoiceConsentAuthorityLost();
+        await _handleStandardVoiceStartRefused();
         return;
       }
       setState(() {
@@ -591,6 +663,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   int _beginV2VStartup(String provider) {
     _standardVoiceConsentLease?.stop();
     _standardVoiceConsentLease = null;
+    unawaited(_endOwnedStandardSpeech());
     final startupGeneration = _voiceStartupGuard.begin();
     final providerName = localizedV2VProviderName(context, V2VClient.normalizeProvider(provider));
     setState(() {
@@ -630,7 +703,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _pauseVoiceMode();
         break;
       case VoiceOrbState.listening:
-        await _speech.stop();
+        try {
+          await _standardSpeech.stopListening();
+        } catch (_) {
+          _showStandardSpeechUnavailable();
+          return;
+        }
         if (_currentWords.isNotEmpty) {
           _processTranscript(_currentWords);
         }
@@ -656,9 +734,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _standardVoiceConsentLease?.stop();
     _standardVoiceConsentLease = null;
     _typewriterTimer?.cancel();
-    if (_speech.isListening) {
-      _speech.stop();
-    }
+    unawaited(_endOwnedStandardSpeech());
     if (!mounted) return;
     setState(() {
       _orbState = VoiceOrbState.idle;
@@ -674,6 +750,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       expectedUid: preferences.uid,
     );
     if (authority == null) return false;
+    if (!_standardSpeech.reserve(
+      hasAuthority: () => mounted && authority.isCurrent(preferences: preferences),
+      onCallback: _onOwnedSpeechCallback,
+    )) return false;
     _standardVoiceConsentLease?.stop();
     _standardVoiceConsentLease = AiConsentActiveSessionLease(
       uid: authority.uid,
@@ -683,15 +763,26 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     return true;
   }
 
+  Future<void> _handleStandardVoiceStartRefused() async {
+    final preferences = SharedPreferencesUtil();
+    final authority = AiConsentActiveSessionLease.authorityForSessionStart(
+      preferences: preferences,
+      expectedUid: preferences.uid,
+    );
+    if (authority == null) {
+      await _handleStandardVoiceConsentAuthorityLost();
+    } else {
+      _showStandardSpeechUnavailable();
+    }
+  }
+
   Future<void> _handleStandardVoiceConsentAuthorityLost() async {
     _cancelStandardVoiceListeningStartup();
     _standardVoiceConsentLease?.stop();
     _standardVoiceConsentLease = null;
+    await _endOwnedStandardSpeech();
     _voiceModeActive = false;
     _isV2VMode = false;
-    if (_speech.isListening) {
-      await _speech.stop();
-    }
     try {
       await _audioPlayer.stop();
       await ElevenLabsTts.stopOnDevice();
@@ -723,17 +814,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         null;
   }
 
-  Future<void> _handleStandardVoiceAuthorityLostForAttempt(int startupGeneration) async {
-    if (!_standardVoiceStartupGate.isCurrent(startupGeneration)) return;
-    await _handleStandardVoiceConsentAuthorityLost();
-  }
-
-  Future<bool> _revalidateStandardVoiceStartup(int startupGeneration) async {
-    if (_hasFullStandardVoiceStartupAuthority(startupGeneration)) return true;
-    await _handleStandardVoiceAuthorityLostForAttempt(startupGeneration);
-    return false;
-  }
-
   Future<void> _startListening() async {
     final startupGeneration = _standardVoiceStartupGate.begin();
     if (startupGeneration == null) {
@@ -757,172 +837,90 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _startListeningInner(int startupGeneration) async {
-    final micStatus = await Permission.microphone.request();
-    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
-    if (!micStatus.isGranted) {
-      if (!mounted) return;
-      if (micStatus.isPermanentlyDenied) {
-        showDialog(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            backgroundColor: EllaColors.bgSecondary,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
-            title: const Text(
-              'Microphone Access',
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: EllaColors.textPrimary),
-            ),
-            content: const Text(
-              'Ella needs microphone access for voice chat. Please enable it in Settings.',
-              style: TextStyle(fontSize: 18, color: EllaColors.textSecondary),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text('Cancel', style: TextStyle(fontSize: 18, color: EllaColors.textTertiary)),
-              ),
-              TextButton(
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  openAppSettings();
-                },
-                child: const Text('Open Settings', style: TextStyle(fontSize: 18, color: EllaColors.primary)),
-              ),
-            ],
-          ),
-        );
-      } else {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Microphone permission is required for voice chat')));
-      }
-      return;
+    if (whisperDeliveryProtocol1) {
+      await WhisperDeliveryRuntime.shared.withoutWhisperOutput(() => _startListeningWithPermission(startupGeneration));
+    } else {
+      await _startListeningWithPermission(startupGeneration);
     }
+  }
 
-    final speechStatus = await Permission.speech.request();
-    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
-    if (!speechStatus.isGranted) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Speech recognition permission is required')));
-      return;
-    }
-
-    if (!_speechAvailable) {
-      await _initSpeech();
-      if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
-      if (!_speechAvailable) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Speech recognition is not available on this device')));
-        return;
-      }
-    }
-
-    final capturePrepared = await _preparePhoneCaptureForVoice(v2v: false);
-    if (!await continueStandardVoiceAfterCapturePreparation(
-      capturePrepared: capturePrepared,
-      revalidateAuthority: () => _revalidateStandardVoiceStartup(startupGeneration),
-    )) {
-      return;
-    }
-
-    // Stop audio player to release audio session before mic starts
+  Future<void> _startListeningWithPermission(int startupGeneration) async {
     try {
-      await _audioPlayer.stop();
-    } catch (_) {}
-    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
-
-    // Ensure previous speech session is fully stopped
-    if (_speech.isListening) {
-      debugPrint('[VoiceChat] Stopping previous speech session');
-      await _speech.stop();
-      if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
-    }
-
-    // Small delay to let iOS audio session switch from playback to recording
-    await Future.delayed(const Duration(milliseconds: 300));
-    if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
-
-    _currentWords = '';
-    _typewriterTimer?.cancel();
-    setState(() {
-      _orbState = VoiceOrbState.listening;
-      _statusText = 'Listening...';
-      _lastEllaText = '';
-      _lastUserText = '';
-      _ellaDisplayText = '';
-    });
-
-    debugPrint('[VoiceChat] Starting speech recognition');
-    try {
-      final started = await startStandardVoiceListeningIfAuthorized(
-        preferences: SharedPreferencesUtil(),
-        lease: _standardVoiceConsentLease,
-        isLifecycleCurrent: () => _isCurrentStandardVoiceStartup(startupGeneration),
-        onAuthorityLost: () => _handleStandardVoiceAuthorityLostForAttempt(startupGeneration),
-        listen: () => _speech.listen(
-          onResult: _onSpeechResult,
-          onSoundLevelChange: (level) {
-            if (!mounted || _orbState != VoiceOrbState.listening) return;
-            final normalized = ((level + 2) / 12).clamp(0.0, 1.0);
-            setState(() {
-              _audioLevel = normalized;
-            });
-          },
-          pauseFor: const Duration(seconds: 3),
-          listenFor: const Duration(seconds: 60),
-          listenOptions: SpeechListenOptions(
-            listenMode: ListenMode.dictation,
-            cancelOnError: false,
-            partialResults: true,
-          ),
-        ),
-      );
-      if (!started) return;
-      debugPrint('[VoiceChat] speech.listen() started');
-    } catch (e) {
-      debugPrint('[VoiceChat] speech.listen() failed: $e — retrying in 500ms');
-      await Future.delayed(const Duration(milliseconds: 500));
-      if (!await _revalidateStandardVoiceStartup(startupGeneration)) return;
-      try {
-        final restarted = await startStandardVoiceListeningIfAuthorized(
-          preferences: SharedPreferencesUtil(),
-          lease: _standardVoiceConsentLease,
-          isLifecycleCurrent: () => _isCurrentStandardVoiceStartup(startupGeneration),
-          onAuthorityLost: () => _handleStandardVoiceAuthorityLostForAttempt(startupGeneration),
-          listen: () => _speech.listen(
-            onResult: _onSpeechResult,
-            onSoundLevelChange: (level) {
-              if (!mounted || _orbState != VoiceOrbState.listening) return;
-              final normalized = ((level + 2) / 12).clamp(0.0, 1.0);
-              setState(() {
-                _audioLevel = normalized;
-              });
-            },
-            pauseFor: const Duration(seconds: 3),
-            listenFor: const Duration(seconds: 60),
-            listenOptions: SpeechListenOptions(
-              listenMode: ListenMode.dictation,
-              cancelOnError: false,
-              partialResults: true,
-            ),
-          ),
-        );
-        if (!restarted) return;
-        debugPrint('[VoiceChat] speech.listen() retry succeeded');
-      } catch (e2) {
-        debugPrint('[VoiceChat] speech.listen() retry also failed: $e2');
-        if (mounted && _voiceModeActive) {
+      final started = await _standardSpeech.start(
+        prepare: () async {
+          if (!_hasFullStandardVoiceStartupAuthority(startupGeneration)) return false;
+          final mic = await Permission.microphone.request();
+          if (!_hasFullStandardVoiceStartupAuthority(startupGeneration)) return false;
+          if (!mic.isGranted) {
+            if (mic.isPermanentlyDenied) {
+              unawaited(showDialog<void>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: Text(context.l10n.microphoneAccess),
+                  content: Text(context.l10n.voiceMicPermissionRequired),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.of(ctx).pop(), child: Text(context.l10n.cancel)),
+                    TextButton(
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          openAppSettings();
+                        },
+                        child: Text(context.l10n.openSettings)),
+                  ],
+                ),
+              ));
+            } else {
+              ScaffoldMessenger.of(context)
+                  .showSnackBar(SnackBar(content: Text(context.l10n.voiceMicPermissionRequired)));
+            }
+            return false;
+          }
+          final speech = await Permission.speech.request();
+          if (!_hasFullStandardVoiceStartupAuthority(startupGeneration) || !speech.isGranted) return false;
+          if (!_speechAvailable) await _initSpeech();
+          if (!_hasFullStandardVoiceStartupAuthority(startupGeneration) || !_speechAvailable) return false;
+          final prepared = await _preparePhoneCaptureForVoice(v2v: false);
+          if (!prepared || !_hasFullStandardVoiceStartupAuthority(startupGeneration)) return false;
+          await _audioPlayer.stop();
+          if (!_hasFullStandardVoiceStartupAuthority(startupGeneration)) return false;
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+          if (!_hasFullStandardVoiceStartupAuthority(startupGeneration)) return false;
+          _currentWords = '';
+          _typewriterTimer?.cancel();
           setState(() {
-            _statusText = 'Mic unavailable. Tap to retry.';
-            _orbState = VoiceOrbState.idle;
+            _orbState = VoiceOrbState.listening;
+            _statusText = context.l10n.voiceListening;
+            _lastEllaText = '';
+            _lastUserText = '';
+            _ellaDisplayText = '';
           });
-          _voiceModeActive = false;
-        }
-      }
+          return true;
+        },
+        listen: () => _speech.listen(
+          onResult: (_) {},
+          onSoundLevelChange: (_) {},
+          listenOptions:
+              SpeechListenOptions(listenMode: ListenMode.dictation, cancelOnError: false, partialResults: true),
+        ),
+        pauseFor: const Duration(seconds: 3),
+        listenFor: const Duration(seconds: 60),
+        onListeningEnded: _finishOwnedStandardSpeechTimerTurn,
+        onStopUnconfirmed: _showStandardSpeechUnavailable,
+        onFinalResultRetained: _retainOwnedFinalSpeech,
+      );
+      if (started) return;
+    } catch (error) {
+      debugPrint('[VoiceChat] Owned speech start rejected: ${error.runtimeType}');
     }
+    if (!_standardVoiceStartupGate.isCurrent(startupGeneration)) return;
+    await _endOwnedStandardSpeech();
+    if (!mounted) return;
+    _voiceModeActive = false;
+    setState(() {
+      _orbState = VoiceOrbState.idle;
+      _statusText = context.l10n.voiceError;
+      _audioLevel = 0;
+    });
   }
 
   // --- V2V (Voice-to-Voice) WebSocket mode ---
@@ -997,12 +995,15 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           unawaited(
             _presentV2VFailure(
               provider,
-              V2VConnectionReceipt(
-                connected: false,
-                provider: provider,
-                stage: V2VConnectionStage.websocket,
-                errorCode: 'voice_transport_disconnected',
-              ),
+              client.lastConnectionReceipt?.stage == V2VConnectionStage.providerReady &&
+                      client.lastConnectionReceipt?.connected == false
+                  ? client.lastConnectionReceipt!
+                  : V2VConnectionReceipt(
+                      connected: false,
+                      provider: provider,
+                      stage: V2VConnectionStage.websocket,
+                      errorCode: 'voice_transport_disconnected',
+                    ),
             ),
           );
         }
@@ -1125,7 +1126,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         if (_sessionScope != null) break;
         _usingElevenLabsFallback = true;
         if (!_startStandardVoiceConsentLease()) {
-          await _handleStandardVoiceConsentAuthorityLost();
+          await _handleStandardVoiceStartRefused();
           break;
         }
         setState(() {
@@ -1200,11 +1201,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         await client.disconnect();
       } catch (_) {}
     }
-    if (_speech.isListening) {
-      try {
-        await _speech.stop();
-      } catch (_) {}
-    }
+    await _endOwnedStandardSpeech();
     try {
       await _audioPlayer.stop();
     } catch (_) {}
@@ -1243,6 +1240,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _voiceStartupGuard.isStarting ||
       _voiceModeActive ||
       _isV2VMode ||
+      _standardSpeech.hasReservation ||
       _speech.isListening ||
       _orbState != VoiceOrbState.idle;
 
@@ -1252,11 +1250,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     } else {
       _voiceModeActive = false;
       _typewriterTimer?.cancel();
-      if (_speech.isListening) {
-        try {
-          await _speech.stop();
-        } catch (_) {}
-      }
+      await _endOwnedStandardSpeech();
       try {
         await _audioPlayer.stop();
       } catch (_) {}
@@ -1558,7 +1552,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   void _onSpeechResult(SpeechRecognitionResult result) {
     if (!mounted) return;
-    debugPrint('[VoiceChat] Speech result: final=${result.finalResult}, text="${result.recognizedWords}"');
+    debugPrint('[VoiceChat] Speech result: final=${result.finalResult}, characters=${result.recognizedWords.length}');
 
     _currentWords = result.recognizedWords;
 
@@ -1576,7 +1570,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     transcript = transcript.trim();
     if (transcript.isEmpty || _standardTurnInFlight) return;
     _standardTurnInFlight = true;
-    debugPrint('[VoiceChat] Processing transcript: "$transcript"');
+    debugPrint('[VoiceChat] Processing transcript: characters=${transcript.length}');
     _currentWords = '';
 
     if (!mounted) {
@@ -1594,10 +1588,14 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _lastUserText = transcript;
         });
 
-        if (_speech.isListening) {
-          debugPrint('[VoiceChat] Stopping speech recognizer before response playback');
-          await _speech.stop();
-          if (!mounted || !operation.isCurrent) return;
+        if (_standardSpeech.hasReservation) {
+          debugPrint('[VoiceChat] Stopping owned speech recognizer before response playback');
+          await _standardSpeech.stopListening();
+          if (!mounted || !_voiceModeActive || !_standardSpeech.isCurrent || !operation.isCurrent) return;
+          if (_currentWords.trim().isNotEmpty) {
+            transcript = _currentWords.trim();
+            _currentWords = '';
+          }
           await Future.delayed(const Duration(milliseconds: 150));
           if (!mounted || !operation.isCurrent) return;
         }
@@ -1684,7 +1682,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _currentWords = '';
     unawaited(_audioPlayer.stop());
     unawaited(ElevenLabsTts.stopOnDevice());
-    unawaited(_speech.stop());
+    unawaited(_endOwnedStandardSpeech());
     if (mounted) {
       setState(() {
         _lastUserText = '';
@@ -1697,6 +1695,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<bool> _prepareTtsPlaybackSession({bool Function()? isCurrent}) async {
+    _audioPlayer.reserveOutput();
     final session = await AudioSession.instance;
     if (isCurrent?.call() == false) return false;
     await session.configure(
@@ -1791,6 +1790,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _startTypewriter(String fullText) {
     _typewriterTimer?.cancel();
     _ellaDisplayText = '';
+    if (MediaQuery.disableAnimationsOf(context)) {
+      setState(() => _ellaDisplayText = fullText);
+      _scrollToBottom();
+      return;
+    }
     int charIndex = 0;
     _typewriterTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
       if (!mounted || charIndex >= fullText.length) {
@@ -1813,6 +1817,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_transcriptScrollController.hasClients) {
+        if (MediaQuery.disableAnimationsOf(context)) {
+          _transcriptScrollController.jumpTo(_transcriptScrollController.position.maxScrollExtent);
+          return;
+        }
         _transcriptScrollController.animateTo(
           _transcriptScrollController.position.maxScrollExtent,
           duration: const Duration(milliseconds: 200),
@@ -1829,130 +1837,144 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     final policyReason = _policyReason;
 
     final body = SafeArea(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (_sessionScope != null && widget.memoryTitle?.trim().isNotEmpty == true) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  color: EllaColors.card,
-                  borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
-                  border: Border.all(color: EllaColors.cardDeep),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.auto_stories_outlined, size: 20, color: EllaColors.primary),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        context.l10n.memoryTalkContext(widget.memoryTitle!.trim()),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w600),
+      child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                  child: IntrinsicHeight(
+                      child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (_sessionScope != null && widget.memoryTitle?.trim().isNotEmpty == true) ...[
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: EllaPalette.of(context).card,
+                              borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                              border: Border.all(color: EllaPalette.of(context).cardDeep),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(Icons.auto_stories_outlined, size: 20, color: EllaPalette.of(context).primary),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    context.l10n.memoryTalkContext(widget.memoryTitle!.trim()),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: EllaTypography.of(context).caption.copyWith(fontWeight: FontWeight.w600),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                      const Spacer(flex: 2),
+                      Center(
+                        child: EllaVoiceOrb(state: _orbState, audioLevel: _audioLevel, onTap: _onOrbTap),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-          const Spacer(flex: 2),
-          Center(
-            child: EllaVoiceOrb(state: _orbState, audioLevel: _audioLevel, onTap: _onOrbTap),
-          ),
-          if (quota != null && policyReason == null) ...[
-            const SizedBox(height: 10),
-            Text(
-              context.l10n.ellaVoiceTimeRemaining(_compactVoiceTime(_remainingVoiceSeconds(quota))),
-              style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
-              textAlign: TextAlign.center,
-            ),
-          ],
-          if ((_authoritativeSoftWarning || quota?.isSoftWarning == true) && policyReason == null) ...[
-            const SizedBox(height: 12),
-            _VoiceLimitNotice(text: context.l10n.ellaVoiceSoftWarning),
-          ],
-          if (policyReason != null) ...[
-            const SizedBox(height: 12),
-            _VoiceLimitNotice(text: _policyBody(context, policyReason, resetsAt: _policyResetsAt)),
-          ],
-          const SizedBox(height: 24),
-          Center(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              decoration: BoxDecoration(
-                color: EllaColors.card,
-                borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
-                border: Border.all(color: EllaColors.cardDeep),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_orbState == VoiceOrbState.listening) ...[const EllaBreathingDot(), const SizedBox(width: 10)],
-                  Flexible(
-                    child: Text(
-                      _orbState == VoiceOrbState.listening
-                          ? _usingElevenLabsFallback
-                              ? context.l10n.voiceElevenLabsFallbackActive
-                              : _isV2VMode && _activeV2VProvider.isNotEmpty
-                                  ? context.l10n.voiceV2vActive(_activeV2VProvider)
-                                  : context.l10n.voiceListening
-                          : _statusText,
-                      style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (_memoryCorrectionReceipt != null) ...[
-            const SizedBox(height: 12),
-            MemoryCorrectionReceiptChip(receipt: _memoryCorrectionReceipt!, onReview: _reviewMemoryCorrection),
-          ],
-          const SizedBox(height: 16),
-          Flexible(
-            flex: 2,
-            child: SizedBox(
-              height: 100,
-              width: double.infinity,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: _lastUserText.isEmpty && _ellaDisplayText.isEmpty && _currentWords.isEmpty
-                    ? const SizedBox.shrink()
-                    : SingleChildScrollView(
-                        controller: _transcriptScrollController,
-                        child: Column(
-                          children: [
-                            if (_lastUserText.isNotEmpty)
-                              Opacity(
-                                opacity: 0.6,
+                      if (quota != null && policyReason == null) ...[
+                        const SizedBox(height: 10),
+                        Text(
+                          context.l10n.ellaVoiceTimeRemaining(_compactVoiceTime(_remainingVoiceSeconds(quota))),
+                          style: EllaTypography.of(context).caption.copyWith(color: EllaPalette.of(context).inkSoft),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                      if ((_authoritativeSoftWarning || quota?.isSoftWarning == true) && policyReason == null) ...[
+                        const SizedBox(height: 12),
+                        _VoiceLimitNotice(text: context.l10n.ellaVoiceSoftWarning),
+                      ],
+                      if (policyReason != null) ...[
+                        const SizedBox(height: 12),
+                        _VoiceLimitNotice(text: _policyBody(context, policyReason, resetsAt: _policyResetsAt)),
+                      ],
+                      const SizedBox(height: 24),
+                      Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: EllaPalette.of(context).card,
+                            borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
+                            border: Border.all(color: EllaPalette.of(context).cardDeep),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (_orbState == VoiceOrbState.listening) ...[
+                                const EllaBreathingDot(),
+                                const SizedBox(width: 10)
+                              ],
+                              Flexible(
                                 child: Text(
-                                  _lastUserText,
-                                  style: EllaTextStyles.secondary,
+                                  _orbState == VoiceOrbState.listening
+                                      ? _usingElevenLabsFallback
+                                          ? context.l10n.voiceElevenLabsFallbackActive
+                                          : _isV2VMode && _activeV2VProvider.isNotEmpty
+                                              ? context.l10n.voiceV2vActive(_activeV2VProvider)
+                                              : context.l10n.voiceListening
+                                      : _statusText,
+                                  style: EllaTypography.of(context).body.copyWith(fontWeight: FontWeight.w600),
                                   textAlign: TextAlign.center,
                                 ),
                               ),
-                            if (_lastUserText.isNotEmpty && (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty))
-                              const SizedBox(height: 8),
-                            if (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty)
-                              Text(
-                                _ellaDisplayText.isNotEmpty ? _ellaDisplayText : _currentWords,
-                                style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
-                                textAlign: TextAlign.center,
-                              ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
-              ),
-            ),
-          ),
-          const Spacer(flex: 3),
-        ],
-      ),
+                      if (_memoryCorrectionReceipt != null) ...[
+                        const SizedBox(height: 12),
+                        MemoryCorrectionReceiptChip(
+                            receipt: _memoryCorrectionReceipt!, onReview: _reviewMemoryCorrection),
+                      ],
+                      const SizedBox(height: 16),
+                      Flexible(
+                        flex: 2,
+                        child: SizedBox(
+                          height: 100,
+                          width: double.infinity,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 32),
+                            child: _lastUserText.isEmpty && _ellaDisplayText.isEmpty && _currentWords.isEmpty
+                                ? const SizedBox.shrink()
+                                : SingleChildScrollView(
+                                    controller: _transcriptScrollController,
+                                    child: Column(
+                                      children: [
+                                        if (_lastUserText.isNotEmpty)
+                                          Opacity(
+                                            opacity: 0.6,
+                                            child: Text(
+                                              _lastUserText,
+                                              style: EllaTypography.of(context).secondary,
+                                              textAlign: TextAlign.center,
+                                            ),
+                                          ),
+                                        if (_lastUserText.isNotEmpty &&
+                                            (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty))
+                                          const SizedBox(height: 8),
+                                        if (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty)
+                                          Text(
+                                            _ellaDisplayText.isNotEmpty ? _ellaDisplayText : _currentWords,
+                                            style: EllaTypography.of(context)
+                                                .secondary
+                                                .copyWith(color: EllaPalette.of(context).ink),
+                                            textAlign: TextAlign.center,
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                          ),
+                        ),
+                      ),
+                      const Spacer(flex: 3),
+                    ],
+                  )),
+                ),
+              )),
     );
     if (widget.modalPresentation) {
       return VoiceModalScaffold(
@@ -1964,13 +1986,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
 
     return Scaffold(
-      backgroundColor: EllaColors.bgPrimary,
+      backgroundColor: EllaPalette.of(context).bgPrimary,
       appBar: AppBar(
         automaticallyImplyLeading: widget.sessionScope != null || widget.demoState != null,
-        backgroundColor: EllaColors.bgPrimary,
+        backgroundColor: EllaPalette.of(context).bgPrimary,
         title: Text(
           context.l10n.voiceChatTitle,
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600, color: EllaPalette.of(context).textPrimary),
         ),
         elevation: 0,
         centerTitle: true,
@@ -2017,17 +2039,17 @@ class _VoiceLimitNotice extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
         decoration: BoxDecoration(
-          color: EllaColors.card,
+          color: EllaPalette.of(context).card,
           borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
-          border: Border.all(color: EllaColors.cardEdge),
+          border: Border.all(color: EllaPalette.of(context).cardEdge),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Icon(Icons.schedule_rounded, color: EllaColors.tealDeep, size: 20),
+            Icon(Icons.schedule_rounded, color: EllaPalette.of(context).tealDeep, size: 20),
             const SizedBox(width: 10),
             Expanded(
-              child: Text(text, style: EllaTextStyles.caption.copyWith(color: EllaColors.ink)),
+              child: Text(text, style: EllaTypography.of(context).caption.copyWith(color: EllaPalette.of(context).ink)),
             ),
           ],
         ),

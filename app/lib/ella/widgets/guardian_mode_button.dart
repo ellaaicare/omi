@@ -67,7 +67,7 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
     try {
       final currentState = _guardianService.currentState;
       if (currentState == GuardianModeState.idle || currentState == GuardianModeState.error) {
-        await _guardianService.start();
+        await _guardianService.start(explicitOn: true);
       } else {
         await _guardianService.stop();
       }

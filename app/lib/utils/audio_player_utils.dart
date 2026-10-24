@@ -1,3 +1,4 @@
+import 'package:omi/ella/services/app_output_admission.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -25,6 +26,7 @@ class AudioPlayerUtils extends ChangeNotifier {
   AudioPlayerUtils._internal();
 
   FlutterSoundPlayer? _audioPlayer;
+  AppOutputPermit? _outputPermit;
   String? _currentPlayingId;
   bool _isProcessingAudio = false;
 
@@ -50,6 +52,7 @@ class AudioPlayerUtils extends ChangeNotifier {
     if (_audioPlayer != null) return;
     if (Platform.isMacOS) return;
 
+    _outputPermit ??= AppOutputAdmission.shared.reserveOutput('wal-flutter-sound-output');
     _audioPlayer = FlutterSoundPlayer();
 
     if (_audioPlayer != null && !_audioPlayer!.isOpen()) {

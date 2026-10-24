@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/widgets/summary_refresh_notice.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/ella/widgets/ella_source_indicator.dart';
@@ -28,17 +29,17 @@ bool memoryGalleryUsesWideLayout(BuildContext context) =>
 
 MemoryGalleryLayout effectiveMemoryGalleryLayout(BuildContext context, MemoryGalleryLayout layout) =>
     layout != MemoryGalleryLayout.journal &&
-            (memoryGalleryUsesWideLayout(context) || layout == MemoryGalleryLayout.days)
-        ? layout
-        : MemoryGalleryLayout.list;
+        (memoryGalleryUsesWideLayout(context) || layout == MemoryGalleryLayout.days)
+    ? layout
+    : MemoryGalleryLayout.list;
 
 List<PopupMenuEntry<MemoryGalleryLayout>> memoryGalleryLayoutMenu(BuildContext context) => [
-      if (memoryGalleryUsesWideLayout(context)) ...[
-        PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
-      ],
-      PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
-      PopupMenuItem(value: MemoryGalleryLayout.days, child: Text(context.l10n.memoryGalleryDays)),
-    ];
+  if (memoryGalleryUsesWideLayout(context)) ...[
+    PopupMenuItem(value: MemoryGalleryLayout.grid, child: Text(context.l10n.memoryGalleryGrid)),
+  ],
+  PopupMenuItem(value: MemoryGalleryLayout.list, child: Text(context.l10n.memoryGalleryList)),
+  PopupMenuItem(value: MemoryGalleryLayout.days, child: Text(context.l10n.memoryGalleryDays)),
+];
 
 enum MemoryGallerySort { recent, oldest }
 
@@ -95,7 +96,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   final ScrollController _scrollController = ScrollController();
   late final MemoryArtworkApi _artworkApi = widget.artworkApi ?? MemoryArtworkApi();
   MemoryArtworkPreferences? _artworkPreferences;
-  MemoryGalleryLayout _layout = MemoryGalleryLayout.journal;
+  MemoryGalleryLayout _layout = MemoryGalleryLayout.days;
   MemoryGallerySort _sort = MemoryGallerySort.recent;
   bool _showBackToRecent = false;
   bool _artworkBackfillInFlight = false;
@@ -266,7 +267,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     }
     _artworkQueueUnavailableReads = 0;
     final previous = _artworkQueueStatus;
-    final refreshVisibleArtwork = _artworkQueueManualRefreshPending ||
+    final refreshVisibleArtwork =
+        _artworkQueueManualRefreshPending ||
         previous == null ||
         status.styleVersion != previous.styleVersion ||
         status.generationId != previous.generationId ||
@@ -393,7 +395,12 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => Theme(
+    data: MediaQuery.platformBrightnessOf(context) == Brightness.dark ? ellaDarkThemeData() : ellaThemeData(),
+    child: Builder(builder: _buildPage),
+  );
+
+  Widget _buildPage(BuildContext context) {
     final conversationProvider = context.watch<ConversationProvider>();
     final capture = context.watch<CaptureProvider>();
     final live = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
@@ -406,23 +413,31 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     final loading =
         groups.isEmpty && (!conversationProvider.hasLoadedConversations || conversationProvider.isLoadingConversations);
     _checkPaginationAfterLayout(conversationProvider);
+    final largeText = MediaQuery.textScalerOf(context).scale(18) >= 32;
     return Scaffold(
       appBar: AppBar(
-        leadingWidth: 92,
-        leading: TextButton.icon(
-          key: const Key('memories-back-home'),
-          onPressed: () => Navigator.pop(context),
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18),
-          label: Text(context.l10n.bottomNavHome),
-          style: TextButton.styleFrom(foregroundColor: EllaColors.tealDeep),
-        ),
-        title: Text(context.l10n.memories),
+        leadingWidth: largeText ? 48 : 92,
+        leading: largeText
+            ? IconButton(
+                key: const Key('memories-back-home'),
+                tooltip: context.l10n.bottomNavHome,
+                onPressed: () => Navigator.pop(context),
+                icon: Icon(Icons.arrow_back_ios_new_rounded, size: 18, color: EllaPalette.of(context).tealDeep),
+              )
+            : TextButton.icon(
+                key: const Key('memories-back-home'),
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18),
+                label: Text(context.l10n.bottomNavHome),
+                style: TextButton.styleFrom(foregroundColor: EllaPalette.of(context).tealDeep),
+              ),
+        title: largeText ? null : Text(context.l10n.memories),
         actions: [
           PopupMenuButton<MemoryGalleryLayout>(
             key: const Key('memory-layout-menu'),
             tooltip: context.l10n.memoryGalleryView,
             initialValue: effectiveMemoryGalleryLayout(context, _layout),
-            icon: const Icon(Icons.view_quilt_outlined, color: EllaColors.tealDeep),
+            icon: Icon(Icons.view_quilt_outlined, color: EllaPalette.of(context).tealDeep),
             onSelected: _selectGalleryLayout,
             itemBuilder: memoryGalleryLayoutMenu,
           ),
@@ -430,7 +445,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
             key: const Key('memory-sort-menu'),
             tooltip: context.l10n.sortBy,
             initialValue: _sort,
-            icon: const Icon(Icons.swap_vert_rounded, color: EllaColors.tealDeep),
+            icon: Icon(Icons.swap_vert_rounded, color: EllaPalette.of(context).tealDeep),
             onSelected: (value) => setState(() => _sort = value),
             itemBuilder: (context) => [
               PopupMenuItem(value: MemoryGallerySort.recent, child: Text(context.l10n.memorySortRecent)),
@@ -450,14 +465,18 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               initialValue: _artworkPreferences?.styleVersion,
               icon: Icon(
                 Icons.palette_outlined,
-                color: _artworkPreferences?.releaseEnabled == true ? EllaColors.tealDeep : EllaColors.inkSoft,
+                color: _artworkPreferences?.releaseEnabled == true
+                    ? EllaPalette.of(context).tealDeep
+                    : EllaPalette.of(context).inkSoft,
               ),
               enabled: _artworkPreferences?.releaseEnabled == true,
               onSelected: _artworkPreferences?.releaseEnabled == true ? _selectArtworkStyle : null,
               itemBuilder: (context) => [
                 PopupMenuItem(value: memoryArtworkDefaultStyle, child: Text(context.l10n.memoryArtworkSoftGouache)),
                 PopupMenuItem(
-                    value: memoryArtworkPaperCollageStyle, child: Text(context.l10n.memoryArtworkPaperCollage)),
+                  value: memoryArtworkPaperCollageStyle,
+                  child: Text(context.l10n.memoryArtworkPaperCollage),
+                ),
                 PopupMenuItem(
                   value: memoryArtworkGraphicLandscapeStyle,
                   child: Text(context.l10n.memoryArtworkGraphicLandscape),
@@ -479,22 +498,39 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
         ],
       ),
       body: RefreshIndicator(
-        color: EllaColors.tealDeep,
+        color: EllaPalette.of(context).tealDeep,
         onRefresh: _refresh,
         child: CustomScrollView(
           key: const Key('ella-memories-list'),
           controller: _scrollController,
           slivers: [
+            if (largeText)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  child: EllaDisplayHeading(context.l10n.memories, fontSize: 20),
+                ),
+              ),
             SliverToBoxAdapter(
               child: SizedBox(
                 height: 3,
                 child: conversationProvider.isLoadingConversations && groups.isNotEmpty
-                    ? const LinearProgressIndicator(
-                        key: Key('memories-refresh-indicator'),
-                        color: EllaColors.tealDeep,
-                        backgroundColor: EllaColors.cardDeep,
+                    ? LinearProgressIndicator(
+                        key: const Key('memories-refresh-indicator'),
+                        color: EllaPalette.of(context).tealDeep,
+                        backgroundColor: EllaPalette.of(context).cardDeep,
                       )
                     : null,
+              ),
+            ),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: SummaryRefreshNotice(
+                  list: true,
+                  observation: conversationProvider.summaryListRead,
+                  onRefresh: () => conversationProvider.forceRefreshConversations(),
+                ),
               ),
             ),
             if (_artworkQueueReadUnavailable)
@@ -502,15 +538,22 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                 child: Padding(
                   key: const Key('memory-artwork-queue-read-unavailable'),
                   padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                  child: Row(children: [
-                    Expanded(child: Text(context.l10n.memoryArtworkUnavailableLabel, style: EllaTextStyles.secondary)),
-                    IconButton(
-                      key: const Key('memory-artwork-queue-read-retry'),
-                      tooltip: context.l10n.tryAgain,
-                      onPressed: _artworkApi.isDisplayAuthorityCurrent() ? _retryArtworkQueueRead : null,
-                      icon: const Icon(Icons.refresh_rounded, color: EllaColors.tealDeep),
-                    ),
-                  ]),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          context.l10n.memoryArtworkUnavailableLabel,
+                          style: EllaTypography.of(context).secondary,
+                        ),
+                      ),
+                      IconButton(
+                        key: const Key('memory-artwork-queue-read-retry'),
+                        tooltip: context.l10n.tryAgain,
+                        onPressed: _artworkApi.isDisplayAuthorityCurrent() ? _retryArtworkQueueRead : null,
+                        icon: Icon(Icons.refresh_rounded, color: EllaPalette.of(context).tealDeep),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             if (live)
@@ -531,35 +574,39 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                 ),
               ),
             if (loading)
-              const SliverFillRemaining(
+              SliverFillRemaining(
                 hasScrollBody: false,
                 child: Center(
                   child: SizedBox(
                     width: 24,
                     height: 24,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaPalette.of(context).tealDeep),
                   ),
                 ),
               )
             else
-              for (final entry in groups.entries) ..._memoryGroupSlivers(entry),
+              for (final entry in groups.entries) ..._memoryGroupSlivers(context, entry),
             if (!loading && groups.isEmpty)
               SliverFillRemaining(
                 hasScrollBody: false,
                 child: Center(
-                  child: Text(context.l10n.memoriesEmpty, textAlign: TextAlign.center, style: EllaTextStyles.body),
+                  child: Text(
+                    context.l10n.memoriesEmpty,
+                    textAlign: TextAlign.center,
+                    style: EllaTypography.of(context).body,
+                  ),
                 ),
               ),
             if (conversationProvider.isLoadingMoreConversations)
-              const SliverToBoxAdapter(
+              SliverToBoxAdapter(
                 child: Padding(
-                  key: Key('memories-loading-more'),
-                  padding: EdgeInsets.symmetric(vertical: 24),
+                  key: const Key('memories-loading-more'),
+                  padding: const EdgeInsets.symmetric(vertical: 24),
                   child: Center(
                     child: SizedBox(
                       width: 22,
                       height: 22,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                      child: CircularProgressIndicator(strokeWidth: 2, color: EllaPalette.of(context).tealDeep),
                     ),
                   ),
                 ),
@@ -571,10 +618,11 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   child: Column(
                     children: [
-                      Text(context.l10n.couldntLoadMoreMemories, style: EllaTextStyles.secondary),
+                      Text(context.l10n.couldntLoadMoreMemories, style: EllaTypography.of(context).secondary),
                       const SizedBox(height: 4),
                       TextButton.icon(
                         key: const Key('retry-load-more-memories'),
+                        style: summaryReadButtonStyle(context),
                         onPressed: conversationProvider.getMoreConversationsFromServer,
                         icon: const Icon(Icons.refresh_rounded),
                         label: Text(context.l10n.tryAgain),
@@ -591,8 +639,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
           ? FloatingActionButton.extended(
               key: const Key('back-to-recent-memories'),
               onPressed: _scrollBackToRecent,
-              backgroundColor: EllaColors.tealDeep,
-              foregroundColor: EllaColors.paper,
+              backgroundColor: EllaPalette.of(context).tealDeep,
+              foregroundColor: EllaPalette.of(context).paper,
               icon: const Icon(Icons.arrow_upward_rounded),
               label: Text(context.l10n.backToRecentMemories),
             )
@@ -622,7 +670,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     );
   }
 
-  List<Widget> _memoryGroupSlivers(MapEntry<String, List<ServerConversation>> entry) {
+  List<Widget> _memoryGroupSlivers(BuildContext context, MapEntry<String, List<ServerConversation>> entry) {
     if (_layout == MemoryGalleryLayout.days) {
       return [
         SliverPadding(
@@ -657,7 +705,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     final children = <Widget>[
       SliverPadding(
         padding: const EdgeInsets.fromLTRB(20, 24, 20, EllaSizes.cardGap),
-        sliver: SliverToBoxAdapter(child: Text(entry.key, style: EllaTextStyles.eyebrow)),
+        sliver: SliverToBoxAdapter(child: Text(entry.key, style: EllaTypography.of(context).eyebrow)),
       ),
     ];
     if (_layout == MemoryGalleryLayout.grid) {
@@ -677,7 +725,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
           padding: const EdgeInsets.symmetric(horizontal: 20),
           sliver: SliverList.separated(
             itemCount: entry.value.length,
-            separatorBuilder: (_, __) => const Divider(height: 1, color: EllaColors.cardDeep),
+            separatorBuilder: (_, __) => const SizedBox(height: 10),
             itemBuilder: (context, index) => _memoryCard(entry.value[index]),
           ),
         ),
@@ -687,15 +735,15 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   }
 
   Widget _memoryCard(ServerConversation conversation) => MemoryGalleryCard(
-        conversation: conversation,
-        layout: _layout,
-        artworkApi: _artworkApi,
-        artworkRefreshEpoch: _artworkDisplayEpoch,
-        artworkAuthorityEpoch: _artworkAuthorityEpoch,
-        artworkQueueReadUnavailable: _artworkQueueReadUnavailable,
-        onOpen: () => _openMemory(conversation),
-        onDelete: () => _deleteMemory(conversation),
-      );
+    conversation: conversation,
+    layout: _layout,
+    artworkApi: _artworkApi,
+    artworkRefreshEpoch: _artworkDisplayEpoch,
+    artworkAuthorityEpoch: _artworkAuthorityEpoch,
+    artworkQueueReadUnavailable: _artworkQueueReadUnavailable,
+    onOpen: () => _openMemory(conversation),
+    onDelete: () => _deleteMemory(conversation),
+  );
 
   void _openMemory(ServerConversation conversation) {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation)));
@@ -704,16 +752,22 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   Future<bool> _deleteMemory(ServerConversation conversation) async {
     final l10n = context.l10n;
     final provider = context.read<ConversationProvider>();
-    final confirmed = await showDialog<bool>(
+    final confirmed =
+        await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
+            scrollable: true,
             title: Text(l10n.deleteConversationTitle),
             content: Text(l10n.deleteConversationMessage),
             actions: [
-              TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: Text(l10n.cancel)),
+              TextButton(
+                style: summaryReadButtonStyle(dialogContext),
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: Text(l10n.cancel),
+              ),
               FilledButton(
                 onPressed: () => Navigator.of(dialogContext).pop(true),
-                style: FilledButton.styleFrom(backgroundColor: EllaColors.error),
+                style: FilledButton.styleFrom(backgroundColor: EllaPalette.of(context).error),
                 child: Text(l10n.delete),
               ),
             ],
@@ -847,25 +901,25 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
   }
 
   Widget _recentDayContent(BuildContext context, String titles) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-            height: 96,
-            child: _MemoryDayArtworkCollage(
-              memories: widget.memories,
-              artworkApi: widget.artworkApi,
-              artworkRefreshEpoch: widget.artworkRefreshEpoch,
-              artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
-              artworkQueueReadUnavailable: widget.artworkQueueReadUnavailable,
-              automaticRepairMemoryIds: _dayBatchFailed ? const <String>{} : widget.automaticRepairMemoryIds,
-              prefetchedArtwork: _dayArtwork?.items ?? const <String, MemoryArtworkResult>{},
-              dayBatchResolved: _dayBatchResolved,
-            ),
-          ),
-          if (_dayBatchFailed) _dayArtworkRetry(context),
-          _dayDescription(context, titles),
-        ],
-      );
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      SizedBox(
+        height: 96,
+        child: _MemoryDayArtworkCollage(
+          memories: widget.memories,
+          artworkApi: widget.artworkApi,
+          artworkRefreshEpoch: widget.artworkRefreshEpoch,
+          artworkAuthorityEpoch: widget.artworkAuthorityEpoch,
+          artworkQueueReadUnavailable: widget.artworkQueueReadUnavailable,
+          automaticRepairMemoryIds: _dayBatchFailed ? <String>{} : widget.automaticRepairMemoryIds,
+          prefetchedArtwork: _dayArtwork?.items ?? <String, MemoryArtworkResult>{},
+          dayBatchResolved: _dayBatchResolved,
+        ),
+      ),
+      if (_dayBatchFailed) _dayArtworkRetry(context),
+      _dayDescription(context, titles),
+    ],
+  );
 
   Widget _olderDayContent(BuildContext context, String titles) {
     final memory = widget.memories.first;
@@ -878,22 +932,27 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
           SizedBox(
             width: 72,
             height: 72,
-            child: Stack(children: [
-              Positioned.fill(
+            child: Stack(
+              children: [
+                Positioned.fill(
                   child: MemoryArtworkImage(
-                conversation: memory,
-                api: widget.artworkApi,
-                refreshEpoch: widget.artworkRefreshEpoch,
-                authorityEpoch: widget.artworkAuthorityEpoch,
-                allowManualGeneration: false,
-                compactPlaceholder: true,
-                prefetchedResult:
-                    _artworkWithQueueReadState(_dayArtwork?.items[memory.id], widget.artworkQueueReadUnavailable),
-                prefetchResolved: _dayBatchResolved,
-                deferRemoteFetch: _usesDayBatch && !_dayBatchResolved,
-              )),
-              if (_dayBatchFailed) Positioned(right: 4, bottom: 4, child: _dayArtworkRetry(context, compact: true)),
-            ]),
+                    conversation: memory,
+                    api: widget.artworkApi,
+                    refreshEpoch: widget.artworkRefreshEpoch,
+                    authorityEpoch: widget.artworkAuthorityEpoch,
+                    allowManualGeneration: false,
+                    compactPlaceholder: true,
+                    prefetchedResult: _artworkWithQueueReadState(
+                      _dayArtwork?.items[memory.id],
+                      widget.artworkQueueReadUnavailable,
+                    ),
+                    prefetchResolved: _dayBatchResolved,
+                    deferRemoteFetch: _usesDayBatch && !_dayBatchResolved,
+                  ),
+                ),
+                if (_dayBatchFailed) Positioned(right: 4, bottom: 4, child: _dayArtworkRetry(context, compact: true)),
+              ],
+            ),
           ),
           Expanded(child: _dayDescription(context, titles, compact: true)),
         ],
@@ -902,61 +961,55 @@ class _MemoryDayGalleryCardState extends State<MemoryDayGalleryCard> {
   }
 
   Widget _dayArtworkRetry(BuildContext context, {bool compact = false}) => Align(
-        alignment: Alignment.bottomRight,
-        child: DecoratedBox(
-          decoration: BoxDecoration(color: EllaColors.card, borderRadius: BorderRadius.circular(8)),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (!compact)
-                Flexible(
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 8),
-                    child: Text(context.l10n.memoryArtworkUnavailableLabel, style: EllaTextStyles.secondary),
-                  ),
-                ),
-              IconButton(
-                key: const Key('memory-day-artwork-retry'),
-                tooltip: '${context.l10n.memoryArtworkUnavailableLabel}. ${context.l10n.tryAgain}',
-                constraints: const BoxConstraints.tightFor(width: 48, height: 48),
-                onPressed: () => unawaited(_loadDayArtwork()),
-                icon: const Icon(Icons.refresh_rounded, color: EllaColors.tealDeep),
+    alignment: Alignment.bottomRight,
+    child: DecoratedBox(
+      decoration: BoxDecoration(color: EllaPalette.of(context).card, borderRadius: BorderRadius.circular(8)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (!compact)
+            Flexible(
+              child: Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Text(context.l10n.memoryArtworkUnavailableLabel, style: EllaTypography.of(context).secondary),
               ),
+            ),
+          IconButton(
+            key: const Key('memory-day-artwork-retry'),
+            tooltip: '${context.l10n.memoryArtworkUnavailableLabel}. ${context.l10n.tryAgain}',
+            constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+            onPressed: () => unawaited(_loadDayArtwork()),
+            icon: Icon(Icons.refresh_rounded, color: EllaPalette.of(context).tealDeep),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Widget _dayDescription(BuildContext context, String titles, {bool compact = false}) => Padding(
+    padding: EdgeInsets.all(compact ? 12 : 16),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            mainAxisAlignment: compact ? MainAxisAlignment.center : MainAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(widget.dayLabel, style: EllaTypography.of(context).body.copyWith(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 4),
+              Text(context.l10n.memoryDayCount(widget.memories.length), style: EllaTypography.of(context).secondary),
+              if (titles.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(titles, style: EllaTypography.of(context).secondary),
+              ],
             ],
           ),
         ),
-      );
-
-  Widget _dayDescription(BuildContext context, String titles, {bool compact = false}) => Padding(
-        padding: EdgeInsets.all(compact ? 12 : 16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
-                mainAxisAlignment: compact ? MainAxisAlignment.center : MainAxisAlignment.start,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    widget.dayLabel,
-                    style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    context.l10n.memoryDayCount(widget.memories.length),
-                    style: EllaTextStyles.secondary,
-                  ),
-                  if (titles.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Text(titles, style: EllaTextStyles.secondary),
-                  ],
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
-          ],
-        ),
-      );
+        Icon(Icons.chevron_right_rounded, color: EllaPalette.of(context).tealDeep),
+      ],
+    ),
+  );
 }
 
 class _MemoryDayArtworkCollage extends StatelessWidget {
@@ -981,17 +1034,17 @@ class _MemoryDayArtworkCollage extends StatelessWidget {
   final bool dayBatchResolved;
 
   Widget _art(ServerConversation memory) => MemoryArtworkImage(
-        conversation: memory,
-        api: artworkApi,
-        refreshEpoch: artworkRefreshEpoch,
-        authorityEpoch: artworkAuthorityEpoch,
-        enqueueIfMissing: automaticRepairMemoryIds.contains(memory.id),
-        allowManualGeneration: true,
-        compactPlaceholder: true,
-        prefetchedResult: _artworkWithQueueReadState(prefetchedArtwork[memory.id], artworkQueueReadUnavailable),
-        prefetchResolved: dayBatchResolved,
-        deferRemoteFetch: (artworkApi ?? MemoryArtworkApi()).supportsDayArtworkBatch && !dayBatchResolved,
-      );
+    conversation: memory,
+    api: artworkApi,
+    refreshEpoch: artworkRefreshEpoch,
+    authorityEpoch: artworkAuthorityEpoch,
+    enqueueIfMissing: automaticRepairMemoryIds.contains(memory.id),
+    allowManualGeneration: false,
+    compactPlaceholder: true,
+    prefetchedResult: _artworkWithQueueReadState(prefetchedArtwork[memory.id], artworkQueueReadUnavailable),
+    prefetchResolved: dayBatchResolved,
+    deferRemoteFetch: (artworkApi ?? MemoryArtworkApi()).supportsDayArtworkBatch && !dayBatchResolved,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -1150,7 +1203,7 @@ class _MemoryCaptureShelf extends StatelessWidget {
       top: false,
       minimum: const EdgeInsets.fromLTRB(20, 8, 20, 10),
       child: Material(
-        color: EllaColors.tealDeep,
+        color: EllaPalette.of(context).tealDeep,
         borderRadius: BorderRadius.circular(18),
         child: InkWell(
           key: const Key('memories-record-shelf'),
@@ -1161,11 +1214,13 @@ class _MemoryCaptureShelf extends StatelessWidget {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(live ? Icons.subject_rounded : Icons.mic_none_rounded, color: EllaColors.paper),
+                Icon(live ? Icons.subject_rounded : Icons.mic_none_rounded, color: EllaPalette.of(context).paper),
                 const SizedBox(width: 10),
                 Text(
                   live ? context.l10n.liveTranscript : context.l10n.todayDockRecord,
-                  style: EllaTextStyles.body.copyWith(color: EllaColors.paper, fontWeight: FontWeight.w700),
+                  style: EllaTypography.of(
+                    context,
+                  ).body.copyWith(color: EllaPalette.of(context).paper, fontWeight: FontWeight.w700),
                 ),
               ],
             ),
@@ -1184,7 +1239,7 @@ class _LiveMemoryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: EllaColors.card,
+      color: EllaPalette.of(context).card,
       borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
       child: InkWell(
         onTap: onTap,
@@ -1197,8 +1252,8 @@ class _LiveMemoryCard extends StatelessWidget {
               children: [
                 const EllaBreathingDot(live: true),
                 const SizedBox(width: 16),
-                Expanded(child: Text(context.l10n.inProgress, style: EllaTextStyles.display)),
-                const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
+                Expanded(child: Text(context.l10n.inProgress, style: EllaTypography.of(context).display)),
+                Icon(Icons.chevron_right_rounded, color: EllaPalette.of(context).inkSoft),
               ],
             ),
           ),
@@ -1240,35 +1295,30 @@ class MemoryGalleryCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final largeText = MediaQuery.textScalerOf(context).scale(1) >= 2;
     final details = _MemoryDetails(conversation: conversation, title: _title, showTime: !largeText);
-    final artwork = ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        width: 64,
-        height: 64,
-        child: MemoryArtworkImage(
-          conversation: conversation,
-          api: artworkApi,
-          refreshEpoch: artworkRefreshEpoch,
-          authorityEpoch: artworkAuthorityEpoch,
-          compactPlaceholder: true,
-          allowManualGeneration: true,
-          enqueueIfMissing: enqueueArtworkIfMissing,
-          prefetchedResult: artworkQueueReadUnavailable ? _queueReadUnavailableArtwork : null,
-        ),
-      ),
+    final artwork = MemoryArtworkImage(
+      conversation: conversation,
+      api: artworkApi,
+      refreshEpoch: artworkRefreshEpoch,
+      authorityEpoch: artworkAuthorityEpoch,
+      compactPlaceholder: true,
+      readyOnlyThumbnail: true,
+      allowManualGeneration: false,
+      enqueueIfMissing: false,
+      prefetchedResult: artworkQueueReadUnavailable ? _queueReadUnavailableArtwork : null,
     );
     final child = Padding(
-      padding: const EdgeInsets.symmetric(vertical: 16),
+      padding: const EdgeInsets.all(16),
       child: largeText
           ? Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Row(children: [
-                  artwork,
-                  const SizedBox(width: 12),
-                  Expanded(child: _MemoryTime(conversation: conversation)),
-                  const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep)
-                ]),
+                Row(
+                  children: [
+                    artwork,
+                    Expanded(child: _MemoryTime(conversation: conversation)),
+                    Icon(Icons.chevron_right_rounded, color: EllaPalette.of(context).tealDeep),
+                  ],
+                ),
                 const SizedBox(height: 12),
                 details,
               ],
@@ -1277,16 +1327,18 @@ class MemoryGalleryCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 artwork,
-                const SizedBox(width: 12),
                 Expanded(child: details),
                 const SizedBox(width: 6),
-                const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
+                Icon(Icons.chevron_right_rounded, color: EllaPalette.of(context).tealDeep),
               ],
             ),
     );
     final card = Material(
-      color: Colors.transparent,
-      borderRadius: BorderRadius.circular(8),
+      color: EllaPalette.of(context).elevatedCard,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: EllaPalette.of(context).cardEdge),
+      ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onOpen,
@@ -1312,15 +1364,15 @@ class MemoryGalleryCard extends StatelessWidget {
           if (delete == null) return false;
           return delete();
         },
-        background: const _MemorySwipeBackground(
+        background: _MemorySwipeBackground(
           alignment: AlignmentDirectional.centerStart,
           icon: Icons.edit_outlined,
-          color: EllaColors.tealDeep,
+          color: EllaPalette.of(context).tealDeep,
         ),
-        secondaryBackground: const _MemorySwipeBackground(
+        secondaryBackground: _MemorySwipeBackground(
           alignment: AlignmentDirectional.centerEnd,
           icon: Icons.delete_outline_rounded,
-          color: EllaColors.error,
+          color: EllaPalette.of(context).error,
         ),
         child: card,
       ),
@@ -1343,7 +1395,7 @@ class _MemorySwipeBackground extends StatelessWidget {
         alignment: alignment,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Icon(icon, color: EllaColors.paper, semanticLabel: null),
+          child: Icon(icon, color: EllaPalette.of(context).paper, semanticLabel: null),
         ),
       ),
     );
@@ -1368,23 +1420,34 @@ class _MemoryDetails extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Text(
+                context.l10n.memories,
+                style: EllaTypography.of(context).eyebrow.copyWith(color: EllaPalette.of(context).tealDeep),
+              ),
+              const SizedBox(height: 8),
               EllaSourceText(
                 title,
                 isEllaGenerated: titleIsEllaGenerated,
-                style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
+                style: EllaTypography.of(context).body.copyWith(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 4),
               EllaSourceText(
                 conversation.structured.overview,
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
-                style: EllaTextStyles.secondary,
+                style: EllaTypography.of(context).secondary,
               ),
               const SizedBox(height: 6),
+              Consumer<ConversationProvider>(
+                builder: (context, provider, _) => SummaryRefreshNotice(
+                  observation: provider.summaryReadFor(conversation),
+                  conversation: conversation,
+                ),
+              ),
               if (showTime) _MemoryTime(conversation: conversation),
-              if (hasCurrentHermesSummary(conversation)) ...[
+              if (hasCurrentSummarySource(conversation)) ...[
                 const SizedBox(height: 6),
-                HermesSummarySource(conversation: conversation),
+                ActiveSummarySource(conversation: conversation, showVersion: true),
               ],
             ],
           ),
@@ -1401,11 +1464,11 @@ class _MemoryTime extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Text(
-        MaterialLocalizations.of(context).formatTimeOfDay(
-          TimeOfDay.fromDateTime((conversation.startedAt ?? conversation.createdAt).toLocal()),
-        ),
-        style: EllaTextStyles.caption,
-      );
+    MaterialLocalizations.of(
+      context,
+    ).formatTimeOfDay(TimeOfDay.fromDateTime((conversation.startedAt ?? conversation.createdAt).toLocal())),
+    style: EllaTypography.of(context).caption,
+  );
 }
 
 /// Phone layouts stay list-first; a wide grid grows naturally with the text.
@@ -1413,32 +1476,32 @@ Widget memoryGalleryFeedSliver({
   required MemoryGalleryLayout layout,
   required int itemCount,
   required IndexedWidgetBuilder itemBuilder,
-}) =>
-    SliverLayoutBuilder(
-      builder: (context, constraints) {
-        final columns = layout == MemoryGalleryLayout.grid &&
-                constraints.crossAxisExtent >= 640 &&
-                MediaQuery.textScalerOf(context).scale(1) < 2
-            ? 2
-            : 1;
-        return SliverList.separated(
-          itemCount: (itemCount / columns).ceil(),
-          separatorBuilder: (_, __) => const Divider(height: 1, color: EllaColors.cardDeep),
-          itemBuilder: (context, row) => columns == 1
-              ? itemBuilder(context, row)
-              : Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(child: itemBuilder(context, row * columns)),
-                    const SizedBox(width: 20),
-                    Expanded(
-                        child:
-                            row * columns + 1 < itemCount ? itemBuilder(context, row * columns + 1) : const SizedBox()),
-                  ],
+}) => SliverLayoutBuilder(
+  builder: (context, constraints) {
+    final columns =
+        layout == MemoryGalleryLayout.grid &&
+            constraints.crossAxisExtent >= 640 &&
+            MediaQuery.textScalerOf(context).scale(1) < 2
+        ? 2
+        : 1;
+    return SliverList.separated(
+      itemCount: (itemCount / columns).ceil(),
+      separatorBuilder: (_, __) => const SizedBox(height: 10),
+      itemBuilder: (context, row) => columns == 1
+          ? itemBuilder(context, row)
+          : Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: itemBuilder(context, row * columns)),
+                const SizedBox(width: 20),
+                Expanded(
+                  child: row * columns + 1 < itemCount ? itemBuilder(context, row * columns + 1) : const SizedBox(),
                 ),
-        );
-      },
+              ],
+            ),
     );
+  },
+);
 
 Map<String, List<ServerConversation>> groupMemoryConversationsByDay(
   BuildContext context,
@@ -1454,8 +1517,8 @@ Map<String, List<ServerConversation>> groupMemoryConversationsByDay(
     final label = day == today
         ? context.l10n.memoriesToday
         : day == today.subtract(const Duration(days: 1))
-            ? context.l10n.memoriesYesterday
-            : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
+        ? context.l10n.memoriesYesterday
+        : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
     result.putIfAbsent(label, () => []).add(conversation);
   }
   return result;

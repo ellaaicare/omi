@@ -1,5 +1,9 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
+
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -20,6 +24,7 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
+import '../widgets/summary_read_action_contrast_test.dart' show checkPaint;
 
 class _MutableAuthority implements AccountCommitAuthority {
   _MutableAuthority(this.uid);
@@ -229,6 +234,20 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUpAll(() async {
+    await (FontLoader('Manrope')
+          ..addFont(rootBundle.load('assets/fonts/Manrope-400.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/Manrope-600.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/Manrope-700.ttf')))
+        .load();
+    var cache = File(Platform.resolvedExecutable).parent;
+    while (!File('${cache.path}/artifacts/material_fonts/MaterialIcons-Regular.otf').existsSync()) {
+      cache = cache.parent;
+    }
+    await (FontLoader('MaterialIcons')
+          ..addFont(File('${cache.path}/artifacts/material_fonts/MaterialIcons-Regular.otf')
+              .readAsBytes()
+              .then((bytes) => ByteData.sublistView(Uint8List.fromList(bytes)))))
+        .load();
     try {
       await ServiceManager.init();
     } catch (_) {}
@@ -266,7 +285,9 @@ void main() {
     ConversationProvider provider, {
     MemoryArtworkApi? artworkApi,
     bool settle = true,
+    GlobalKey? renderKey,
     TextScaler textScaler = TextScaler.noScaling,
+    bool dark = false,
   }) async {
     await tester.pumpWidget(
       MultiProvider(
@@ -275,14 +296,14 @@ void main() {
           ChangeNotifierProvider<CaptureProvider>(create: (_) => CaptureProvider()),
         ],
         child: MaterialApp(
-          theme: ellaThemeData(),
+          theme: dark ? ellaDarkThemeData() : ellaThemeData(),
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
           builder: (context, child) => MediaQuery(
             data: MediaQuery.of(context).copyWith(textScaler: textScaler),
             child: child!,
           ),
-          home: EllaMemoriesPage(artworkApi: artworkApi),
+          home: RepaintBoundary(key: renderKey, child: EllaMemoriesPage(artworkApi: artworkApi)),
         ),
       ),
     );
@@ -291,6 +312,41 @@ void main() {
     } else {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
+    }
+  }
+
+  for (final brightness in [Brightness.light, Brightness.dark]) {
+    for (final scale in [1.0, 3.0]) {
+      testWidgets('Iris actual archive ${brightness.name} ${scale}x uses system appearance', (tester) async {
+        tester.platformDispatcher.platformBrightnessTestValue = brightness;
+        addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+        tester.view.physicalSize = scale == 3 ? const Size(320, 568) : const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final provider = _QueueConversationProvider()
+          ..conversations = [memory('iris-archive', title: 'Garden on Saturday')];
+        addTearDown(provider.dispose);
+        final boundary = GlobalKey();
+        await pumpPage(tester, provider, renderKey: boundary, textScaler: TextScaler.linear(scale));
+        final card = find.byType(MemoryGalleryCard);
+        expect(Theme.of(tester.element(card)).brightness, brightness);
+        final dayHeading = tester.widget<Text>(find.textContaining('AUGUST 10').first);
+        final palette = EllaPalette(brightness == Brightness.dark);
+        final luminances = [dayHeading.style!.color!.computeLuminance(), palette.paper.computeLuminance()]..sort();
+        expect((luminances.last + .05) / (luminances.first + .05), greaterThanOrEqualTo(4.5));
+        expect(find.text('Garden on Saturday'), findsOneWidget);
+        await tester.ensureVisible(find.text('Garden on Saturday'));
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        await tester.runAsync(() async {
+          final image = await (boundary.currentContext!.findRenderObject()! as RenderRepaintBoundary).toImage();
+          final png = await image.toByteData(format: ui.ImageByteFormat.png);
+          final dir = Directory('../iris-renders')..createSync(recursive: true);
+          File('${dir.path}/archive-${brightness.name}-${scale}x.png').writeAsBytesSync(png!.buffer.asUint8List());
+          image.dispose();
+        });
+      });
     }
   }
 
@@ -322,7 +378,8 @@ void main() {
         ..hasMoreConversations = false;
       addTearDown(provider.dispose);
       await pumpPage(tester, provider, artworkApi: _FakeArtworkApi(), textScaler: TextScaler.linear(scale));
-      expect(tester.getSize(find.byType(MemoryArtworkImage)), const Size(64, 64));
+      expect(tester.getSize(find.byType(MemoryArtworkImage)), Size.zero,
+          reason: 'text-first rows reserve no missing-artwork space');
       expect(find.byType(CircularProgressIndicator), findsNothing);
       if (scale == 1) {
         expect(tester.getSize(find.byKey(const Key('memory-card-long-preview'))).height, lessThan(240));
@@ -388,13 +445,14 @@ void main() {
       final api = _QueueReadArtworkApi();
       api.queueReads.addAll([() async => null, () async => null, () async => null]);
       await pumpQueuePage(tester, api, layout: layout, at: DateTime.now());
-      expect(find.byKey(const Key('memory-artwork-placeholder-queue-memory')), findsOneWidget);
+      expect(find.byKey(const Key('memory-artwork-placeholder-queue-memory')),
+          layout == 'days' ? findsOneWidget : findsNothing);
       expect(find.byType(CircularProgressIndicator), findsNothing);
       expect(
           tester
               .widgetList<Semantics>(find.byType(Semantics))
               .any((widget) => widget.properties.label?.contains('preparing') ?? false),
-          isTrue);
+          layout == 'days');
       for (var i = 0; i < 2; i++) {
         await tester.pump(const Duration(seconds: 4));
         await tester.pump();
@@ -661,6 +719,100 @@ void main() {
     expect(api.backfillCalls, 0);
     expect(api.displayEnqueueRequests, isEmpty);
   });
+
+  for (final dark in [false, true]) {
+    for (final scale in [1.0, 3.5]) {
+      testWidgets('actual Journal cancel is readable and leaves record untouched $dark $scale', (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        var deletions = 0;
+        final authority = _MutableAuthority('test-user');
+        final provider = ConversationProvider(
+          activeAuthority: () => authority,
+          conversationDeleteCall: (id, _) async {
+            deletions++;
+            return true;
+          },
+        )
+          ..conversations = [memory('memory-cancel')]
+          ..hasLoadedConversations = true
+          ..hasFreshConversations = true
+          ..hasMoreConversations = false;
+        addTearDown(provider.dispose);
+        tester.platformDispatcher.platformBrightnessTestValue = dark ? Brightness.dark : Brightness.light;
+        addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+        await pumpPage(tester, provider, dark: dark, textScaler: TextScaler.linear(scale));
+        await tester.tap(find.byKey(const Key('memory-layout-menu')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Compact list'));
+        await tester.pumpAndSettle();
+        final card = find.byKey(const Key('memory-card-memory-cancel'));
+        for (var i = 0; i < 30 && card.hitTestable().evaluate().isEmpty; i++) {
+          await tester.drag(find.byKey(const Key('ella-memories-list')), const Offset(0, -80));
+          await tester.pump();
+        }
+        expect(card.hitTestable(), findsOneWidget);
+        await tester.fling(card, const Offset(-420, 0), 1600);
+        await tester.pumpAndSettle();
+        final cancel = find.widgetWithText(TextButton, 'Cancel');
+        expect(cancel.hitTestable(), findsOneWidget);
+        checkPaint(tester, cancel, 'Cancel');
+        await tester.tap(cancel);
+        await tester.pumpAndSettle();
+        expect(deletions, 0);
+        expect(card, findsOneWidget);
+      });
+    }
+  }
+
+  for (final dark in [false, true]) {
+    for (final scale in [1.0, 3.5]) {
+      testWidgets('actual pagination error Retry has readable ink and one GET $dark $scale', (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        tester.platformDispatcher.platformBrightnessTestValue = dark ? Brightness.dark : Brightness.light;
+        addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+        final authority = _MutableAuthority('test-user');
+        var reads = 0;
+        final provider = ConversationProvider(
+          activeAuthority: () => authority,
+          conversationsPageFetchCall: ({required limit, required offset}) async {
+            reads++;
+            return reads == 1 ? const ConversationsFetchResult.failure(statusCode: 503)
+                : ConversationsFetchResult.success([memory('fictional-older')]);
+          },
+        )
+          ..conversations = [memory('fictional-current')]
+          ..hasLoadedConversations = true
+          ..hasFreshConversations = true
+          ..hasMoreConversations = true;
+        addTearDown(provider.dispose);
+        await pumpPage(tester, provider, dark: dark, textScaler: TextScaler.linear(scale));
+        await tester.pump(const Duration(seconds: 1));
+        for (var i = 0; i < 30 && reads == 0; i++) {
+          await tester.drag(find.byKey(const Key('ella-memories-list')), const Offset(0, -80));
+          await tester.pump();
+        }
+        expect(reads, 1);
+        final retry = find.byKey(const Key('retry-load-more-memories'));
+        for (var i = 0; i < 30 && retry.hitTestable().evaluate().isEmpty; i++) {
+          await tester.drag(find.byKey(const Key('ella-memories-list')), const Offset(0, -80));
+          await tester.pump();
+        }
+        expect(retry.hitTestable(), findsOneWidget);
+        checkPaint(tester, retry, 'Try Again');
+        await tester.tap(retry);
+        await tester.pumpAndSettle();
+        expect(reads, 2);
+        expect(provider.conversations.map((row) => row.id), contains('fictional-older'));
+        expect(tester.takeException(), null);
+      });
+    }
+  }
 
   testWidgets('gallery swipe-left confirms and permanently deletes the selected memory', (tester) async {
     final requestedIds = <String>[];

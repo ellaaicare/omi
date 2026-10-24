@@ -45,6 +45,9 @@ class FakePhoneMicHostApi extends PhoneMicHostApi {
   Object Function()? nextStartError;
   Completer<void>? holdNextStart;
   Completer<void>? nextStartEntered;
+  Completer<void>? holdNextStop;
+  Completer<void>? nextStopEntered;
+  Object Function()? nextStopError;
 
   @override
   Future<void> start(PhoneMicCaptureMode mode, int sessionId) async {
@@ -68,6 +71,15 @@ class FakePhoneMicHostApi extends PhoneMicHostApi {
   @override
   Future<void> stop() async {
     stopCalls++;
+    final entered = nextStopEntered;
+    nextStopEntered = null;
+    entered?.complete();
+    final held = holdNextStop;
+    holdNextStop = null;
+    if (held != null) await held.future;
+    final error = nextStopError;
+    nextStopError = null;
+    if (error != null) throw error();
     nativeRecording = false;
   }
 

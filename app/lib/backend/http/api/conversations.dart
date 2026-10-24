@@ -342,16 +342,21 @@ Future<CreateConversationResponse?> processInProgressConversation({
   return null;
 }
 
+/// Safe invocation-local diagnostics. Never include response/exception text.
+enum ConversationsReadFailure { unavailable, http, utf8, json, schema }
+
 class ConversationsFetchResult {
   const ConversationsFetchResult.success(this.conversations)
       : succeeded = true,
-        statusCode = 200;
+        statusCode = 200,
+        failure = null;
 
-  const ConversationsFetchResult.failure({this.statusCode})
+  const ConversationsFetchResult.failure({this.statusCode, this.failure = ConversationsReadFailure.unavailable})
       : succeeded = false,
         conversations = const [];
 
   final bool succeeded;
+  final ConversationsReadFailure? failure;
   final int? statusCode;
   final List<ServerConversation> conversations;
 }
@@ -421,21 +426,33 @@ Future<ConversationsFetchResult> getConversationsResult({
     exactAuthority: exactAuthority,
   );
   if (response == null) return const ConversationsFetchResult.failure();
-  if (response.statusCode == 200) {
-    try {
-      // Decode body bytes explicitly so transcript text is always interpreted as UTF-8.
-      final body = utf8.decode(response.bodyBytes);
-      final conversations =
-          (jsonDecode(body) as List<dynamic>).map((conversation) => ServerConversation.fromJson(conversation)).toList();
-      Logger.debug('getConversations length: ${conversations.length}');
-      return ConversationsFetchResult.success(conversations);
-    } catch (error, stackTrace) {
-      Logger.error('getConversations decode error: $error\n$stackTrace');
-      return ConversationsFetchResult.failure(statusCode: response.statusCode);
-    }
+  if (response.statusCode == 200) return decodeConversationsResponse(response.bodyBytes);
+  Logger.debug('getConversations HTTP failure ${response.statusCode}');
+  return ConversationsFetchResult.failure(statusCode: response.statusCode, failure: ConversationsReadFailure.http);
+}
+
+/// A successful HTTP status is not proof of a decoded record. Keep the previous
+/// owned projection on any decode failure; do not log personal payload snippets.
+ConversationsFetchResult decodeConversationsResponse(List<int> bytes) {
+  late final String body;
+  try {
+    body = utf8.decode(bytes);
+  } catch (_) {
+    return const ConversationsFetchResult.failure(statusCode: 200, failure: ConversationsReadFailure.utf8);
   }
-  Logger.debug('getConversations error ${response.statusCode}');
-  return ConversationsFetchResult.failure(statusCode: response.statusCode);
+  late final dynamic decoded;
+  try {
+    decoded = jsonDecode(body);
+  } catch (_) {
+    return const ConversationsFetchResult.failure(statusCode: 200, failure: ConversationsReadFailure.json);
+  }
+  try {
+    if (decoded is! List) throw const FormatException();
+    final rows = decoded.map((row) => ServerConversation.fromJson(Map<String, dynamic>.from(row as Map))).toList();
+    return ConversationsFetchResult.success(rows);
+  } catch (_) {
+    return const ConversationsFetchResult.failure(statusCode: 200, failure: ConversationsReadFailure.schema);
+  }
 }
 
 enum ConversationProcessingRetryOutcome { processing, completed, failed }

@@ -44,6 +44,18 @@ class EllaProvisioningProvider extends ChangeNotifier {
   EllaProvisioningState state = EllaProvisioningState.idle;
   EllaProvisioningReceipt? receipt;
   String errorCode = '';
+  int? _responseStatusCode;
+
+  /// Presentation-only HTTP classification; never overrides receipt authority.
+  /// Keep the exact server error in errorCode for support/contract semantics.
+  String get failurePresentationCode {
+    if (errorCode == 'unsafe_response_contract') return errorCode;
+    if (_responseStatusCode == 401) return 'auth_required';
+    if (_responseStatusCode == 429) return 'quota_exceeded';
+    if (_responseStatusCode != null && _responseStatusCode! >= 500) return 'provider_unavailable';
+    return errorCode;
+  }
+
   bool isForeground = true;
 
   String _activeUid = '';
@@ -62,10 +74,13 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   bool get isOperational => state == EllaProvisioningState.ready && receipt?.isOperational == true;
 
+  /// No automatic status attempts remain, and the final request has settled.
+  bool get automaticPollingExhausted => _pollAttempts >= maxPollAttempts && !_requestInFlight;
+
   bool get isRevalidatingOperational =>
       _revalidatingOperationalReceipt &&
-      (state == EllaProvisioningState.checking || state == EllaProvisioningState.degraded) &&
-      receipt?.isOperational == true;
+      (state == EllaProvisioningState.checking || state == EllaProvisioningState.queued ||
+          state == EllaProvisioningState.provisioning || state == EllaProvisioningState.degraded);
 
   String get supportCode => receipt?.supportCode ?? '';
 
@@ -113,6 +128,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _revalidatingOperationalReceipt = false;
     state = EllaProvisioningState.checking;
     errorCode = '';
+    _responseStatusCode = null;
 
     // A cached receipt may keep the established shell visible, but it must not
     // authorize protected work until this exact request verifies it again.
@@ -138,19 +154,21 @@ class EllaProvisioningProvider extends ChangeNotifier {
       _revalidatingOperationalReceipt = false;
       state = EllaProvisioningState.checking;
       errorCode = '';
+      _responseStatusCode = null;
       notifyListeners();
     }
     if (_requestInFlight) {
       _retryEnsureAfterCurrentRequest = true;
       return;
     }
-    final hadOperationalReceipt = receipt?.isOperational == true && (isOperational || _revalidatingOperationalReceipt);
+    final hadOperationalReceipt = isOperational || _revalidatingOperationalReceipt;
     final generation = ++_generation;
     _cancelPoll();
     _pollAttempts = 0;
     _revalidatingOperationalReceipt = preserveOperationalReceipt && hadOperationalReceipt;
     state = EllaProvisioningState.checking;
     errorCode = '';
+    _responseStatusCode = null;
     notifyListeners();
     await _ensure(generation);
   }
@@ -187,6 +205,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _preferences.invalidateEllaProvisioningServerVerification();
     receipt = null;
     errorCode = '';
+    _responseStatusCode = null;
     state = EllaProvisioningState.idle;
     notifyListeners();
   }
@@ -196,6 +215,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     if (context == null || generation != _generation || _requestInFlight) return;
     final requestContextEpoch = _requestContextEpoch;
     _requestInFlight = true;
+    _responseStatusCode = null;
     try {
       final response = await _transport.ensure(context);
       if (!_isCurrentRequest(generation, requestContextEpoch)) return;
@@ -220,6 +240,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _pollAttempts++;
     final requestContextEpoch = _requestContextEpoch;
     _requestInFlight = true;
+    _responseStatusCode = null;
     try {
       final response = await _transport.status();
       if (!_isCurrentRequest(generation, requestContextEpoch)) return;
@@ -227,7 +248,10 @@ class EllaProvisioningProvider extends ChangeNotifier {
     } catch (error) {
       if (!_isCurrentRequest(generation, requestContextEpoch)) return;
       Logger.debug('[ProvisioningGate] Status failed: $error');
-      _setFailure('network_unavailable', preserveOperationalReceipt: true);
+      _setFailure(
+        _pollAttempts >= maxPollAttempts ? 'provisioning_timeout' : 'network_unavailable',
+        preserveOperationalReceipt: true,
+      );
       _schedulePoll(generation, _backoffDelay);
     } finally {
       _finishRequest(generation);
@@ -236,6 +260,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   Future<void> _applyResponse(EllaProvisioningResponse response, int generation, int requestContextEpoch) async {
     if (!_isCurrentRequest(generation, requestContextEpoch)) return;
+    _responseStatusCode = response.statusCode;
     final nextReceipt = response.receipt;
     final rejectedTerminal = !response.isAccepted &&
         (response.statusCode == 401 ||
@@ -267,7 +292,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
               426 => 'upgrade_required',
               429 => 'quota_exceeded',
               >= 500 => 'provider_unavailable',
-              _ => 'invalid_provisioning_response',
+              _ => response.clientFailure?.code ?? 'invalid_provisioning_response',
             };
       final blocked = response.statusCode == 401 ||
           response.statusCode == 403 ||
@@ -303,7 +328,8 @@ class EllaProvisioningProvider extends ChangeNotifier {
     } else {
       state = nextReceipt.state;
     }
-    _revalidatingOperationalReceipt = false;
+    _revalidatingOperationalReceipt = _revalidatingOperationalReceipt &&
+        !terminalResponse && state != EllaProvisioningState.blocked && !isOperational;
     if (isOperational) {
       await _preferences.markEllaProvisioningVerified(_activeUid);
       if (!_isCurrentRequest(generation, requestContextEpoch)) return;
@@ -339,7 +365,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     // with setup UI. The provider still reports isOperational=false, so
     // protected operations remain fail-closed until fresh authority succeeds.
     _revalidatingOperationalReceipt =
-        !blocked && preserveOperationalReceipt && _revalidatingOperationalReceipt && receipt?.isOperational == true;
+        !blocked && preserveOperationalReceipt && _revalidatingOperationalReceipt;
     if (blocked && !terminalAlreadyFenced) {
       _preferences.invalidateEllaProvisioningTerminalAuthority();
     } else if (!blocked) {
@@ -359,6 +385,9 @@ class EllaProvisioningProvider extends ChangeNotifier {
           (state == EllaProvisioningState.degraded &&
               (receipt?.retryable == true ||
                   errorCode == 'network_unavailable' ||
+                  errorCode == 'authentication_refresh_unavailable' ||
+                  errorCode == 'request_timeout' ||
+                  errorCode == 'transport_unavailable' ||
                   errorCode == 'invalid_provisioning_response' ||
                   errorCode == 'provider_unavailable' ||
                   errorCode == 'quota_exceeded')));
@@ -371,7 +400,9 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   Duration _pollDelay(EllaProvisioningReceipt nextReceipt) {
     final jitter = (_pollAttempts % 4) * 173;
-    return Duration(milliseconds: (nextReceipt.retryAfter.inMilliseconds + jitter).clamp(500, 15000));
+    final requested = nextReceipt.retryAfter.inMilliseconds + jitter;
+    final backoff = state == EllaProvisioningState.degraded ? _backoffDelay.inMilliseconds : 0;
+    return Duration(milliseconds: (requested > backoff ? requested : backoff).clamp(500, 15000));
   }
 
   void _schedulePoll(int generation, Duration delay) {
@@ -424,7 +455,10 @@ class EllaProvisioningProvider extends ChangeNotifier {
     }
     _requestContext = context.copyWithConsentReceiptId(receiptId);
     _requestContextEpoch++;
-    await retry(preserveOperationalReceipt: false);
+    // Keep an already validated same-owner Home shell during receipt refresh.
+    // retry still invalidates server authority; blocked/auth/account-change paths
+    // continue to remove access and clear the retained presentation.
+    await retry();
     return uid == _activeUid && uid == _preferences.uid;
   }
 
@@ -437,6 +471,9 @@ class EllaProvisioningProvider extends ChangeNotifier {
     if (_retryEnsureAfterCurrentRequest) {
       _retryEnsureAfterCurrentRequest = false;
       unawaited(retry());
+    } else if (automaticPollingExhausted) {
+      // Publish the settled budget for exceptions and returned HTTP failures.
+      notifyListeners();
     }
   }
 

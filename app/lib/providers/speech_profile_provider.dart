@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -17,6 +16,8 @@ import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/mic/owned_legacy_mic.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/services/sockets/transcription_service.dart';
 import 'package:omi/utils/audio/wav_bytes.dart';
 import 'package:omi/utils/constants.dart';
@@ -41,6 +42,15 @@ enum SpeechProfileProgressState {
 class SpeechProfileProvider extends ChangeNotifier
     with MessageNotifierMixin
     implements IDeviceServiceSubsciption, ITransctiptSegmentSocketServiceListener {
+  SpeechProfileProvider({IMicRecorderService? phoneMicRecorder, Future<bool> Function()? phoneMicPermissionChecker})
+      : _phoneMicRecorder = phoneMicRecorder,
+        _phoneMicPermissionChecker = phoneMicPermissionChecker;
+
+  final IMicRecorderService? _phoneMicRecorder;
+  final Future<bool> Function()? _phoneMicPermissionChecker;
+  OwnedLegacyMic? _ownedPhoneMic;
+  int _phoneMicGeneration = 0;
+
   DeviceProvider? deviceProvider;
   bool? permissionEnabled;
   bool loading = false;
@@ -123,20 +133,33 @@ class SpeechProfileProvider extends ChangeNotifier
     Function? processConversationCallback,
     bool usePhoneMic = false,
   }) async {
+    if (_ownedPhoneMic?.hasReservation == true) return false;
     _finalizedCallback = finalizedCallback;
     _processConversationCallback = processConversationCallback;
     setInitialising(true);
     this.usePhoneMic = usePhoneMic;
 
+    OwnedLegacyMic? ownedMic;
+    final generation = ++_phoneMicGeneration;
     try {
       if (usePhoneMic) {
+        final authority =
+            AiConsentActiveSessionLease.authorityForSessionStart(expectedUid: SharedPreferencesUtil().uid);
+        if (authority == null || _ownedPhoneMic?.hasReservation == true) return false;
+        ownedMic = OwnedLegacyMic(
+          inner: _phoneMicRecorder ?? ServiceManager.instance().mic,
+          source: 'speech-profile',
+          hasAuthority: () => generation == _phoneMicGeneration && authority.isCurrent(),
+        );
+        if (!ownedMic.reserveBeforePermission()) return false;
+        _ownedPhoneMic = ownedMic;
         // Phone microphone mode - use PCM16 at 16kHz
         const codec = BleAudioCodec.pcm16;
         audioStorage = WavBytesUtil(codec: codec, framesPerSecond: 100);
         await _initiateWebsocket(codec: codec, sampleRate: 16000, force: true);
 
         // Start phone mic streaming
-        await _initiatePhoneMicStreaming();
+        await _initiatePhoneMicStreaming(ownedMic);
       } else {
         // Device mode - use device codec
         device = deviceProvider?.connectedDevice;
@@ -155,6 +178,7 @@ class SpeechProfileProvider extends ChangeNotifier
       setInitialised(true);
       return true;
     } catch (e) {
+      await ownedMic?.stop();
       Logger.debug('Error during initialise: $e');
       notifyError('SOCKET_INIT_FAILED');
       return false;
@@ -195,41 +219,28 @@ class SpeechProfileProvider extends ChangeNotifier
   }
 
   /// Start phone microphone streaming (alternative to BLE device streaming)
-  Future<void> _initiatePhoneMicStreaming() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
-    Logger.debug('Starting phone mic streaming for speech profile...');
-
-    // Request mic permission
-    await Permission.microphone.request();
-
-    await ServiceManager.instance().mic.start(
-      onByteReceived: (Uint8List bytes) {
+  Future<void> _initiatePhoneMicStreaming(OwnedLegacyMic mic) async {
+    final granted = await (_phoneMicPermissionChecker?.call() ??
+        Permission.microphone.request().then((status) => status.isGranted));
+    if (!granted || !mic.isCurrent || !identical(_ownedPhoneMic, mic)) {
+      await mic.stop();
+      throw StateError('speech profile microphone admission unavailable');
+    }
+    await mic.start(
+      onByteReceived: (bytes) {
         if (bytes.isEmpty) return;
-
-        // Store audio frames for speech profile upload
         audioStorage.frames.add(bytes.toList());
-
-        // Send to transcription socket
-        if (_socket?.state == SocketServiceState.connected) {
-          _socket?.send(bytes);
-        }
+        if (_socket?.state == SocketServiceState.connected) _socket?.send(bytes);
       },
-      onRecording: () {
-        Logger.debug('Phone mic recording started');
-        updateStartedRecording(true);
-      },
-      onStop: () {
-        Logger.debug('Phone mic recording stopped');
-      },
+      onRecording: () => updateStartedRecording(true),
     );
   }
 
-  /// Stop phone microphone streaming
-  void _stopPhoneMicStreaming() {
-    if (usePhoneMic) {
-      Logger.debug('Stopping phone mic streaming');
-      ServiceManager.instance().mic.stop();
-    }
+  Future<void> _stopPhoneMicStreaming() async {
+    _phoneMicGeneration++;
+    final mic = _ownedPhoneMic;
+    await mic?.stop();
+    if (identical(_ownedPhoneMic, mic)) _ownedPhoneMic = null;
   }
 
   _handleCompletion() async {
@@ -253,7 +264,7 @@ class SpeechProfileProvider extends ChangeNotifier
       uploadingProfile = true;
       notifyListeners();
 
-      _stopPhoneMicStreaming();
+      await _stopPhoneMicStreaming();
 
       await _socket?.stop(reason: 'finalizing');
       forceCompletionTimer?.cancel();
@@ -420,7 +431,7 @@ class SpeechProfileProvider extends ChangeNotifier
     _bleBytesStream?.cancel();
     forceCompletionTimer?.cancel();
 
-    _stopPhoneMicStreaming();
+    await _stopPhoneMicStreaming();
 
     segments.clear();
     text = '';
@@ -440,12 +451,15 @@ class SpeechProfileProvider extends ChangeNotifier
 
   @override
   void dispose() {
+    unawaited(_stopPhoneMicStreaming().catchError((Object error) {
+      Logger.error('Speech profile physical microphone teardown remains unconfirmed: $error');
+    }));
     connectionStateListener?.cancel();
     _bleBytesStream?.cancel();
     forceCompletionTimer?.cancel();
     _finalizedCallback = null;
     _socket?.unsubscribe(this);
-    ServiceManager.instance().device.unsubscribe(this);
+    if (ServiceManager.isInitialized) ServiceManager.instance().device.unsubscribe(this);
 
     super.dispose();
   }

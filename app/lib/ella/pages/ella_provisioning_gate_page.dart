@@ -242,24 +242,67 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
         final isBlocked = provider.state == EllaProvisioningState.blocked;
         final canRetry =
             provider.state == EllaProvisioningState.degraded || (isBlocked && (provider.receipt?.retryable ?? false));
-        final timedOut = provider.errorCode == 'provisioning_timeout';
+        final timedOut = provider.errorCode == 'provisioning_timeout' || provider.automaticPollingExhausted;
         final updateRequired = provider.errorCode == 'upgrade_required';
+        final enrichmentUnavailable = provider.failurePresentationCode == 'account_enrichment_worker_unavailable' ||
+            (provider.errorCode == 'provisioning_timeout' &&
+                provider.receipt?.errorCode == 'account_enrichment_worker_unavailable');
 
+        final specificFailure = switch (provider.failurePresentationCode) {
+          'authentication_refresh_unavailable' || 'auth_required' => 'auth',
+          'account_readiness_unavailable' => 'account',
+          'invalid_provisioning_response' => 'response',
+          'quota_exceeded' => 'throttle',
+          'provider_unavailable' => 'backend',
+          'request_timeout' => 'timeout',
+          'network_unavailable' => 'network',
+          'transport_unavailable' => 'unknown',
+          _ => null,
+        };
+        final failureTitle = switch (specificFailure) {
+          'auth' => context.l10n.ellaSetupAuthTitle,
+          'account' => context.l10n.ellaSetupAccountTitle,
+          'response' => context.l10n.ellaSetupResponseTitle,
+          'throttle' => context.l10n.ellaSetupThrottleTitle,
+          'backend' => context.l10n.ellaSetupBackendTitle,
+          'timeout' => context.l10n.ellaSetupTimeoutTitle,
+          'network' => context.l10n.ellaProvisioningConnectionTitle,
+          'unknown' => context.l10n.ellaSetupUnknownTitle,
+          _ => null,
+        };
+        final failureBody = switch (specificFailure) {
+          'auth' => context.l10n.ellaSetupAuthBody,
+          'account' => context.l10n.ellaSetupAccountBody,
+          'response' => context.l10n.ellaSetupResponseBody,
+          'throttle' => context.l10n.ellaSetupThrottleBody,
+          'backend' => context.l10n.ellaSetupBackendBody,
+          'timeout' => context.l10n.ellaSetupTimeoutBody,
+          'network' => context.l10n.ellaProvisioningConnectionBody,
+          'unknown' => context.l10n.ellaSetupUnknownBody,
+          _ => null,
+        };
         final title = switch (provider.state) {
           EllaProvisioningState.idle || EllaProvisioningState.checking => context.l10n.settingUp,
           EllaProvisioningState.queued || EllaProvisioningState.provisioning => context.l10n.settingUp,
+          EllaProvisioningState.degraded when enrichmentUnavailable => context.l10n.ellaProvisioningServiceTitle,
+          EllaProvisioningState.degraded when failureTitle != null => failureTitle,
           EllaProvisioningState.degraded when timedOut => context.l10n.ellaProvisioningTimeoutTitle,
           EllaProvisioningState.degraded => context.l10n.ellaProvisioningConnectionTitle,
           EllaProvisioningState.blocked when updateRequired => context.l10n.ellaClientUpdateRequiredTitle,
+          EllaProvisioningState.blocked when failureTitle != null => failureTitle,
           EllaProvisioningState.blocked => context.l10n.ellaProvisioningPausedTitle,
           EllaProvisioningState.ready => context.l10n.settingUp,
         };
         final body = switch (provider.state) {
           EllaProvisioningState.idle || EllaProvisioningState.checking => context.l10n.pleaseWait,
           EllaProvisioningState.queued || EllaProvisioningState.provisioning => context.l10n.pleaseWait,
+          EllaProvisioningState.degraded when enrichmentUnavailable =>
+            timedOut ? context.l10n.ellaProvisioningServiceTimeoutBody : context.l10n.ellaProvisioningServiceBody,
+          EllaProvisioningState.degraded when failureBody != null => failureBody,
           EllaProvisioningState.degraded when timedOut => context.l10n.ellaProvisioningTimeoutBody,
           EllaProvisioningState.degraded => context.l10n.ellaProvisioningConnectionBody,
           EllaProvisioningState.blocked when updateRequired => context.l10n.ellaClientUpdateRequiredBody,
+          EllaProvisioningState.blocked when failureBody != null => failureBody,
           EllaProvisioningState.blocked => context.l10n.ellaProvisioningPausedBody,
           EllaProvisioningState.ready => context.l10n.pleaseWait,
         };
@@ -300,6 +343,11 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
                         Text(title, style: EllaTextStyles.display, textAlign: TextAlign.center),
                         const SizedBox(height: 12),
                         Text(body, style: EllaTextStyles.secondary, textAlign: TextAlign.center),
+                        if (timedOut && specificFailure != null) ...[
+                          const SizedBox(height: 12),
+                          Text(context.l10n.ellaSetupChecksStopped,
+                              style: EllaTextStyles.secondary, textAlign: TextAlign.center),
+                        ],
                         if (provider.supportCode.isNotEmpty) ...[
                           const SizedBox(height: 20),
                           Semantics(

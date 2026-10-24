@@ -37,6 +37,8 @@ import 'package:omi/utils/streaming_text_coalescer.dart';
 
 bool get _isEllaApp => true;
 
+enum _HistoryRefreshEvent { entered, fetchStarted, success, failure, superseded }
+
 typedef ChatAppsRetriever = Future<List<App>> Function();
 typedef EllaChatStreamSender = Stream<ServerMessageChunk> Function(
   String text, {
@@ -48,6 +50,11 @@ typedef EllaChatStreamSender = Stream<ServerMessageChunk> Function(
 typedef EllaChatHistoryFetcher = Future<EllaServiceResult<EllaChatHistoryPage>> Function({
   required int limit,
   required DateTime? before,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
+typedef EllaChatKeysetFetcher = Future<EllaServiceResult<EllaChatHistoryPage>> Function({
+  required String? cursor,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
 });
@@ -106,6 +113,8 @@ class MessageProvider extends ChangeNotifier {
     ActiveAccountAuthorityProvider? activeAuthority,
     EllaChatStreamSender? ellaChatStreamSender,
     EllaChatHistoryFetcher? ellaChatHistoryFetcher,
+    EllaChatKeysetFetcher? ellaChatKeysetFetcher,
+    this.historyPaginationEnabled = const bool.fromEnvironment('ELLA_CHAT_HISTORY_KEYSET'),
     EllaChatTurnLookup? ellaChatTurnLookup,
     VoiceChatStreamSender? voiceChatStreamSender,
     VoiceTempFileSaver? voiceTempFileSaver,
@@ -119,6 +128,7 @@ class MessageProvider extends ChangeNotifier {
         _activeAuthority = activeAuthority ?? WalOwnerAuthority.operationEntry,
         _ellaChatStreamSender = ellaChatStreamSender ?? sendEllaChatStream,
         _ellaChatHistoryFetcher = ellaChatHistoryFetcher ?? _fetchEllaChatHistory,
+        _ellaChatKeysetFetcher = ellaChatKeysetFetcher ?? _fetchKeysetHistory,
         _ellaChatTurnLookup = ellaChatTurnLookup ?? _lookupEllaChatTurn,
         _voiceChatStreamSender = voiceChatStreamSender ?? sendVoiceMessageStreamServer,
         _voiceTempFileSaver = voiceTempFileSaver ?? FileUtils.saveAudioBytesToTempFile,
@@ -141,6 +151,317 @@ class MessageProvider extends ChangeNotifier {
   final ActiveAccountAuthorityProvider _activeAuthority;
   final EllaChatStreamSender _ellaChatStreamSender;
   final EllaChatHistoryFetcher _ellaChatHistoryFetcher;
+  final EllaChatKeysetFetcher _ellaChatKeysetFetcher;
+  final bool historyPaginationEnabled;
+  final Set<EllaAccountCommitLease> _historyLeases = {};
+
+  @override
+  void dispose() {
+    _firstPageDiagnosticLease?.close();
+    _firstPageDiagnosticLease = null;
+    _firstPageDiagnostic = null;
+    _historyRefreshGeneration++;
+    _retireEarlierHistory();
+    for (final lease in _historyLeases.toList()) {
+      lease.close();
+    }
+    _historyLeases.clear();
+    super.dispose();
+  }
+
+  // Local closed metadata only: no text, identifiers, cursor values or exceptions.
+  Map<String, Object?>? _earlierPageDiagnostic;
+  EllaAccountCommitLease? _earlierPageDiagnosticLease;
+
+  Map<String, Object?> get _currentEarlierPageDiagnostic => {
+        'disposition': 'not_observed_current_account',
+        'response_valid': null,
+        'adopted': null,
+        'version': null,
+        'raw_row_count': null,
+        'parsed_row_count': null,
+        'display_row_count': null,
+        'has_more': null,
+        'cursor_present': null,
+        'added_timeline_row_count': null,
+        'failure_kind': null,
+        'status': null,
+        if (_earlierPageDiagnosticLease?.isCurrent == true) ...?_earlierPageDiagnostic,
+      };
+
+  void _setEarlierPageDiagnostic(
+    EllaAccountCommitLease lease,
+    int request,
+    String disposition, {
+    EllaChatHistoryPage? page,
+    ClientApiFailure? failure,
+    int? addedRows,
+  }) {
+    EllaAccountCommitLease? diagnosticLease;
+    try {
+      if (!lease.isCurrent || request != _olderHistoryGeneration) return;
+      diagnosticLease = EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: () {});
+      if (!lease.isCurrent || diagnosticLease?.isCurrent != true || request != _olderHistoryGeneration) {
+        diagnosticLease?.close();
+        return;
+      }
+      _earlierPageDiagnosticLease?.close();
+      _earlierPageDiagnosticLease = diagnosticLease;
+      _earlierPageDiagnostic = {
+        'request_generation': request,
+        'disposition': disposition,
+        'response_valid': page == null ? (failure == null ? null : false) : true,
+        'adopted': disposition == 'adopted',
+        'version': page?.paginationVersion,
+        'raw_row_count': page?.rawRowCount,
+        'parsed_row_count': page?.messages.length,
+        'display_row_count': page?.messages.where((message) => !message.isCanonicalOverheardTranscript).length,
+        'has_more': page?.hasMore,
+        'cursor_present': page == null ? null : page.nextCursor != null,
+        'added_timeline_row_count': addedRows,
+        'failure_kind': failure?.kind.name,
+        'status': failure?.statusCode != null && failure!.statusCode! >= 100 && failure.statusCode! <= 599
+            ? failure.statusCode
+            : null,
+      };
+    } catch (_) {
+      diagnosticLease?.close();
+      // Observation must never change timeline/cursor/failure ownership.
+    }
+  }
+
+  Map<String, Object?>? _firstPageDiagnostic;
+  EllaAccountCommitLease? _firstPageDiagnosticLease;
+  Map<String, Object?> get historyAdmissionDiagnostic => Map.unmodifiable({
+        'keyset_enabled': historyPaginationEnabled,
+        'disposition': 'not_observed_current_account',
+        'response_valid': null,
+        'version': null,
+        'raw_row_count': null,
+        'parsed_row_count': null,
+        'display_row_count': null,
+        'has_more': null,
+        'cursor_present': null,
+        'adopted': null,
+        if (_firstPageDiagnosticLease?.isCurrent == true) ...?_firstPageDiagnostic,
+        'earlier_page': Map<String, Object?>.unmodifiable(_currentEarlierPageDiagnostic),
+        'current_timeline_row_count':
+            (_firstPageDiagnosticLease?.isCurrent == true || _earlierPageDiagnosticLease?.isCurrent == true)
+                ? messages.length
+                : null,
+        'current_display_timeline_row_count':
+            (_firstPageDiagnosticLease?.isCurrent == true || _earlierPageDiagnosticLease?.isCurrent == true)
+                ? messages.where((message) => !message.isCanonicalOverheardTranscript).length
+                : null,
+        'loading_first': isLoadingMessages,
+        'loading_earlier': isLoadingEarlierHistory,
+        'can_load_earlier': canLoadEarlierHistory,
+        'earlier_control': showsEarlierHistoryControl,
+      });
+  void _setFirstPageDiagnostic(
+    EllaAccountCommitLease lease,
+    int request,
+    String disposition, {
+    EllaChatHistoryPage? page,
+    ClientApiFailure? failure,
+  }) {
+    _firstPageDiagnosticLease?.close();
+    _firstPageDiagnosticLease = EllaAccountCommitBarrier.begin(
+      authorityProvider: _activeAuthority,
+      onInvalidated: () {},
+    );
+    if (!lease.isCurrent || _firstPageDiagnosticLease?.isCurrent != true) {
+      _firstPageDiagnosticLease?.close();
+      _firstPageDiagnosticLease = null;
+      _firstPageDiagnostic = null;
+      return;
+    }
+    _firstPageDiagnostic = {
+      'request_generation': request,
+      'disposition': disposition,
+      'response_valid': page != null,
+      'version': page?.paginationVersion,
+      'raw_row_count': page?.rawRowCount,
+      'parsed_row_count': page?.messages.length,
+      'display_row_count': page?.messages.where((message) => !message.isCanonicalOverheardTranscript).length,
+      'has_more': page?.hasMore,
+      'cursor_present': page == null ? null : page.nextCursor != null,
+      'adopted': disposition == 'adopted',
+      'timeline_row_count': messages.length,
+      'display_timeline_row_count': messages.where((message) => !message.isCanonicalOverheardTranscript).length,
+      'failure_kind': failure?.kind.name,
+      'status': failure?.statusCode != null && failure!.statusCode! >= 100 && failure.statusCode! <= 599
+          ? failure.statusCode
+          : null,
+    };
+  }
+
+  String? _nextHistoryCursor;
+  int _olderHistoryGeneration = 0;
+  int _sendTimelineGeneration = 0;
+  bool _loadingEarlierHistory = false;
+  ClientApiFailure? _earlierHistoryFailure;
+  bool _historyCursorNeedsRefresh = false;
+  bool get isLoadingEarlierHistory => _loadingEarlierHistory;
+  ClientApiFailure? get earlierHistoryFailure => _earlierHistoryFailure;
+  bool get historyCursorNeedsRefresh => _historyCursorNeedsRefresh;
+  bool get showsEarlierHistoryControl =>
+      historyPaginationEnabled &&
+      (_nextHistoryCursor != null || _earlierHistoryFailure != null || _loadingEarlierHistory);
+  bool get canLoadEarlierHistory =>
+      historyPaginationEnabled &&
+      !isLoadingMessages &&
+      !sendingMessage &&
+      !showTypingIndicator &&
+      !_loadingEarlierHistory &&
+      !_historyCursorNeedsRefresh &&
+      (_earlierHistoryFailure == null || _earlierHistoryFailure!.retryable) &&
+      _nextHistoryCursor != null;
+  int get historyTimelineGeneration => _historyRefreshGeneration;
+
+  static Future<EllaServiceResult<EllaChatHistoryPage>> _fetchKeysetHistory({
+    required String? cursor,
+    required String expectedAuthenticatedUid,
+    required ExactAccountAuthorityVerifier exactAuthority,
+  }) =>
+      fetchEllaChatHistoryPage(
+        limit: 50,
+        keyset: true,
+        cursor: cursor,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
+      );
+
+  void _retireEarlierHistory() {
+    _earlierPageDiagnosticLease?.close();
+    _earlierPageDiagnosticLease = null;
+    _earlierPageDiagnostic = null;
+    _olderHistoryGeneration++;
+    _nextHistoryCursor = null;
+    _loadingEarlierHistory = false;
+    _earlierHistoryFailure = null;
+    _historyCursorNeedsRefresh = false;
+  }
+
+  List<ServerMessage> _mergeKeysetHistory(List<ServerMessage> incoming, {required bool latest}) {
+    final result = <ServerMessage>[];
+    final seen = <String>{};
+    final retained = messages
+        .where((m) => m.canonicalEventKey != null || m.clientDeliveryState != null || m.fromVoice == true)
+        .toList();
+    String identity(ServerMessage m) =>
+        m.canonicalEventKey == null ? 'local:${m.id}' : 'canonical:${m.canonicalEventKey}';
+    final priority = latest ? [...incoming, ...retained] : [...messages, ...incoming];
+    final preferred = <String, ServerMessage>{};
+    for (final message in priority) {
+      preferred.putIfAbsent(identity(message), () => message);
+    }
+    // Earlier pages precede current rows even when legacy display fields tie.
+    // Identity preference is separate: newest refresh wins, older page cannot
+    // overwrite an existing row or any active local delivery state.
+    final chronological = latest ? [...retained, ...incoming] : [...incoming, ...messages];
+    for (final message in chronological) {
+      final exact = identity(message);
+      if (seen.add(exact)) result.add(preferred[exact]!);
+    }
+    final originalOrder = {for (var i = 0; i < result.length; i++) result[i]: i};
+    result.sort((a, b) {
+      final compared = compareServerMessagesChronologically(a, b);
+      return compared == 0 ? originalOrder[a]!.compareTo(originalOrder[b]!) : compared;
+    });
+    return result;
+  }
+
+  Future<bool> loadEarlierMessages() async {
+    if (!canLoadEarlierHistory) return false;
+    final lease = _beginAccountCommit();
+    if (lease == null || !canLoadEarlierHistory) {
+      lease?.close();
+      return false;
+    }
+    _historyLeases.add(lease);
+    final generation = _operationGeneration;
+    final historyGeneration = _historyRefreshGeneration;
+    final pageGeneration = ++_olderHistoryGeneration;
+    final cursor = _nextHistoryCursor!;
+    final sendGeneration = _sendTimelineGeneration;
+    final originalTimeline = List<ServerMessage>.of(messages);
+    bool timelineAvailable() =>
+        !sendingMessage &&
+        !showTypingIndicator &&
+        sendGeneration == _sendTimelineGeneration &&
+        messages.length == originalTimeline.length &&
+        List.generate(messages.length, (i) => identical(messages[i], originalTimeline[i])).every((same) => same);
+    bool current() =>
+        _canCommitHistory(lease, generation, historyGeneration) && pageGeneration == _olderHistoryGeneration;
+    try {
+      _loadingEarlierHistory = true;
+      _earlierHistoryFailure = null;
+      _setEarlierPageDiagnostic(lease, pageGeneration, 'fetch_started');
+      notifyListeners();
+      if (!current()) return false;
+      if (!timelineAvailable()) {
+        _setEarlierPageDiagnostic(lease, pageGeneration, 'not_adopted_timeline_changed');
+        return false;
+      }
+      final response = await _ellaChatKeysetFetcher(
+        cursor: cursor,
+        expectedAuthenticatedUid: lease.uid,
+        exactAuthority: lease,
+      );
+      if (!current()) return false;
+      if (!timelineAvailable()) {
+        _setEarlierPageDiagnostic(lease, pageGeneration, 'not_adopted_timeline_changed');
+        return false;
+      }
+      final page = response.value;
+      if (response.isFailure ||
+          page == null ||
+          !page.isKeyset ||
+          (page.hasMore ? page.nextCursor == null || page.nextCursor == cursor : page.nextCursor != null)) {
+        final failure = response.failure ?? const ClientApiFailure(ClientApiFailureKind.invalidResponse);
+        _earlierHistoryFailure = failure;
+        _setEarlierPageDiagnostic(lease, pageGeneration, 'rejected_response', failure: failure);
+        // Conflict/expiry or rejected continuation needs an explicit latest-page
+        // refresh. Never silently fall back or repeat the same invalid cursor.
+        if (failure.statusCode == 403) _nextHistoryCursor = null;
+        if (failure.kind == ClientApiFailureKind.invalidResponse ||
+            failure.statusCode == 409 ||
+            failure.statusCode == 422) {
+          _historyCursorNeedsRefresh = true;
+          _nextHistoryCursor = null;
+        }
+        return false;
+      }
+      final merged = _mergeKeysetHistory(page.messages, latest: false);
+      SharedPreferencesUtil().cachedMessages = merged;
+      if (!current()) return false;
+      messages = merged;
+      _nextHistoryCursor = page.nextCursor;
+      _setEarlierPageDiagnostic(
+        lease,
+        pageGeneration,
+        'adopted',
+        page: page,
+        addedRows: merged.length - originalTimeline.length,
+      );
+      return true;
+    } catch (_) {
+      if (current()) {
+        _earlierHistoryFailure = const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
+        _setEarlierPageDiagnostic(lease, pageGeneration, 'request_failed', failure: _earlierHistoryFailure);
+      }
+      return false;
+    } finally {
+      if (current()) {
+        _loadingEarlierHistory = false;
+        notifyListeners();
+      }
+      _historyLeases.remove(lease);
+      lease.close();
+    }
+  }
+
   final EllaChatTurnLookup _ellaChatTurnLookup;
   final VoiceChatStreamSender _voiceChatStreamSender;
   final VoiceTempFileSaver _voiceTempFileSaver;
@@ -151,6 +472,10 @@ class MessageProvider extends ChangeNotifier {
   final AiConsentEnsurer? _aiConsentEnsurer;
   final V2VTurnPersister _v2vTurnPersister;
   int _operationGeneration = 0;
+  int _historyRefreshGeneration = 0;
+
+  /// Local editor lifetime boundary; ordinary history updates do not retire drafts.
+  int get localDraftResetGeneration => _operationGeneration;
 
   static Future<List<App>> _retrieveInstalledChatApps() async {
     final result = await retrieveAppsSearch(installedApps: true, limit: 50);
@@ -192,10 +517,14 @@ class MessageProvider extends ChangeNotifier {
   bool sendingMessage = false;
   double aiStreamProgress = 1.0;
   ClientApiFailure? _lastStreamFailure;
+  ClientApiFailure? _lastHistoryFailure;
 
   ClientApiFailure? get lastStreamFailure => _lastStreamFailure;
+  ClientApiFailure? get lastHistoryFailure => _lastHistoryFailure;
   bool get canRetryLastMessage => messages.any(_isFailedOutgoingMessage);
-  bool get requiresClientUpdate => _lastStreamFailure?.kind == ClientApiFailureKind.updateRequired;
+  bool get requiresClientUpdate =>
+      _lastStreamFailure?.kind == ClientApiFailureKind.updateRequired ||
+      _lastHistoryFailure?.kind == ClientApiFailureKind.updateRequired;
 
   String firstTimeLoadingText = '';
 
@@ -222,6 +551,11 @@ class MessageProvider extends ChangeNotifier {
 
   void reset() {
     _operationGeneration++;
+    _firstPageDiagnosticLease?.close();
+    _firstPageDiagnosticLease = null;
+    _firstPageDiagnostic = null;
+    _historyRefreshGeneration++;
+    _retireEarlierHistory();
     messages = [];
     isLoadingMessages = false;
     hasCachedMessages = false;
@@ -230,6 +564,7 @@ class MessageProvider extends ChangeNotifier {
     sendingMessage = false;
     aiStreamProgress = 1.0;
     _lastStreamFailure = null;
+    _lastHistoryFailure = null;
     firstTimeLoadingText = '';
     chatApps = [];
     isLoadingChatApps = false;
@@ -278,6 +613,31 @@ class MessageProvider extends ChangeNotifier {
   bool _canCommit(EllaAccountCommitLease lease, int generation) =>
       generation == _operationGeneration && lease.isCurrent;
 
+  bool _canCommitHistory(EllaAccountCommitLease lease, int generation, int historyGeneration) =>
+      historyGeneration == _historyRefreshGeneration && _canCommit(lease, generation);
+
+  void _recordHistoryRefresh(
+    int generation,
+    int historyGeneration,
+    _HistoryRefreshEvent event, {
+    ClientApiFailure? failure,
+  }) {
+    final status = failure?.statusCode;
+    final safeStatus = status != null && status >= 100 && status <= 599 ? status : null;
+    try {
+      // Closed metadata only: never log account IDs, message text, backend
+      // payloads/codes, URLs, credentials, or exception strings here.
+      Logger.debug(
+        '[EllaChatHistory] binding_generation=$generation request=$historyGeneration '
+        'event=${event.name} failure_kind=${failure?.kind.name ?? 'none'} '
+        'status=${safeStatus ?? 'unknown'} retryable=${failure?.retryable ?? 'unknown'} '
+        'utc=${DateTime.now().toUtc().toIso8601String()}',
+      );
+    } catch (_) {
+      // Diagnostics cannot alter hydration or account fencing.
+    }
+  }
+
   void _setStreamFailure(ClientApiFailure failure) {
     _lastStreamFailure = failure;
     notifyListeners();
@@ -295,9 +655,7 @@ class MessageProvider extends ChangeNotifier {
   ServerMessage _prepareOutgoingMessage(String text, String? localMessageId) {
     final existing = localMessageId == null
         ? null
-        : messages.firstWhereOrNull(
-            (message) => message.id == localMessageId && message.sender == MessageSender.human,
-          );
+        : messages.firstWhereOrNull((message) => message.id == localMessageId && message.sender == MessageSender.human);
     final outgoing = existing ?? addMessageLocally(text);
     outgoing.canonicalTurnId ??= outgoing.id;
     outgoing.clientDeliveryState = ClientMessageDeliveryState.pending;
@@ -320,10 +678,7 @@ class MessageProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  List<ServerMessage> _mergeHistoryWithUnsentMessages(
-    List<ServerMessage> history,
-    List<ServerMessage> localUnsent,
-  ) {
+  List<ServerMessage> _mergeHistoryWithUnsentMessages(List<ServerMessage> history, List<ServerMessage> localUnsent) {
     final merged = List<ServerMessage>.of(history);
     final serverIds = history.map((message) => message.id).toSet();
     final canonicalHumanTurns = history
@@ -460,11 +815,13 @@ class MessageProvider extends ChangeNotifier {
   }
 
   void setSendingMessage(bool value) {
+    if (value && !sendingMessage) _sendTimelineGeneration++;
     sendingMessage = value;
     notifyListeners();
   }
 
   void setShowTypingIndicator(bool value) {
+    if (value && !showTypingIndicator) _sendTimelineGeneration++;
     showTypingIndicator = value;
     notifyListeners();
   }
@@ -736,54 +1093,109 @@ class MessageProvider extends ChangeNotifier {
   Future refreshMessages({bool dropdownSelected = false}) async {
     final lease = _beginAccountCommit();
     if (lease == null) return;
+    _historyLeases.add(lease);
     final generation = _operationGeneration;
+    final historyGeneration = ++_historyRefreshGeneration;
+    _retireEarlierHistory();
+    _setFirstPageDiagnostic(lease, historyGeneration, 'fetching');
+    _recordHistoryRefresh(generation, historyGeneration, _HistoryRefreshEvent.entered);
     try {
       setLoadingMessages(true);
+      if (!_canCommitHistory(lease, generation, historyGeneration)) return;
       if (SharedPreferencesUtil().demoMode) {
         messages = DemoFixtures.chatMessages();
         setHasCachedMessages(true);
+        if (!_canCommitHistory(lease, generation, historyGeneration)) return;
         setLoadingMessages(false);
         notifyListeners();
         return;
       }
       if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
         setHasCachedMessages(true);
+        if (!_canCommitHistory(lease, generation, historyGeneration)) return;
       }
 
       // Ella mode: use local cache first, fall back to server history API.
       final isEllaApp = _isEllaApp; // TODO: replace with flavor check
       if (isEllaApp) {
         final cached = SharedPreferencesUtil().cachedMessages;
-        final localUnsentById = <String, ServerMessage>{
-          for (final message in [...messages, ...cached])
-            if (message.sender == MessageSender.human && message.clientDeliveryState != null) message.id: message,
-        };
-        if (cached.isNotEmpty) {
+        if (cached.isNotEmpty && !sendingMessage && !showTypingIndicator) {
           messages = cached;
           setHasCachedMessages(true);
+          if (!_canCommitHistory(lease, generation, historyGeneration)) return;
         }
 
+        final timelineAtRequest = List<ServerMessage>.of(messages);
+        final deliveryStatesAtRequest = messages.map((message) => message.clientDeliveryState).toList(growable: false);
+        final requestStartedDuringSend = sendingMessage || showTypingIndicator;
         // Always try to rehydrate from server so a bad local/demo cache from a
         // previous TestFlight cannot mask the real account timeline.
-        final historyResult = await _ellaChatHistoryFetcher(
-          limit: 50,
-          before: null,
-          expectedAuthenticatedUid: lease.uid,
-          exactAuthority: lease,
-        );
-        if (!_canCommit(lease, generation)) return;
-        if (historyResult.isFailure) {
-          _setStreamFailure(
-            historyResult.failure ?? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true),
+        _recordHistoryRefresh(generation, historyGeneration, _HistoryRefreshEvent.fetchStarted);
+        final historyResult = historyPaginationEnabled
+            ? await _ellaChatKeysetFetcher(cursor: null, expectedAuthenticatedUid: lease.uid, exactAuthority: lease)
+            : await _ellaChatHistoryFetcher(
+                limit: 50,
+                before: null,
+                expectedAuthenticatedUid: lease.uid,
+                exactAuthority: lease,
+              );
+        if (!_canCommitHistory(lease, generation, historyGeneration)) {
+          if (_canCommit(lease, generation)) {
+            _recordHistoryRefresh(
+              generation,
+              historyGeneration,
+              _HistoryRefreshEvent.superseded,
+              failure: historyResult.failure,
+            );
+          }
+          return;
+        }
+        if (historyResult.isFailure || (historyPaginationEnabled && historyResult.value?.isKeyset != true)) {
+          _lastHistoryFailure =
+              historyResult.failure ?? const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
+          _setFirstPageDiagnostic(lease, historyGeneration, 'rejected_response', failure: _lastHistoryFailure);
+          _recordHistoryRefresh(
+            generation,
+            historyGeneration,
+            _HistoryRefreshEvent.failure,
+            failure: _lastHistoryFailure,
           );
         } else {
-          _lastStreamFailure = null;
-          final history = historyResult.value?.messages ?? const <ServerMessage>[];
-          messages = _mergeHistoryWithUnsentMessages(history, localUnsentById.values.toList(growable: false));
-          SharedPreferencesUtil().cachedMessages = messages;
-          setHasCachedMessages(messages.isNotEmpty);
+          _lastHistoryFailure = null;
+          _recordHistoryRefresh(generation, historyGeneration, _HistoryRefreshEvent.success);
+          // A live send owns its assistant placeholder and index until its
+          // terminal response. A concurrent history refresh must not replace
+          // or reorder that timeline (including a voice send).
+          final timelineUnchanged = messages.length == timelineAtRequest.length &&
+              Iterable<int>.generate(messages.length).every(
+                (index) =>
+                    identical(messages[index], timelineAtRequest[index]) &&
+                    messages[index].clientDeliveryState == deliveryStatesAtRequest[index],
+              );
+          if (!requestStartedDuringSend && !sendingMessage && !showTypingIndicator && timelineUnchanged) {
+            final localUnsentById = <String, ServerMessage>{
+              for (final message in [...SharedPreferencesUtil().cachedMessages, ...messages])
+                if (message.sender == MessageSender.human && message.clientDeliveryState != null) message.id: message,
+            };
+            final history = historyResult.value?.messages ?? const <ServerMessage>[];
+            messages = historyPaginationEnabled
+                ? _mergeKeysetHistory(history, latest: true)
+                : _mergeHistoryWithUnsentMessages(history, localUnsentById.values.toList(growable: false));
+            SharedPreferencesUtil().cachedMessages = messages;
+            if (historyPaginationEnabled) _nextHistoryCursor = historyResult.value!.nextCursor;
+            _setFirstPageDiagnostic(lease, historyGeneration, 'adopted', page: historyResult.value);
+            setHasCachedMessages(messages.isNotEmpty);
+            if (!_canCommitHistory(lease, generation, historyGeneration)) return;
+          } else {
+            _setFirstPageDiagnostic(
+              lease,
+              historyGeneration,
+              requestStartedDuringSend || sendingMessage || showTypingIndicator ? 'deferred_send' : 'deferred_timeline',
+              page: historyResult.value,
+            );
+          }
         }
-        if (!sendingMessage) {
+        if (!sendingMessage && !showTypingIndicator) {
           for (final message in messages) {
             if (message.clientDeliveryState == ClientMessageDeliveryState.pending) {
               message.clientDeliveryState = ClientMessageDeliveryState.failed;
@@ -791,7 +1203,8 @@ class MessageProvider extends ChangeNotifier {
           }
           SharedPreferencesUtil().cachedMessages = messages;
         }
-        messages.sort(compareServerMessagesChronologically);
+        if (!historyPaginationEnabled && !sendingMessage && !showTypingIndicator)
+          messages.sort(compareServerMessagesChronologically);
         setLoadingMessages(false);
         notifyListeners();
         return;
@@ -801,7 +1214,7 @@ class MessageProvider extends ChangeNotifier {
       // Preserve locally-injected voice messages before server fetch
       final localVoiceMessages = messages.where((m) => m.fromVoice == true).toList();
       messages = await getMessagesFromServer(dropdownSelected: dropdownSelected);
-      if (!_canCommit(lease, generation)) return;
+      if (!_canCommitHistory(lease, generation, historyGeneration)) return;
       if (messages.isEmpty) {
         messages = SharedPreferencesUtil().cachedMessages;
       } else {
@@ -818,6 +1231,7 @@ class MessageProvider extends ChangeNotifier {
       setLoadingMessages(false);
       notifyListeners();
     } finally {
+      _historyLeases.remove(lease);
       lease.close();
     }
   }
@@ -1326,9 +1740,7 @@ class MessageProvider extends ChangeNotifier {
       );
       if (!_canCommit(lease, generation)) return false;
       if (lookupResult.isFailure || lookupResult.value == null) {
-        _setStreamFailure(
-          lookupResult.failure ?? const ClientApiFailure(ClientApiFailureKind.invalidResponse),
-        );
+        _setStreamFailure(lookupResult.failure ?? const ClientApiFailure(ClientApiFailureKind.invalidResponse));
         return false;
       }
 

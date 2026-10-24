@@ -138,3 +138,73 @@ class EllaSourceText extends StatelessWidget {
     );
   }
 }
+
+/// Attribution from the selected saved version, not from title words or job
+/// status. A connector version is not evidence of Hermes/model execution or
+/// canonical-memory publication.
+bool _hasSelectedSummaryKind(ServerConversation conversation, String kind, {String? source}) {
+  if (conversation.status != ConversationStatus.completed || conversation.deleted || conversation.discarded)
+    return false;
+  final active = conversation.summaryVersionActiveAuthority ?? conversation.activeSummaryVersionId;
+  final versions = conversation.summaryVersions;
+  if (active is! String || active.isEmpty || versions is! List) return false;
+  final ids = <String>{};
+  final selected = <Map>[];
+  for (final version in versions) {
+    if (version is! Map ||
+        version['id'] is! String ||
+        (version['id'] as String).isEmpty ||
+        !ids.add(version['id'] as String) ||
+        version['is_active'] is! bool ||
+        (version['conversation_id'] != null && version['conversation_id'] != conversation.id)) return false;
+    if (version['is_active'] == true) selected.add(version);
+  }
+  return selected.length == 1 &&
+      selected.single['id'] == active &&
+      selected.single['kind'] == kind &&
+      (source == null || selected.single['source'] == source) &&
+      selected.single['title'] == conversation.structured.title &&
+      selected.single['overview'] == conversation.structured.overview;
+}
+
+bool hasCurrentConnectorSummary(ServerConversation conversation) =>
+    _hasSelectedSummaryKind(conversation, 'mcp_enriched');
+
+/// Stock attribution requires the exact active saved row and matching displayed
+/// body. A title marker or an in-progress generation is not a saved version.
+bool hasCurrentStockSummary(ServerConversation conversation) =>
+    _hasSelectedSummaryKind(conversation, 'generated', source: 'omi');
+
+bool hasCurrentSummarySource(ServerConversation conversation) =>
+    hasCurrentHermesSummary(conversation) ||
+    hasCurrentConnectorSummary(conversation) ||
+    hasCurrentStockSummary(conversation);
+
+class ActiveSummarySource extends StatelessWidget {
+  const ActiveSummarySource({super.key, required this.conversation, this.showVersion = false});
+  final ServerConversation conversation;
+  final bool showVersion;
+  @override
+  Widget build(BuildContext context) {
+    final hermes = hasCurrentHermesSummary(conversation);
+    final connector = hasCurrentConnectorSummary(conversation);
+    final stock = hasCurrentStockSummary(conversation);
+    if (!hermes && !connector && !stock) return const SizedBox.shrink();
+    final version = conversation.activeSummaryVersionId!;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      if (hermes)
+        HermesSummarySource(conversation: conversation)
+      else
+        Tooltip(
+            message: stock
+                ? 'This saved summary was generated from the conversation. Version: $version'
+                : 'The selected saved summary version came from a connector. Version: $version',
+            child: Text(stock ? 'Conversation summary' : 'Connector summary',
+                key: Key('${stock ? 'stock' : 'connector'}-summary-source-${conversation.id}'),
+                style: EllaTypography.of(context).secondary)),
+      if (showVersion)
+        SelectableText('Saved version: $version',
+            key: const Key('summary-saved-version'), style: EllaTypography.of(context).secondary),
+    ]);
+  }
+}

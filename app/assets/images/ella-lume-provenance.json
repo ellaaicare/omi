@@ -1,0 +1,12 @@
+{
+  "sources": [
+    "1DqjBoCBJI95ptW_9qmuBKmNol48DhHQu",
+    "17jmoDzmAjw7n7G1wia6QiHYwVsrT2OKJ"
+  ],
+  "factory_identical": true,
+  "factory_sha256": "05aae8be289beb31067a69e8749836f9e98da4e6d54cd7b39a399e4386d89fa9",
+  "factory_call": "avatar('lume',{size:24})",
+  "svg_sha256": "2af836f3f72af40db1a64d74fa174281e0a1a9415a3838c020011d5c2e60e12a",
+  "runtime_raster": "72x72PNG derived from same SVG via librsvg/sharp, explicit24logicalpixel widget; filters preserved by rasterization",
+  "state": "neutralstaticfactorydefaults; no simulationstate or animation"
+}

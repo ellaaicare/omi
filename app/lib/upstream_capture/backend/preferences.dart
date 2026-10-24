@@ -50,6 +50,15 @@ class SharedPreferencesUtil {
   // Fail closed until initialization has loaded the persisted policy.  This
   // also makes an early read safe while the app is still bringing up prefs.
   static CapturePolicy _capturePolicyCache = const CapturePolicy(revision: 0, muted: true);
+  // Memory-only provenance, never raw preferences or owner/transcript data.
+  static String _capturePolicyLoadOrigin = 'not_initialized';
+  static String _capturePolicyIntent = 'none';
+  Map<String, Object> get capturePolicyDiagnostic => Map.unmodifiable({
+        'load_origin': _capturePolicyLoadOrigin,
+        'last_intent': _capturePolicyIntent,
+        'muted': _capturePolicyCache.muted,
+        'revision': _capturePolicyCache.revision,
+      });
   static int _capturePolicyNextRevision = 0;
   static Future<void> _capturePolicyQueue = Future<void>.value();
 
@@ -113,8 +122,11 @@ class SharedPreferencesUtil {
   /// untouched and keeps Dart fail-closed until a later successful write.
   static Future<void> _loadCapturePolicy() async {
     _capturePolicyQueue = Future<void>.value();
+    _capturePolicyIntent = 'none';
+    _capturePolicyLoadOrigin = 'loading';
     final prefs = _preferences;
     if (prefs == null) {
+      _capturePolicyLoadOrigin = 'preferences_unavailable_fail_closed';
       _capturePolicyCache = const CapturePolicy(revision: 0, muted: true);
       _capturePolicyNextRevision = 0;
       return;
@@ -126,6 +138,7 @@ class SharedPreferencesUtil {
     final hasLegacy = prefs.containsKey(_legacyDeviceMutedKey) || prefs.containsKey(_legacyBatchMutedKey);
 
     if (parsed != null) {
+      _capturePolicyLoadOrigin = 'canonical';
       _capturePolicyCache = parsed;
       _capturePolicyNextRevision = parsed.revision;
 
@@ -151,6 +164,11 @@ class SharedPreferencesUtil {
           )
         : const CapturePolicy(revision: 0, muted: true);
 
+    _capturePolicyLoadOrigin = hasCanonical
+        ? 'malformed_canonical_fail_closed'
+        : hasLegacy
+            ? 'legacy_migration'
+            : 'initial_policy';
     try {
       final persisted = await _persistCapturePolicy(fallback);
       if (persisted) {
@@ -164,6 +182,7 @@ class SharedPreferencesUtil {
       Logger.debug('Stack: $stack');
     }
 
+    _capturePolicyLoadOrigin = 'migration_not_durable_fail_closed';
     // A policy that could not be made durable must not authorize capture in
     // memory. Keep legacy values for a retry on the next initialization.
     _capturePolicyCache = const CapturePolicy(revision: 0, muted: true);
@@ -208,6 +227,7 @@ class SharedPreferencesUtil {
       throw StateError('Native capture policy returned an invalid revision');
     }
     if (rawRevision > _capturePolicyCache.revision) {
+      _capturePolicyLoadOrigin = 'native_revision_newer_fail_closed';
       _capturePolicyCache = CapturePolicy(revision: rawRevision, muted: true);
       _capturePolicyNextRevision = rawRevision;
       return;
@@ -300,6 +320,7 @@ class SharedPreferencesUtil {
 
         if (_capturePolicyNextRevision == requested.revision) {
           _capturePolicyCache = requested;
+          _capturePolicyIntent = muted ? 'mute_committed' : 'unmute_committed';
         }
         return requested;
       } catch (error) {
@@ -307,6 +328,7 @@ class SharedPreferencesUtil {
         // newer request if one has already superseded this operation.
         if (_capturePolicyNextRevision == requested.revision) {
           _capturePolicyCache = CapturePolicy(revision: requested.revision, muted: true);
+          _capturePolicyIntent = 'policy_write_failed_closed';
         }
         rethrow;
       }

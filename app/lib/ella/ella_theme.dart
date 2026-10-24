@@ -1,20 +1,23 @@
+import 'dart:math' as math;
+import 'package:omi/ella/widgets/ella_v7_appearance.dart';
+import 'package:omi/ella/widgets/ella_v7_surfaces.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-/// Ella v2 design tokens. New Ella surfaces should use these semantic names.
+/// Iris v5.2 light design tokens. New Ella surfaces should use these semantic names.
 class EllaColors {
   EllaColors._();
 
-  static const Color paper = Color(0xFFFAF6F0);
-  static const Color elevatedCard = Color(0xFFFFFCF8);
-  static const Color card = Color(0xFFF2EBE1);
-  static const Color cardDeep = Color(0xFFE9DFD2);
-  static const Color cardEdge = Color(0xFF8A7B66);
-  static const Color ink = Color(0xFF23201C);
-  static const Color inkSoft = Color(0xFF665F56);
-  static const Color teal = Color(0xFF5A9E8F);
-  static const Color tealDeep = Color(0xFF38695E);
+  static const Color paper = Color(0xFFF3EEF6);
+  static const Color elevatedCard = Color(0xFFFFFFFF);
+  static const Color card = Color(0xFFF5F6FA);
+  static const Color cardDeep = Color(0xFFE6EEFF);
+  static const Color cardEdge = Color(0xFFCBD0DE);
+  static const Color ink = Color(0xFF1F1B3A);
+  static const Color inkSoft = Color(0xFF514966);
+  static const Color teal = Color(0xFF5A4FD6);
+  static const Color tealDeep = Color(0xFF1F1B3A);
 
   // Compatibility aliases for Ella surfaces not yet migrated to v2 names.
   static const Color primary = teal;
@@ -35,7 +38,7 @@ class EllaColors {
   static const Color error = Color(0xFF9B3B36);
   static const Color emergency = Color(0xFF9B3B36);
   static const Color emergencyDark = Color(0xFF7B2E2A);
-  static const Color emergencyBg = Color(0xFFF2EBE1);
+  static const Color emergencyBg = Color(0xFFF5F6FA);
 }
 
 class EllaSizes {
@@ -46,12 +49,12 @@ class EllaSizes {
   static const double cardGap = 12;
   static const double cardPadding = 20;
   static const double notePadding = 24;
-  static const double cardRadius = 20;
+  static const double cardRadius = 16;
   static const double minTouchTarget = 48;
 
   // Compatibility aliases.
   static const double emergencyButtonHeight = 72;
-  static const double navBarHeight = 80;
+  static const double navBarHeight = 64;
   static const double guardianButtonHeight = 106;
   static const double buttonStackSpacing = 16;
   static const double listItemMinHeight = 56;
@@ -78,7 +81,7 @@ class EllaCardSurface extends StatelessWidget {
     this.borderRadius = EllaSizes.cardRadius,
   });
 
-  static const shadow = BoxShadow(color: Color(0x0F23201C), offset: Offset(0, 1), blurRadius: 2);
+  static const shadow = BoxShadow(color: Color(0x0F0B1020), offset: Offset(0, 1), blurRadius: 2);
 
   final Widget child;
   final Color color;
@@ -87,11 +90,13 @@ class EllaCardSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final radius = BorderRadius.circular(borderRadius);
+    final palette = EllaPalette.of(context);
+    final resolvedColor = palette.resolve(color);
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: color,
+        color: resolvedColor,
         borderRadius: radius,
-        border: Border.all(color: EllaColors.cardEdge),
+        border: Border.all(color: palette.cardEdge),
         boxShadow: const [shadow],
       ),
       child: Material(color: Colors.transparent, borderRadius: radius, clipBehavior: Clip.antiAlias, child: child),
@@ -102,12 +107,12 @@ class EllaCardSurface extends StatelessWidget {
 class EllaTextStyles {
   EllaTextStyles._();
 
-  static const String uiFont = 'Manrope';
-  static const String noteFont = 'Fraunces';
+  static const String uiFont = '.SF UI Text';
+  static const String noteFont = 'InstrumentSerif';
 
   static const TextStyle display = TextStyle(
-    fontFamily: uiFont,
-    fontSize: 28,
+    fontFamily: noteFont,
+    fontSize: 46,
     fontWeight: FontWeight.w600,
     height: 1.15,
     color: EllaColors.ink,
@@ -139,7 +144,7 @@ class EllaTextStyles {
 
   static const TextStyle caption = TextStyle(
     fontFamily: uiFont,
-    fontSize: 13,
+    fontSize: 16,
     fontWeight: FontWeight.w400,
     height: 1.35,
     color: EllaColors.inkSoft,
@@ -147,7 +152,7 @@ class EllaTextStyles {
 
   static const TextStyle eyebrow = TextStyle(
     fontFamily: uiFont,
-    fontSize: 12,
+    fontSize: 16,
     fontWeight: FontWeight.w700,
     letterSpacing: 1.5,
     height: 1.3,
@@ -165,7 +170,7 @@ class EllaTextStyles {
 }
 
 ThemeData ellaThemeData() {
-  const pressedOverlay = Color(0x1F38695E);
+  const pressedOverlay = Color(0x1F1D47B8);
   return ThemeData(
     useMaterial3: false,
     brightness: Brightness.light,
@@ -184,6 +189,9 @@ ThemeData ellaThemeData() {
       outlineVariant: EllaColors.cardDeep,
     ),
     scaffoldBackgroundColor: EllaColors.paper,
+    // Both endpoints must be opaque: ThemeData.lerp otherwise interpolates a
+    // missing light sheet color from transparent, exposing the Journal below.
+    bottomSheetTheme: const BottomSheetThemeData(backgroundColor: EllaColors.card),
     splashColor: pressedOverlay,
     highlightColor: pressedOverlay,
     focusColor: pressedOverlay,
@@ -226,7 +234,7 @@ ThemeData ellaThemeData() {
     ),
     textSelectionTheme: const TextSelectionThemeData(
       cursorColor: EllaColors.tealDeep,
-      selectionColor: Color(0x4D5A9E8F),
+      selectionColor: Color(0x4D6278C8),
       selectionHandleColor: EllaColors.tealDeep,
     ),
     cupertinoOverrideTheme: const CupertinoThemeData(
@@ -260,7 +268,7 @@ ThemeData ellaThemeData() {
     cardTheme: CardThemeData(
       color: EllaColors.card,
       elevation: 1,
-      shadowColor: const Color(0x0F23201C),
+      shadowColor: const Color(0x0F0B1020),
       surfaceTintColor: EllaColors.card,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
@@ -326,4 +334,178 @@ ThemeData ellaThemeData() {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
     ),
   );
+}
+
+/// Contextual Iris palette. Safety colors keep their established meaning.
+class EllaPalette {
+  const EllaPalette(this.dark, {this.nightMix});
+  final double? nightMix;
+  Color mix(Color light, Color night) => Color.lerp(light, night, nightMix ?? (dark ? 1 : 0))!;
+  final bool dark;
+  static EllaPalette of(BuildContext context) => EllaPalette(Theme.of(context).brightness == Brightness.dark,
+      nightMix: Theme.of(context).extension<EllaV7Tone>()?.night);
+  Color get paper => mix(EllaColors.paper, const Color(0xFF0B0A1C));
+  Color _surface(Color day) {
+    final amount = nightMix ?? (dark ? 1.0 : 0.0);
+    final unify = ((.35 - (amount - .5).abs()) / .15).clamp(0.0, 1.0);
+    return Color.lerp(mix(day, const Color(0xFF221F45)), paper, unify)!;
+  }
+
+  Color get elevatedCard => _surface(EllaColors.elevatedCard);
+  Color get card => _surface(EllaColors.card);
+  Color get cardDeep => mix(EllaColors.cardDeep, const Color(0xFF293354));
+  Color get cardEdge => mix(EllaColors.cardEdge, const Color(0xFF55546B));
+  double _contrast(Color foreground, Color background) {
+    final a = foreground.computeLuminance(), b = background.computeLuminance();
+    return (math.max(a, b) + .05) / (math.min(a, b) + .05);
+  }
+
+  Color _readable(Color day, Color night) {
+    double score(Color color) => math.min(_contrast(color, paper), _contrast(color, card));
+    final preferred = score(day) >= score(night) ? day : night;
+    if (score(preferred) >= 4.5) return preferred;
+    return score(Colors.black) >= score(Colors.white) ? Colors.black : Colors.white;
+  }
+
+  // Blending opposing ink colours would erase text around twilight. Choose
+  // readable ink against both actual blended surfaces; never fade the text.
+  Color get ink => _readable(EllaColors.ink, const Color(0xFFF1ECE2));
+  Color get inkSoft {
+    final candidate = _readable(EllaColors.inkSoft, const Color(0xFFC9C6D6));
+    return math.min(_contrast(candidate, paper), _contrast(candidate, card)) >= 4.5 ? candidate : ink;
+  }
+
+  Color get teal => mix(EllaColors.teal, const Color(0xFFB1A8FF));
+  Color get tealDeep => ink;
+  Color get userBubbleFill => dark ? ink : EllaColors.ink;
+  Color get userBubbleInk => dark ? paper : Colors.white;
+  Color get assistantBubbleFill => dark ? const Color(0xF0282640) : Colors.white;
+  Color get primary => tealDeep;
+  Color get primaryDark => tealDeep;
+  Color get primaryLight => teal;
+  Color get primarySubtle => card;
+  Color get bgPrimary => paper;
+  Color get bgSecondary => card;
+  Color get bgTertiary => cardDeep;
+  Color get textPrimary => ink;
+  Color get textSecondary => inkSoft;
+  Color get textTertiary => inkSoft;
+  Color get textDisabled => inkSoft;
+  Color get success => mix(EllaColors.success, const Color(0xFF8FEBB9));
+  Color get warning => mix(EllaColors.warning, const Color(0xFFFFC861));
+  Color get error => mix(EllaColors.error, const Color(0xFFFF8C98));
+  Color get emergency => error;
+  Color get emergencyDark => error;
+  Color get emergencyBg => card;
+  Color resolve(Color color) {
+    if (color == EllaColors.paper) return paper;
+    if (color == EllaColors.elevatedCard) return elevatedCard;
+    if (color == EllaColors.card) return card;
+    if (color == EllaColors.cardDeep) return cardDeep;
+    if (color == EllaColors.ink) return ink;
+    if (color == EllaColors.inkSoft) return inkSoft;
+    if (color == EllaColors.tealDeep) return tealDeep;
+    return color;
+  }
+}
+
+class EllaTypography {
+  EllaTypography.of(BuildContext context) : palette = EllaPalette.of(context);
+  final EllaPalette palette;
+  TextStyle get display => EllaTextStyles.display.copyWith(color: palette.ink);
+  TextStyle get noteBody => EllaTextStyles.noteBody.copyWith(color: palette.ink);
+  TextStyle get body => EllaTextStyles.body.copyWith(color: palette.ink);
+  TextStyle get secondary => EllaTextStyles.secondary.copyWith(color: palette.inkSoft);
+  TextStyle get caption => EllaTextStyles.caption.copyWith(color: palette.inkSoft);
+  TextStyle get eyebrow => EllaTextStyles.eyebrow.copyWith(color: palette.inkSoft);
+  TextStyle get ellaSignOff => EllaTextStyles.ellaSignOff.copyWith(color: palette.inkSoft);
+}
+
+ThemeData ellaDarkThemeData() {
+  const p = EllaPalette(true);
+  final light = ellaThemeData();
+  return light.copyWith(
+    brightness: Brightness.dark,
+    colorScheme: ColorScheme.dark(
+        primary: p.paper,
+        secondary: p.teal,
+        surface: p.card,
+        onPrimary: p.ink,
+        onSecondary: p.paper,
+        onSurface: p.ink,
+        error: p.error,
+        onError: p.paper,
+        outline: p.cardEdge,
+        outlineVariant: p.cardDeep),
+    scaffoldBackgroundColor: p.paper,
+    textTheme: light.textTheme.apply(bodyColor: p.ink, displayColor: p.ink),
+    appBarTheme: light.appBarTheme.copyWith(
+        backgroundColor: p.paper,
+        foregroundColor: p.ink,
+        surfaceTintColor: p.paper,
+        titleTextStyle: light.appBarTheme.titleTextStyle?.copyWith(color: p.ink),
+        systemOverlayStyle: SystemUiOverlayStyle.light),
+    cardTheme: light.cardTheme.copyWith(color: p.card, surfaceTintColor: p.card),
+    inputDecorationTheme: light.inputDecorationTheme
+        .copyWith(fillColor: p.card, hintStyle: EllaTextStyles.secondary.copyWith(color: p.inkSoft)),
+    dialogTheme: light.dialogTheme.copyWith(
+        backgroundColor: p.card,
+        surfaceTintColor: p.card,
+        titleTextStyle: light.dialogTheme.titleTextStyle?.copyWith(color: p.ink),
+        contentTextStyle: EllaTextStyles.body.copyWith(color: p.ink)),
+    bottomSheetTheme: BottomSheetThemeData(backgroundColor: p.card),
+    iconTheme: IconThemeData(color: p.ink),
+    cupertinoOverrideTheme:
+        CupertinoThemeData(brightness: Brightness.dark, primaryColor: p.tealDeep, scaffoldBackgroundColor: p.paper),
+  );
+}
+
+/// Static wash behind controls; content stays on opaque readable surfaces.
+class EllaIrisBackdrop extends StatelessWidget {
+  const EllaIrisBackdrop({super.key, required this.child});
+  final Widget child;
+  @override
+  Widget build(BuildContext context) => EllaV7Atmosphere(child: child);
+}
+
+/// Display headings keep complete words; body text retains the user's scaling.
+class EllaDisplayHeading extends StatelessWidget {
+  const EllaDisplayHeading(this.text, {super.key, this.fontSize = 46});
+  final String text;
+  final double fontSize;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(builder: (context, constraints) {
+        final scale = MediaQuery.textScalerOf(context);
+        final style = EllaTypography.of(context).display.copyWith(fontSize: fontSize);
+        double longestWord(TextStyle candidate) {
+          var width = 0.0;
+          for (final word in text.split(RegExp(r'\s+'))) {
+            final painter = TextPainter(
+                text: TextSpan(text: word, style: candidate),
+                textDirection: Directionality.of(context),
+                textScaler: scale)
+              ..layout();
+            if (painter.width > width) width = painter.width;
+            painter.dispose();
+          }
+          return width;
+        }
+
+        var fitted = fontSize;
+        // Only display typography may fit down, and never below the existing 20px heading.
+        while (fitted > 20 && longestWord(style.copyWith(fontSize: fitted)) > constraints.maxWidth) {
+          fitted = (fitted - 0.5).clamp(20.0, fontSize);
+        }
+        final resolved = style.copyWith(fontSize: fitted);
+        final wordWidth = longestWord(resolved);
+        final heading = Text(text, style: resolved);
+        return Semantics(
+            header: true,
+            child: wordWidth <= constraints.maxWidth
+                ? heading
+                : SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(width: wordWidth.ceilToDouble(), child: heading)));
+      });
 }

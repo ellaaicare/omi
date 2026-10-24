@@ -29,6 +29,49 @@ void main() {
     if (directory.existsSync()) directory.deleteSync(recursive: true);
   });
 
+  for (final muted in [false, true]) {
+    test('native account retirement preserves the exact upstream user mute policy $muted', () async {
+      expect(await h.bind(), true);
+      await upstream.SharedPreferencesUtil().setCaptureMuted(muted);
+      await h.connectPendant();
+      final before = upstream.SharedPreferencesUtil().capturePolicy;
+      await h.runtime.releaseAccount();
+      expect(h.nativeCaptureAllowed, false);
+      expect(upstream.SharedPreferencesUtil().capturePolicy, before);
+      expect(await h.bind(), true);
+      expect(h.nativeCaptureAllowed, true);
+      expect(upstream.SharedPreferencesUtil().capturePolicy, before,
+          reason: 'A security rebind is neither a deliberate Pause nor Resume');
+    });
+  }
+
+  test('unconfirmed native retirement blocks rebind until an explicit fresh retirement succeeds', () async {
+    expect(await h.bind(), true);
+    final before = upstream.SharedPreferencesUtil().capturePolicy;
+    h.malformedNativeDenial = true;
+    await expectLater(h.runtime.releaseAccount(), throwsStateError);
+    expect(await h.bind(), false);
+    expect(h.nativeCaptureAllowed, false);
+    h.malformedNativeDenial = false;
+    await h.runtime.releaseAccount();
+    expect(await h.bind(), true);
+    expect(upstream.SharedPreferencesUtil().capturePolicy, before);
+  });
+
+  for (final source in ['phone', 'necklace']) {
+    test('unconfirmed native $source admission is unavailable and never requests new consent', () async {
+      h.malformedNativeAllow = true;
+      final result = source == 'phone'
+          ? await h.runtime.startPhoneCapture(accountA)
+          : await h.runtime.connectNecklace(accountA, EllaUpstreamCaptureHarness.pendant);
+      expect(result, EllaCaptureStartOutcome.unavailable);
+      await h.runtime.pendingTeardown;
+      expect(h.nativeCaptureAllowed, false);
+      expect(h.hostApi.nativeRecording, false);
+      expect(h.connectionAttempts, 0);
+    });
+  }
+
   test('bind refuses a uid that is not the signed-in account', () async {
     expect(await h.bind(accountB), isFalse);
     expect(await h.bind(''), isFalse);
@@ -86,6 +129,7 @@ void main() {
     final connectionStarted = Completer<void>();
     final runtime = EllaUpstreamCaptureRuntime(
       authority: h.authority,
+      nativeAuthorization: h.nativeAuthorization,
       bootForTesting: () async => h.provider,
       connectDeviceForTesting: (_) {
         connectionStarted.complete();
@@ -105,20 +149,16 @@ void main() {
   });
 
   for (final source in ['phone', 'necklace']) {
-    test('$source start cannot adopt a same-UID lease replaced during policy unmute', () async {
+    test('$source start cannot adopt a same-UID lease replaced during native account admission', () async {
       expect(await h.bind(accountA), isTrue);
       await h.runtime.releaseAccount();
-      expect(upstream.SharedPreferencesUtil().capturePolicy.muted, isTrue);
+      expect(h.nativeCaptureAllowed, isFalse);
+      final userPolicy = upstream.SharedPreferencesUtil().capturePolicy;
 
       final unmuteStarted = Completer<void>();
       final finishUnmute = Completer<void>();
-      upstream.SharedPreferencesUtil.capturePolicyBridgeForTesting = (method, arguments) async {
-        if (method == 'setMuted' && arguments['muted'] == false) {
-          unmuteStarted.complete();
-          await finishUnmute.future;
-        }
-        return null;
-      };
+      h.holdNextNativeAllow = finishUnmute;
+      h.nextNativeAllowEntered = unmuteStarted;
       try {
         final pending = source == 'phone'
             ? h.runtime.startPhoneCapture(accountA)
@@ -137,7 +177,8 @@ void main() {
         await h.runtime.pendingTeardown;
       } finally {
         if (!finishUnmute.isCompleted) finishUnmute.complete();
-        upstream.SharedPreferencesUtil.capturePolicyBridgeForTesting = null;
+        expect(upstream.SharedPreferencesUtil().capturePolicy, userPolicy,
+            reason: 'Account security is not a new user mute or unmute intent');
       }
     });
   }
@@ -146,6 +187,7 @@ void main() {
     var attempts = 0;
     final runtime = EllaUpstreamCaptureRuntime(
       authority: h.authority,
+      nativeAuthorization: h.nativeAuthorization,
       bootForTesting: () async {
         attempts++;
         if (attempts == 1) throw StateError('transient boot error');
@@ -177,8 +219,8 @@ void main() {
     expect(h.authority.boundUid, isNull);
     expect(h.hostApi.nativeRecording, isFalse, reason: 'the native recorder is stopped');
     expect(h.provider.recordingState, isNot(RecordingState.record));
-    expect(upstream.SharedPreferencesUtil().capturePolicy.muted, isTrue,
-        reason: 'the upstream native admission latch is closed so native writers drop audio too');
+    expect(h.nativeCaptureAllowed, isFalse,
+        reason: 'The separate native account gate is closed so native writers drop audio too');
   });
 
   test('necklace: account switch mid-stream stops pendant emission and device recording', () async {

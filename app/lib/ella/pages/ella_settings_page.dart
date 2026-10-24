@@ -1,4 +1,11 @@
+import 'package:omi/ella/widgets/ella_v7_appearance.dart';
+import 'package:omi/ella/widgets/ella_v7_surfaces.dart';
+import 'package:omi/ella/widgets/ella_v7_companion_card.dart';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:omi/ella/widgets/iris_capture_controls.dart';
+import 'package:omi/pages/action_items/action_items_page.dart';
+import 'package:omi/providers/home_provider.dart';
 import 'package:flutter/services.dart';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -39,8 +46,10 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 
 class EllaSettingsPage extends StatefulWidget {
-  const EllaSettingsPage({super.key, this.runtimeSideEffectsEnabled = true, this.authenticatedUidOverride});
+  const EllaSettingsPage(
+      {super.key, this.runtimeSideEffectsEnabled = true, this.authenticatedUidOverride, this.advanced = false});
 
+  final bool advanced;
   final bool runtimeSideEffectsEnabled;
   final String? authenticatedUidOverride;
 
@@ -145,20 +154,21 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: EllaColors.bgSecondary,
+        backgroundColor: EllaPalette.of(context).bgSecondary,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
         title: Text(
           context.l10n.ellaSettingsSignOut,
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaPalette.of(context).textPrimary),
         ),
-        content: const Text(
+        content: Text(
           'Are you sure you want to sign out?',
-          style: TextStyle(fontSize: 18, color: EllaColors.textSecondary),
+          style: TextStyle(fontSize: 18, color: EllaPalette.of(context).textSecondary),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
-            child: Text(context.l10n.ellaCancel, style: const TextStyle(fontSize: 18, color: EllaColors.textTertiary)),
+            child: Text(context.l10n.ellaCancel,
+                style: TextStyle(fontSize: 18, color: EllaPalette.of(context).textTertiary)),
           ),
           TextButton(
             onPressed: () async {
@@ -172,7 +182,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             },
             child: Text(
               context.l10n.ellaSettingsSignOut,
-              style: const TextStyle(fontSize: 18, color: EllaColors.error),
+              style: TextStyle(fontSize: 18, color: EllaPalette.of(context).error),
             ),
           ),
         ],
@@ -220,8 +230,91 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     }
   }
 
+  Widget _coreMore() {
+    final controls = IrisCaptureControls.shared;
+    return Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: AppBar(
+            automaticallyImplyLeading: false,
+            backgroundColor: Colors.transparent,
+            toolbarHeight: math.max(56, MediaQuery.textScalerOf(context).scale(32) * 1.3),
+            title: Text(context.l10n.irisMore, style: EllaTypography.of(context).noteBody.copyWith(fontSize: 32))),
+        body: AnimatedBuilder(
+            animation: controls,
+            builder: (context, _) => ListView(padding: const EdgeInsets.all(16), children: [
+                  const EllaV7CompanionCard(),
+                  const SizedBox(height: 16),
+                  const EllaV7AppearancePicker(),
+                  const SizedBox(height: 16),
+                  _coreRow(
+                      'iris-more-listening',
+                      Icons.hearing_rounded,
+                      context.l10n.irisListening,
+                      switch (controls.listening) {
+                        IrisListeningState.active => context.l10n.irisOn,
+                        IrisListeningState.paused => context.l10n.irisCapturePaused,
+                        IrisListeningState.unavailable => context.l10n.irisNotListening
+                      },
+                      controls.openStatus),
+                  _coreRow(
+                      'iris-more-whispers',
+                      Icons.graphic_eq_rounded,
+                      context.l10n.todayWhispersTitle,
+                      controls.readWhispers?.call() == null
+                          ? context.l10n.irisNotShownYet
+                          : controls.readWhispers!.call()!
+                              ? switch (controls.readWhisperPlayback?.call() ?? IrisWhisperPlayback.unknown) {
+                                  IrisWhisperPlayback.ready => context.l10n.irisOn,
+                                  IrisWhisperPlayback.error => context.l10n.upstreamCaptureWhispersPlaybackFailed,
+                                  IrisWhisperPlayback.unavailable || IrisWhisperPlayback.unknown =>
+                                      context.l10n.upstreamCaptureWhispersPlaybackUnavailable,
+                                }
+                              : context.l10n.off,
+                      controls.openWhispers),
+                  _coreRow('iris-more-companion', Icons.auto_awesome_outlined, context.l10n.irisCompanion, null,
+                      () => showEllaV7CompanionEditor(context)),
+                  _coreRow('iris-more-necklace', Icons.bluetooth_rounded, context.l10n.todayNecklace, null,
+                      controls.openNecklace),
+                  _coreRow('iris-more-status-support', Icons.help_outline_rounded, context.l10n.irisStatusSupport, null,
+                      () async {
+                    await Navigator.of(context)
+                        .push(MaterialPageRoute(builder: (_) => const EllaRuntimeDiagnosticsPage()));
+                  }),
+                  _coreRow('iris-more-privacy', Icons.privacy_tip_outlined, context.l10n.irisPrivacyData, null,
+                      () async {
+                    await Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => EllaSettingsPage(
+                            advanced: true,
+                            runtimeSideEffectsEnabled: widget.runtimeSideEffectsEnabled,
+                            authenticatedUidOverride: widget.authenticatedUidOverride)));
+                  }),
+                  const SizedBox(height: 20),
+                  Text(context.l10n.irisMoreReminderNote,
+                      style: EllaTypography.of(context).secondary.copyWith(fontSize: 16)),
+                ])));
+  }
+
+  Widget _coreRow(String key, IconData icon, String title, String? value, Future<void> Function()? action) => Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 52),
+          child: EllaV7Glass(
+              radius: 20,
+              child: ListTile(
+                  key: Key(key),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  leading: Icon(icon),
+                  title: Text(title,
+                      style: EllaTypography.of(context).body.copyWith(fontSize: 16, fontWeight: FontWeight.w600)),
+                  subtitle: value == null
+                      ? null
+                      : Text(value, style: EllaTypography.of(context).secondary.copyWith(fontSize: 16)),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: action == null ? null : () => action()))));
+
   @override
   Widget build(BuildContext context) {
+    if (!widget.advanced) return _coreMore();
     final showWhisperSurfaces = allowsGuardianSurface();
     final showGuardianCareSurfaces = allowsGuardianCareSurface();
     final userName = SharedPreferencesUtil().givenName.isNotEmpty
@@ -234,20 +327,21 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     final authenticatedUid = widget.authenticatedUidOverride ?? FirebaseAuth.instance.currentUser?.uid ?? '';
 
     return Scaffold(
-      backgroundColor: EllaColors.bgPrimary,
+      backgroundColor: EllaPalette.of(context).bgPrimary,
       appBar: AppBar(
-        backgroundColor: EllaColors.bgPrimary,
+        backgroundColor: EllaPalette.of(context).bgPrimary,
         elevation: 0,
-        title: const Text(
-          'Settings',
-          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
+        title: Text(
+          context.l10n.irisMore,
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaPalette.of(context).textPrimary),
         ),
         centerTitle: false,
-        automaticallyImplyLeading: false,
+        leading: BackButton(key: const Key('iris-privacy-back'), color: EllaPalette.of(context).textPrimary),
+        automaticallyImplyLeading: true,
       ),
       body: RefreshIndicator(
         onRefresh: _loadData,
-        color: EllaColors.primary,
+        color: EllaPalette.of(context).primary,
         child: ListView(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           children: [
@@ -264,13 +358,29 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             ),
             const SizedBox(height: 8),
 
+            EllaSettingsRow(
+              key: const Key('iris-more-talk'),
+              icon: Icons.graphic_eq_rounded,
+              title: context.l10n.bottomNavTalk,
+              onTap: () => context.read<HomeProvider>().setIndex(2),
+            ),
+            const SizedBox(height: 8),
+
+            if (allowsInheritedOmiSurface())
+              EllaSettingsRow(
+                key: const Key('iris-more-reminders'),
+                icon: Icons.notifications_none_rounded,
+                title: context.l10n.irisReminders,
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ActionItemsPage())),
+              ),
+
             // Internal policy picker, only available after the developer unlock.
             if (_developerUnlocked && showGuardianCareSurfaces)
               EllaSettingsRow(
                 key: const Key('guardian-mode-settings-entry'),
                 icon: Icons.shield,
-                iconColor: _guardianMode?.color ?? EllaColors.primary,
-                iconBgColor: _guardianMode?.color ?? EllaColors.primary,
+                iconColor: _guardianMode?.color ?? EllaPalette.of(context).primary,
+                iconBgColor: _guardianMode?.color ?? EllaPalette.of(context).primary,
                 title: 'Whisper settings',
                 subtitle: _guardianMode != null ? _guardianMode!.displayName : 'Loading…',
                 onTap: () async {
@@ -331,8 +441,8 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               EllaSettingsRow(
                 key: const Key('emergency-contact-settings-entry'),
                 icon: Icons.emergency,
-                iconColor: EllaColors.error,
-                iconBgColor: EllaColors.error,
+                iconColor: EllaPalette.of(context).error,
+                iconBgColor: EllaPalette.of(context).error,
                 title: context.l10n.ellaEmergencyContact,
                 subtitle: _emergencyContactSubtitle(),
                 onTap: () async {
@@ -406,7 +516,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               key: const Key('ella-runtime-diagnostics-entry'),
               icon: Icons.monitor_heart_outlined,
               title: context.l10n.ellaRuntimeDiagnostics,
-              subtitle: context.l10n.ellaRuntimeDiagnosticsSubtitle,
+              subtitle: context.l10n.diagnosticsSupportSubtitle,
               onTap: () {
                 Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaRuntimeDiagnosticsPage()));
               },
@@ -439,10 +549,10 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.logout,
-              iconColor: EllaColors.error,
-              iconBgColor: EllaColors.error,
+              iconColor: EllaPalette.of(context).error,
+              iconBgColor: EllaPalette.of(context).error,
               title: context.l10n.ellaSettingsSignOut,
-              titleColor: EllaColors.error,
+              titleColor: EllaPalette.of(context).error,
               showChevron: false,
               onTap: _signOut,
             ),
@@ -452,7 +562,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               Center(
                 child: GestureDetector(
                   onTap: allowsInheritedOmiSurface() ? _unlockDeveloperSettings : null,
-                  child: Text(_appVersion, style: const TextStyle(fontSize: 14, color: EllaColors.textDisabled)),
+                  child: Text(_appVersion, style: TextStyle(fontSize: 14, color: EllaPalette.of(context).textDisabled)),
                 ),
               ),
             const SizedBox(height: 32),
@@ -475,10 +585,10 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
       padding: const EdgeInsets.only(left: 24, top: 24, bottom: 8),
       child: Text(
         text,
-        style: const TextStyle(
+        style: TextStyle(
           fontSize: 14,
           fontWeight: FontWeight.w600,
-          color: EllaColors.primary,
+          color: EllaPalette.of(context).primary,
           letterSpacing: 1.2,
         ),
       ),

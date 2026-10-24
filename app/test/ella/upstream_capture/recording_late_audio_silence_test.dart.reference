@@ -1,0 +1,185 @@
+import 'dart:typed_data';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:fake_async/fake_async.dart';
+import 'package:omi/upstream_capture/gen/pigeon_communicator.g.dart';
+import 'package:omi/upstream_capture/services/bridges/ble_bridge.dart';
+import 'package:omi/upstream_capture/services/devices/models.dart';
+import 'package:omi/upstream_capture/services/devices/transports/native_ble_transport.dart';
+
+class Host extends Fake implements BleHostApi {
+  int subscribes = 0;
+  @override
+  Future<void> subscribeCharacteristic(String p, String s, String c) async {
+    subscribes++;
+  }
+}
+
+void main() {
+  test('physical packets cease after successful start: bounded CCCD recovery remains armed', () {
+    fakeAsync((time) {
+      final host = Host();
+      final actual = NativeBleTransport('FICTIONAL-LATE-SILENCE-ACTUAL', hostApi: host);
+      BleBridge.instance.onDeviceReady(actual.deviceId, [
+        BleService(uuid: omiServiceUuid, characteristicUuids: [audioDataStreamCharacteristicUuid])
+      ]);
+      final sub = actual.getCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid).listen((_) {});
+      time.flushMicrotasks();
+      expect(host.subscribes, 1);
+      BleBridge.instance.onCharacteristicValueUpdated(
+          actual.deviceId, omiServiceUuid, audioDataStreamCharacteristicUuid, Uint8List.fromList([1, 2, 3, 4]));
+      time.elapse(const Duration(seconds: 4));
+      time.flushMicrotasks();
+      expect(host.subscribes, 2, reason: 'A first packet must not permanently disable later no-packet detection');
+      time.elapse(const Duration(seconds: 12));
+      time.flushMicrotasks();
+      expect(host.subscribes, 2, reason: 'Only the existing one CCCD recovery attempt per outage is allowed');
+      sub.cancel();
+      time.flushMicrotasks();
+      actual.dispose();
+      time.flushMicrotasks();
+      expect(time.pendingTimers, isEmpty);
+    });
+  });
+  test('unobserved listener cannot trigger CCCD recovery after cancellation', () {
+    fakeAsync((time) {
+      final host = Host();
+      final transport = NativeBleTransport('NO-LISTENER', hostApi: host);
+      BleBridge.instance.onDeviceReady(transport.deviceId, [
+        BleService(uuid: omiServiceUuid, characteristicUuids: [audioDataStreamCharacteristicUuid])
+      ]);
+      final sub = transport.getCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid).listen((_) {});
+      time.flushMicrotasks();
+      sub.cancel();
+      time.flushMicrotasks();
+      time.elapse(const Duration(seconds: 20));
+      expect(host.subscribes, 1);
+      expect(transport.audioHealth['stream_health'], 'no_active_audio_listener');
+      transport.dispose();
+      time.flushMicrotasks();
+      expect(time.pendingTimers, isEmpty);
+    });
+  });
+  test('subsequent packets reset silence and each recovered outage keeps the same one-attempt bound', () {
+    fakeAsync((time) {
+      final host = Host();
+      final transport = NativeBleTransport('CONTINUOUS-FAKE', hostApi: host);
+      BleBridge.instance.onDeviceReady(transport.deviceId, [
+        BleService(uuid: omiServiceUuid, characteristicUuids: [audioDataStreamCharacteristicUuid])
+      ]);
+      final sub = transport.getCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid).listen((_) {});
+      time.flushMicrotasks();
+      void packet() => BleBridge.instance.onCharacteristicValueUpdated(
+          transport.deviceId, omiServiceUuid, audioDataStreamCharacteristicUuid, Uint8List.fromList([1, 2, 3, 4]));
+      for (var n = 0; n < 10; n++) {
+        packet();
+        time.elapse(const Duration(seconds: 1));
+      }
+      expect(host.subscribes, 1);
+      time.elapse(const Duration(seconds: 4));
+      expect(host.subscribes, 2);
+      time.elapse(const Duration(seconds: 12));
+      expect(host.subscribes, 2);
+      packet();
+      time.elapse(const Duration(seconds: 4));
+      expect(host.subscribes, 3);
+      expect(transport.audioHealth['packet_count'], 11);
+      expect(transport.audioHealth['notification_bytes'], 44);
+      sub.cancel();
+      time.flushMicrotasks();
+      transport.dispose();
+      time.flushMicrotasks();
+      expect(time.pendingTimers, isEmpty);
+    });
+  });
+  test('reattaching an audio listener monitors silence before any resumed packet', () {
+    fakeAsync((time) {
+      final host = Host();
+      final transport = NativeBleTransport('RESUME-LISTENER-FAKE', hostApi: host);
+      BleBridge.instance.onDeviceReady(transport.deviceId, [
+        BleService(uuid: omiServiceUuid, characteristicUuids: [audioDataStreamCharacteristicUuid])
+      ]);
+      final stream = transport.getCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid);
+      time.flushMicrotasks();
+      time.elapse(const Duration(seconds: 10));
+      expect(host.subscribes, 1, reason: 'No observed audio listener means no recovery');
+      var listener = stream.listen((_) {});
+      time.flushMicrotasks();
+      time.elapse(const Duration(seconds: 4));
+      expect(host.subscribes, 2);
+      listener.cancel();
+      time.flushMicrotasks();
+      expect(transport.audioHealth['liveness_watch_active'], false);
+      time.elapse(const Duration(seconds: 12));
+      expect(host.subscribes, 2);
+      listener = stream.listen((_) {});
+      time.flushMicrotasks();
+      time.elapse(const Duration(seconds: 4));
+      expect(host.subscribes, 3, reason: 'A fresh listener gets the existing one-outage recovery bound');
+      listener.cancel();
+      time.flushMicrotasks();
+      transport.dispose();
+      time.flushMicrotasks();
+      expect(time.pendingTimers, isEmpty);
+    });
+  });
+  test('unsubscribed foreign service cannot claim current audio or reset packet age', () {
+    fakeAsync((time) {
+      var micros = 0;
+      final t = NativeBleTransport('FICTIONAL-ROUTE', hostApi: Host(), monotonicMicros: () => micros);
+      BleBridge.instance.onDeviceReady(t.deviceId, [
+        BleService(uuid: omiServiceUuid, characteristicUuids: [audioDataStreamCharacteristicUuid])
+      ]);
+      final sub = t.getCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid).listen((_) {});
+      time.flushMicrotasks();
+      BleBridge.instance.onCharacteristicValueUpdated(
+          t.deviceId, omiServiceUuid, audioDataStreamCharacteristicUuid, Uint8List.fromList([1]));
+      micros = 9000000;
+      expect(t.audioHealth['stream_health'], 'audio_stale');
+      BleBridge.instance.onCharacteristicValueUpdated(
+          t.deviceId, 'foreign-service', audioDataStreamCharacteristicUuid, Uint8List.fromList([9]));
+      expect(t.audioHealth['packet_count'], 1);
+      expect(t.audioHealth['stream_health'], 'audio_stale');
+      sub.cancel();
+      time.flushMicrotasks();
+      t.dispose();
+      time.flushMicrotasks();
+    });
+  });
+  test('health is timing/count-only and link restoration requires a fresh packet witness', () {
+    fakeAsync((time) {
+      var micros = 0;
+      final host = Host();
+      final transport = NativeBleTransport('SECRET-PERIPHERAL',
+          hostApi: host, monotonicMicros: () => micros, utcNow: () => DateTime.utc(2026));
+      final services = [
+        BleService(uuid: omiServiceUuid, characteristicUuids: [audioDataStreamCharacteristicUuid])
+      ];
+      BleBridge.instance.onDeviceReady(transport.deviceId, services);
+      final sub = transport.getCharacteristicStream(omiServiceUuid, audioDataStreamCharacteristicUuid).listen((_) {});
+      time.flushMicrotasks();
+      expect(transport.audioHealth['stream_health'], 'audio_not_observed');
+      BleBridge.instance.onCharacteristicValueUpdated(transport.deviceId, omiServiceUuid,
+          audioDataStreamCharacteristicUuid, Uint8List.fromList([83, 69, 67, 82, 69, 84]));
+      expect(transport.audioHealth['stream_health'], 'audio_recent');
+      micros = 9000000;
+      expect(transport.audioHealth['stream_health'], 'audio_stale');
+      expect(transport.audioHealth.toString(), isNot(contains('SECRET')));
+      expect(() => transport.audioHealth['payload'] = 'bad', throwsUnsupportedError);
+      BleBridge.instance.onPeripheralDisconnected(transport.deviceId, null);
+      time.flushMicrotasks();
+      expect(transport.audioHealth['stream_health'], 'link_unavailable');
+      expect(transport.audioHealth['last_link_event'], 'connection_lost');
+      BleBridge.instance.onDeviceReady(transport.deviceId, services);
+      time.flushMicrotasks();
+      expect(transport.audioHealth['stream_health'], 'audio_not_observed');
+      expect(transport.audioHealth['last_link_event'], 'device_ready_recovery');
+      expect(transport.audioHealth.containsKey('server_ack'), false);
+      expect(transport.audioHealth.containsKey('transcript'), false);
+      sub.cancel();
+      time.flushMicrotasks();
+      transport.dispose();
+      time.flushMicrotasks();
+      expect(time.pendingTimers, isEmpty);
+    });
+  });
+}

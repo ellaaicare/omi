@@ -255,6 +255,11 @@ void main() {
       expect(tester.takeException(), isNull);
       await expectLater(find.byType(MaterialApp),
           matchesGoldenFile('goldens/hermes_summary_${fixture.$1.toInt()}_${fixture.$2.toInt()}_${fixture.$3}.png'));
+      await tester.ensureVisible(find.byType(ExpansionTile));
+      await tester.tap(find.byType(ExpansionTile));
+      await tester.pumpAndSettle();
+      expect(find.text('No Folder'), findsOneWidget, reason: 'folder action remains available in expanded details');
+      await tester.ensureVisible(find.byType(MemoryGalleryCard));
       await tester.tap(find.byType(MemoryGalleryCard));
       expect(opens, 1, reason: 'attribution does not intercept the existing open action');
       provider.setCachedConversation(

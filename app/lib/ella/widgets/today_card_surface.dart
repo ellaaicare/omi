@@ -11,7 +11,7 @@ class TodayCardSurface extends StatelessWidget {
     required this.onReadMore,
     required this.onTalk,
     this.compact = false,
-    this.surfaceColor = const Color(0xFFF8F1E8),
+    this.surfaceColor = EllaColors.card,
   });
 
   final TodayCardViewState state;
@@ -63,7 +63,8 @@ class TodayCardSurface extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(content.eyebrow, key: const Key('today-card-eyebrow'), style: EllaTextStyles.eyebrow),
+                  Text(content.eyebrow,
+                      key: const Key('today-card-eyebrow'), style: EllaTypography.of(context).eyebrow),
                   SizedBox(height: compact ? 8 : 14),
                   Semantics(
                     header: true,
@@ -72,7 +73,7 @@ class TodayCardSurface extends StatelessWidget {
                       key: const Key('today-card-headline'),
                       maxLines: headlineLines,
                       overflow: headlineLines == null ? null : TextOverflow.ellipsis,
-                      style: EllaTextStyles.noteBody.copyWith(fontSize: compact ? 20 : 26, height: 1.12),
+                      style: EllaTypography.of(context).noteBody.copyWith(fontSize: compact ? 20 : 26, height: 1.12),
                     ),
                   ),
                   SizedBox(height: compact ? 6 : 10),
@@ -81,11 +82,11 @@ class TodayCardSurface extends StatelessWidget {
                     key: const Key('today-card-body'),
                     maxLines: bodyLines,
                     overflow: bodyLines == null ? null : TextOverflow.ellipsis,
-                    style: EllaTextStyles.noteBody.copyWith(
-                      fontSize: compact ? 14 : 19,
-                      height: compact ? 1.3 : 1.35,
-                      fontWeight: FontWeight.w400,
-                    ),
+                    style: EllaTypography.of(context).noteBody.copyWith(
+                          fontSize: compact ? 14 : 19,
+                          height: compact ? 1.3 : 1.35,
+                          fontWeight: FontWeight.w400,
+                        ),
                   ),
                   if (state.isCached) ...[
                     const SizedBox(height: 12),
@@ -97,18 +98,18 @@ class TodayCardSurface extends StatelessWidget {
                   ],
                   if (!compact && state.isLoading && card == null) ...[
                     const SizedBox(height: 20),
-                    const Align(
+                    Align(
                       alignment: Alignment.centerLeft,
                       child: SizedBox(
                         width: 20,
                         height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                        child: CircularProgressIndicator(strokeWidth: 2, color: EllaPalette.of(context).tealDeep),
                       ),
                     ),
                   ],
                   if (card != null) ...[
                     SizedBox(height: compact ? 10 : 18),
-                    const Divider(height: 1, color: EllaColors.cardDeep),
+                    Divider(height: 1, color: EllaPalette.of(context).cardDeep),
                     const SizedBox(height: 6),
                     _TodayCardFooter(provenance: content.provenance, onReadMore: onReadMore, onTalk: onTalk),
                   ],
@@ -177,10 +178,10 @@ class _TodayCardFooter extends StatelessWidget {
           key: const Key('today-card-read-more'),
           onPressed: onReadMore,
           style: TextButton.styleFrom(
-            foregroundColor: EllaColors.tealDeep,
+            foregroundColor: EllaPalette.of(context).tealDeep,
             minimumSize: const Size(0, EllaSizes.minTouchTarget),
             padding: const EdgeInsets.symmetric(horizontal: 8),
-            textStyle: EllaTextStyles.secondary.copyWith(fontSize: 15, fontWeight: FontWeight.w700),
+            textStyle: EllaTypography.of(context).secondary.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
           ),
           child: Text(context.l10n.todayReadMore),
         );
@@ -191,10 +192,10 @@ class _TodayCardFooter extends StatelessWidget {
           icon: const Icon(Icons.chevron_right_rounded, size: 20),
           label: Text(context.l10n.memoryTalkAction),
           style: TextButton.styleFrom(
-            foregroundColor: EllaColors.tealDeep,
+            foregroundColor: EllaPalette.of(context).tealDeep,
             minimumSize: const Size(0, EllaSizes.minTouchTarget),
             padding: const EdgeInsets.symmetric(horizontal: 4),
-            textStyle: EllaTextStyles.secondary.copyWith(fontSize: 15, fontWeight: FontWeight.w700),
+            textStyle: EllaTypography.of(context).secondary.copyWith(fontSize: 16, fontWeight: FontWeight.w700),
           ),
         );
 
@@ -215,7 +216,7 @@ class _TodayCardFooter extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             source,
-            Row(mainAxisAlignment: MainAxisAlignment.end, children: [readMore, const SizedBox(width: 4), talk]),
+            Wrap(alignment: WrapAlignment.end, spacing: 4, runSpacing: 4, children: [readMore, talk]),
           ],
         );
       },
@@ -234,9 +235,9 @@ class _StatusLine extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Icon(icon, size: 16, color: EllaColors.tealDeep),
+        Icon(icon, size: 16, color: EllaPalette.of(context).tealDeep),
         const SizedBox(width: 6),
-        Expanded(child: Text(label, style: EllaTextStyles.caption.copyWith(fontSize: 12))),
+        Expanded(child: Text(label, style: EllaTypography.of(context).caption.copyWith(fontSize: 12))),
       ],
     );
   }

@@ -34,6 +34,7 @@ final class PhoneMicController {
 
     private var state: State = .idle
     private var pendingStop = false
+    private var commandRevision: UInt64 = 0
     private var pendingStartCompletions: [(Result<Void, Error>) -> Void] = []
     private var pendingStopCompletions: [() -> Void] = []
     private var startRetriesUsed = 0
@@ -110,6 +111,7 @@ final class PhoneMicController {
                 emitter.emitState(.interrupted, sessionId: sessionId)
             }
         case .idle:
+            commandRevision &+= 1
             self.mode = mode
             currentSessionId = sessionId
             state = .starting
@@ -127,12 +129,7 @@ final class PhoneMicController {
         switch state {
         case .idle:
             DispatchQueue.main.async { completion() }
-        case .starting:
-            // Permission prompt or retry timer in flight — finish the stop when
-            // the bring-up reaches its next decision point.
-            pendingStop = true
-            pendingStopCompletions.append(completion)
-        case .running, .interrupted, .rebuilding:
+        case .starting, .running, .interrupted, .rebuilding:
             pendingStopCompletions.append(completion)
             finishStop()
         }
@@ -141,6 +138,7 @@ final class PhoneMicController {
     // MARK: - Bring-up (initial start)
 
     private func checkPermissionThenBringUp() {
+        let revision = commandRevision
         switch environment.permission.current() {
         case .granted:
             performStartBringUp()
@@ -149,7 +147,7 @@ final class PhoneMicController {
         case .undetermined:
             environment.permission.request { [weak self] granted in
                 self?.controlQueue.async {
-                    guard let self, self.state == .starting else { return }
+                    guard let self, self.state == .starting, self.commandRevision == revision else { return }
                     if granted {
                         self.performStartBringUp()
                     } else {
@@ -173,8 +171,9 @@ final class PhoneMicController {
         if startRetriesUsed < Self.maxStartRetries {
             startRetriesUsed += 1
             NSLog("[PhoneMic] bring-up failed (%@), retry %d", failure.code, startRetriesUsed)
+            let revision = commandRevision
             controlQueue.asyncAfter(deadline: .now() + Self.bringUpRetryDelay) { [weak self] in
-                guard let self, self.state == .starting else { return }
+                guard let self, self.state == .starting, self.commandRevision == revision else { return }
                 self.performStartBringUp()
             }
         } else {
@@ -241,6 +240,7 @@ final class PhoneMicController {
     }
 
     private func failStart(code: String, message: String) {
+        commandRevision &+= 1
         NSLog("[PhoneMic] start failed: %@ (%@)", code, message)
         generation.invalidate()
         teardownEngine()
@@ -265,6 +265,7 @@ final class PhoneMicController {
     // MARK: - Stop
 
     private func finishStop() {
+        commandRevision &+= 1
         if mode == .batch {
             finishStopBatch()
             return

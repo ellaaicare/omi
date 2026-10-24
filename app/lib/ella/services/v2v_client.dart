@@ -1,3 +1,5 @@
+import 'package:omi/ella/services/app_output_admission.dart';
+import 'package:omi/ella/services/whisper_delivery_runtime.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -5,7 +7,8 @@ import 'dart:typed_data';
 
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
-import 'package:just_audio/just_audio.dart';
+import 'package:omi/ella/services/admitted_audio_player.dart';
+import 'package:just_audio/just_audio.dart' as sdk;
 import 'package:record/record.dart';
 import 'package:web_socket_channel/io.dart';
 
@@ -16,15 +19,18 @@ import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/ella_voice_audio_route.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/v2v_turn_reconciler.dart';
+import 'package:omi/ella/services/grok_provider_readiness.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/services/mic/audio_capture_ownership.dart';
 
 abstract interface class V2VMicrophoneRecorder {
   Future<void> useEllaManagedAudioSession();
   Future<bool> hasPermission();
   Future<Stream<Uint8List>> startStream(RecordConfig config);
   Future<String?> stop();
+  Future<bool> isRecording();
   Future<void> dispose();
 }
 
@@ -48,7 +54,74 @@ final class RecordV2VMicrophoneRecorder implements V2VMicrophoneRecorder {
   Future<String?> stop() => _recorder.stop();
 
   @override
+  Future<bool> isRecording() => _recorder.isRecording();
+
+  @override
   Future<void> dispose() => _recorder.dispose();
+}
+
+/// Exact physical output receipts; local playing flags do not establish silence.
+abstract interface class V2VOutputPlayer {
+  Future<void> setVolume(double volume);
+  Future<void> setFilePath(String path);
+  Future<void> play();
+  Future<bool> stopAndConfirm();
+  Future<bool> disposeAndConfirm();
+  bool get reusableAfterStop;
+}
+
+final class JustAudioV2VOutputPlayer implements V2VOutputPlayer {
+  JustAudioV2VOutputPlayer({@visibleForTesting sdk.AudioPlayer? player}) : _player = player ?? AudioPlayer();
+  final sdk.AudioPlayer _player;
+  Future<bool>? _disposal;
+  bool _disposedConfirmed = false;
+  bool _disposalFailed = false;
+  @override
+  bool get reusableAfterStop => false;
+  @override
+  Future<void> setVolume(double volume) => _player.setVolume(volume);
+  @override
+  Future<void> setFilePath(String path) async {
+    await _player.setFilePath(path);
+  }
+
+  @override
+  Future<void> play() => _player.play();
+  @override
+  Future<bool> stopAndConfirm() => disposeAndConfirm();
+  @override
+  Future<bool> disposeAndConfirm() {
+    if (_disposedConfirmed) return Future.value(true);
+    // Stock dispose marks its local object disposed before native acknowledgement.
+    // After failure a stock retry is a no-op, not evidence of physical silence.
+    if (_disposalFailed) return Future.value(false);
+    return _disposal ??= (() async {
+      try {
+        await _player.dispose();
+        _disposedConfirmed = true;
+        return true;
+      } catch (_) {
+        _disposalFailed = true;
+        rethrow;
+      }
+    })();
+  }
+}
+
+class _V2VOutputLifetime {
+  _V2VOutputLifetime(this.lease) : outputPermit = AppOutputAdmission.shared.reserveOutput('v2v-session');
+  final AppOutputPermit outputPermit;
+  final AudioCaptureLease lease;
+  V2VOutputPlayer? player;
+  Future<void>? setup;
+  Future<void>? teardown;
+  bool retiring = false;
+  bool stopping = false;
+  Future<void>? playerStop;
+  bool failed = false;
+  bool routeAttempted = false;
+  bool routeReleased = false;
+  Future<void>? injectedPlayback;
 }
 
 enum V2VSessionScopeKind { memory, dailyCard }
@@ -213,7 +286,17 @@ class V2VEvent {
   final V2VTerminalTranscriptTurn? terminalTurn;
 }
 
-enum V2VConnectionStage { consent, identity, providerRegistry, session, audioSession, websocket, microphone, connected }
+enum V2VConnectionStage {
+  consent,
+  identity,
+  providerRegistry,
+  session,
+  audioSession,
+  websocket,
+  microphone,
+  providerReady,
+  connected
+}
 
 enum V2VProtectedEgressBoundary { providerRegistry, session, websocket, microphoneCapture, microphoneFrame }
 
@@ -322,6 +405,8 @@ class V2VClient {
 
   V2VWebSocketTransport? _channel;
   V2VMicrophoneRecorder? _recorder;
+  AudioCaptureLease? _audioCallLease;
+  AudioCaptureTransport? _micTransport;
   StreamSubscription? _micSub;
   StreamSubscription? _wsSub;
   AiConsentActiveSessionLease? _aiConsentLease;
@@ -329,6 +414,9 @@ class V2VClient {
   bool Function()? _sessionShouldContinue;
   bool _handlingAuthorityLoss = false;
   bool _isConnected = false;
+  GrokProviderReadiness? _providerReadiness;
+  bool _requiresProviderReady = false;
+  bool _providerAcknowledged = false;
   bool _connectionAnnounced = false;
   bool _isPlaying = false;
   bool _micMuted = false;
@@ -336,6 +424,7 @@ class V2VClient {
   int _micChunksSent = 0;
   int _micBytesSent = 0;
   Future<void> _micGateFuture = Future.value();
+  Object? _micGateFailure;
   Future<void> _terminalTurnTail = Future.value();
   String _connectedSessionId = '';
 
@@ -343,7 +432,8 @@ class V2VClient {
   final BytesBuilder _pcmBuffer = BytesBuilder(copy: false);
   int _chunkCount = 0;
 
-  AudioPlayer? _audioPlayer;
+  _V2VOutputLifetime? _outputLifetime;
+  final Map<AudioCaptureLease, _V2VOutputLifetime> _outputLifetimes = {};
   Future<void> _playbackFuture = Future.value();
   int _playbackGeneration = 0;
   Timer? _finishPlaybackTimer;
@@ -371,8 +461,12 @@ class V2VClient {
       _sessionCreator;
   final Future<void> Function()? _audioSessionConfigurator;
   final Future<void> Function()? _audioSessionReleaser;
+  final Future<bool> Function()? _audioSessionReleaseReceipt;
+  final V2VOutputPlayer Function() _outputPlayerFactory;
+  final Future<bool> Function()? _injectedPlaybackStopReceipt;
   final V2VWebSocketTransport Function(Uri uri)? _webSocketConnector;
   final Duration _playbackMicCooldown;
+  final Duration _providerReadinessTimeout;
 
   V2VClient({
     this.onEvent,
@@ -391,8 +485,12 @@ class V2VClient {
     Future<Map<String, dynamic>> Function(String uid, String provider, V2VSessionScope? sessionScope)? sessionCreator,
     @visibleForTesting Future<void> Function()? audioSessionConfigurator,
     @visibleForTesting Future<void> Function()? audioSessionReleaser,
+    @visibleForTesting Future<bool> Function()? audioSessionReleaseReceipt,
+    @visibleForTesting V2VOutputPlayer Function()? outputPlayerFactory,
+    @visibleForTesting Future<bool> Function()? injectedPlaybackStopReceipt,
     @visibleForTesting V2VWebSocketTransport Function(Uri uri)? webSocketConnector,
     @visibleForTesting Duration playbackMicCooldown = const Duration(seconds: 2),
+    @visibleForTesting Duration providerReadinessTimeout = const Duration(seconds: 16),
   })  : _beforeProtectedEgress = beforeProtectedEgress,
         _onProtectedEgress = onProtectedEgress,
         _microphoneStarter = microphoneStarter,
@@ -408,8 +506,12 @@ class V2VClient {
         _sessionCreator = sessionCreator,
         _audioSessionConfigurator = audioSessionConfigurator,
         _audioSessionReleaser = audioSessionReleaser,
+        _audioSessionReleaseReceipt = audioSessionReleaseReceipt,
+        _outputPlayerFactory = outputPlayerFactory ?? JustAudioV2VOutputPlayer.new,
+        _injectedPlaybackStopReceipt = injectedPlaybackStopReceipt,
         _webSocketConnector = webSocketConnector,
-        _playbackMicCooldown = playbackMicCooldown;
+        _playbackMicCooldown = playbackMicCooldown,
+        _providerReadinessTimeout = providerReadinessTimeout;
 
   bool get isConnected => _isConnected;
 
@@ -446,10 +548,12 @@ class V2VClient {
   V2VConnectionReceipt? get lastConnectionReceipt => _lastConnectionReceipt;
 
   V2VConnectionReceipt? _lastConnectionReceipt;
+  Future<void>? _disconnectFuture;
 
   bool _hasCurrentSessionAuthority() {
     final authority = _activeConsentAuthority;
     return authority != null &&
+        _audioCallLease?.isCurrent == true &&
         authority.isCurrent() &&
         (_sessionShouldContinue == null || _sessionShouldContinue!.call());
   }
@@ -461,12 +565,32 @@ class V2VClient {
     return true;
   }
 
+  void _reportUnconfirmedOutput() {
+    // Diagnostics are observers, never part of a physical teardown receipt.
+    // Neither a logger nor an application callback may strand the exact owner.
+    try {
+      Logger.error('[V2V] Output teardown unconfirmed; exact owner retained');
+    } catch (_) {}
+    try {
+      onEvent?.call(const V2VEvent(type: 'error', text: 'Voice audio playback failed'));
+    } catch (_) {}
+  }
+
+  void _disconnectAfterEvent() {
+    unawaited(disconnect().catchError((Object _) => _reportUnconfirmedOutput()));
+  }
+
   Future<void> _handleRuntimeAuthorityLoss() async {
     if (_handlingAuthorityLoss) return;
     _handlingAuthorityLoss = true;
     onEvent?.call(const V2VEvent(type: 'consent_authority_lost'));
-    await disconnect();
-    _handlingAuthorityLoss = false;
+    try {
+      await disconnect();
+    } catch (_) {
+      _reportUnconfirmedOutput();
+    } finally {
+      _handlingAuthorityLoss = false;
+    }
   }
 
   static String normalizeProvider(String provider) => switch (provider) {
@@ -521,6 +645,7 @@ class V2VClient {
     return {
       if (includeUid) 'uid': uid,
       'provider': canonicalProvider,
+      if (canonicalProvider == 'grok-voice') 'ready_protocol': 1,
       if (voiceMode != null) 'voice_mode': voiceMode,
       if (sessionScope != null) 'session_scope': sessionScope.toJson(),
     };
@@ -553,6 +678,17 @@ class V2VClient {
     }).where((provider) {
       return provider.isNotEmpty;
     }).toSet();
+  }
+
+  @visibleForTesting
+  static bool registrySupportsGrokReady(Object? data) {
+    if (data is! Map || data['providers'] is! List) return false;
+    return (data['providers'] as List).whereType<Map>().any((p) =>
+        p['id'] == 'grok-voice' &&
+        p['available'] == true &&
+        p['type'] == 'v2v' &&
+        p['ready_protocols'] is List &&
+        (p['ready_protocols'] as List).any((v) => v is int && v == 1));
   }
 
   @visibleForTesting
@@ -595,13 +731,92 @@ class V2VClient {
   }
 
   /// Start a V2V session: get session token, connect WebSocket, start audio.
+  bool _reserveAudioCall(AiConsentAuthoritySnapshot authority, bool Function()? shouldContinue) {
+    final existing = _audioCallLease;
+    if (existing != null && existing.isOwner) return existing.isCurrent;
+    _audioCallLease = AudioCaptureOwnership.shared.reserve(
+      source: 'v2v-call',
+      hasAuthority: () => authority.isCurrent() && (shouldContinue == null || shouldContinue()),
+    );
+    if (_audioCallLease != null) _registerOutputLifetime(_audioCallLease!);
+    return _audioCallLease != null;
+  }
+
   Future<V2VConnectionReceipt> connect({
     required String provider,
     V2VSessionScope? sessionScope,
     bool Function()? shouldContinue,
     V2VBeforeTransportActivation? beforeTransportActivation,
+  }) {
+    final authority = AiConsentActiveSessionLease.authorityForSessionStart(expectedUid: SharedPreferencesUtil().uid);
+    Future<void>? precedingCleanup;
+    if (authority != null) {
+      final retiringClient = _disconnectFuture != null ? this : _activeClient;
+      final retiringLease = retiringClient?._audioCallLease;
+      precedingCleanup = retiringClient?._disconnectFuture;
+      if (precedingCleanup != null && retiringLease?.isOwner == true) {
+        _audioCallLease = retiringLease!.reserveSuccessor(
+          source: 'v2v-call',
+          hasAuthority: () => authority.isCurrent() && (shouldContinue == null || shouldContinue()),
+        );
+      } else if (_audioCallLease?.isOwner == true || !_reserveAudioCall(authority, shouldContinue)) {
+        return Future.value(_completeReceipt(V2VConnectionReceipt(
+          connected: false,
+          provider: normalizeProvider(provider),
+          stage: V2VConnectionStage.identity,
+          errorCode: 'audio_capture_busy',
+        )));
+      }
+      if (_audioCallLease == null) {
+        return Future.value(_completeReceipt(V2VConnectionReceipt(
+          connected: false,
+          provider: normalizeProvider(provider),
+          stage: V2VConnectionStage.identity,
+          errorCode: 'audio_capture_busy',
+        )));
+      }
+    }
+    final reservation = _audioCallLease;
+    if (reservation != null) _registerOutputLifetime(reservation);
+    Future<V2VConnectionReceipt> startAfterAdmission() async {
+      if (reservation != null && !await reservation.admitted) {
+        return V2VConnectionReceipt(
+            connected: false,
+            provider: normalizeProvider(provider),
+            stage: V2VConnectionStage.identity,
+            errorCode: 'audio_capture_cancelled');
+      }
+      if (precedingCleanup != null) await precedingCleanup;
+      return _connectOwned(
+          provider: provider,
+          sessionScope: sessionScope,
+          shouldContinue: shouldContinue,
+          beforeTransportActivation: beforeTransportActivation);
+    }
+
+    return startAfterAdmission().then((receipt) async {
+      if (!receipt.connected && reservation != null) {
+        await reservation.stop();
+        if (identical(_audioCallLease, reservation)) _audioCallLease = null;
+      }
+      return receipt;
+    }, onError: (Object error, StackTrace stack) async {
+      await reservation?.stop();
+      if (identical(_audioCallLease, reservation)) _audioCallLease = null;
+      Error.throwWithStackTrace(error, stack);
+    });
+  }
+
+  Future<V2VConnectionReceipt> _connectOwned({
+    required String provider,
+    V2VSessionScope? sessionScope,
+    bool Function()? shouldContinue,
+    V2VBeforeTransportActivation? beforeTransportActivation,
   }) async {
+    final pendingDisconnect = _disconnectFuture;
+    if (pendingDisconnect != null) await pendingDisconnect;
     provider = normalizeProvider(provider);
+    _lastConnectionReceipt = null;
 
     Future<V2VConnectionReceipt?> cancelIfRequested(V2VConnectionStage stage, {String voiceMode = ''}) async {
       if (shouldContinue == null || shouldContinue()) return null;
@@ -757,6 +972,26 @@ class V2VClient {
         sessionData['voice_mode'] as String? ?? sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '';
     final sessionId = sessionData['session_id']?.toString().trim() ?? '';
     final confirmedScope = V2VResolvedSessionScope.tryParse(sessionData['session_scope']);
+    final requiresReady = provider == 'grok-voice';
+    Uri? issuedEndpoint;
+    try {
+      issuedEndpoint = Uri.parse(endpoint);
+    } catch (_) {}
+    final issuedProtocols = issuedEndpoint?.queryParametersAll['ready_protocol'];
+    if (requiresReady &&
+        (sessionData['ready_protocol'] is! int ||
+            sessionData['ready_protocol'] != 1 ||
+            issuedProtocols == null ||
+            issuedProtocols.length != 1 ||
+            issuedProtocols.single != '1')) {
+      if (_activeClient == this) _activeClient = null;
+      return _completeReceipt(V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          stage: V2VConnectionStage.session,
+          errorCode: 'provider_ready_protocol_unsupported'));
+    }
+
     if (token.isEmpty || endpoint.isEmpty || sessionId.isEmpty) {
       Logger.debug('[V2V] Invalid session data');
       if (_activeClient == this) _activeClient = null;
@@ -801,7 +1036,7 @@ class V2VClient {
 
     // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
     try {
-      await (_audioSessionConfigurator?.call() ?? _configureAudioSession());
+      await _withOutputSetup(() => _audioSessionConfigurator?.call() ?? _configureAudioSession());
       final invalid = await stopIfStartupInvalid(V2VConnectionStage.audioSession, voiceMode: confirmedVoiceMode);
       if (invalid != null) return invalid;
     } catch (error) {
@@ -829,11 +1064,22 @@ class V2VClient {
         return stopForAuthorityLoss(voiceMode: confirmedVoiceMode);
       }
       _channel = _webSocketConnector?.call(Uri.parse(wsUrl)) ?? _connectWebSocket(Uri.parse(wsUrl));
+      final connectedChannel = _channel!;
 
-      await _channel!.ready.timeout(const Duration(seconds: 12));
+      await connectedChannel.ready.timeout(const Duration(seconds: 12));
       final websocketInvalid = await stopIfStartupInvalid(V2VConnectionStage.websocket, voiceMode: confirmedVoiceMode);
       if (websocketInvalid != null) return websocketInvalid;
 
+      _requiresProviderReady = requiresReady;
+      _providerAcknowledged = !requiresReady;
+      final readiness = requiresReady
+          ? GrokProviderReadiness(
+              timeout: _providerReadinessTimeout,
+              sessionId: sessionId,
+              isCurrent: () => identical(_channel, connectedChannel) && _hasCurrentSessionAuthority())
+          : null;
+      _providerReadiness = readiness;
+      GrokProviderReadyResult? readyResult;
       var listenerAttached = false;
       final micStarted = await activateV2VTransportInOrder(
         armSession: () async {
@@ -844,29 +1090,60 @@ class V2VClient {
           // Registering the listener can synchronously release buffered proxy frames. The
           // caller's session/outbox must therefore be armed before this point.
           listenerAttached = true;
-          _isConnected = true;
+          _isConnected = !requiresReady;
           _connectedSessionId = sessionId;
-          _wsSub = _channel!.stream.listen(
-            _handleMessage,
+          _wsSub = connectedChannel.stream.listen(
+            (message) {
+              if (identical(_channel, connectedChannel) && _hasCurrentSessionAuthority()) _handleMessage(message);
+            },
             onError: (error) {
+              if (!identical(_channel, connectedChannel)) return;
+              readiness?.fail('provider_startup_failed');
               Logger.error('[V2V] WebSocket error: ${error.runtimeType}');
-              disconnect();
+              _disconnectAfterEvent();
             },
             onDone: () {
+              if (!identical(_channel, connectedChannel)) return;
+              readiness?.fail('provider_startup_client_closed');
               Logger.debug('[V2V] WebSocket closed');
-              _isConnected = false;
-              if (_connectionAnnounced) {
-                _connectionAnnounced = false;
-                onConnectionChanged?.call(false);
-              }
+              _disconnectAfterEvent();
             },
           );
         },
-        startMicrophone: () => _startAuthorizedMicrophone(
-          authority: authority,
-          shouldContinue: _sessionShouldContinue!,
-        ),
+        startMicrophone: () async {
+          if (readiness != null) {
+            await readiness.result;
+            readyResult = readiness.outcome;
+            if (!readyResult!.ready || !identical(_channel, connectedChannel) || !_hasCurrentSessionAuthority()) {
+              return false;
+            }
+            _providerAcknowledged = true;
+          }
+          final continuation = _sessionShouldContinue;
+          if (continuation == null) return false;
+          final started = await _startAuthorizedMicrophone(authority: authority, shouldContinue: continuation);
+          if (readiness != null) readyResult = readiness.outcome;
+          if (requiresReady &&
+              readyResult?.ready == true &&
+              started &&
+              identical(_channel, connectedChannel) &&
+              _hasCurrentSessionAuthority()) {
+            _isConnected = true;
+          }
+          return started;
+        },
       );
+      if (readiness != null) readyResult = readiness.outcome;
+      if (readyResult != null && !readyResult!.ready) {
+        await disconnect();
+        return _completeReceipt(V2VConnectionReceipt(
+            connected: false,
+            provider: provider,
+            voiceMode: confirmedVoiceMode,
+            stage: V2VConnectionStage.providerReady,
+            httpStatus: readyResult!.httpStatus,
+            errorCode: readyResult!.errorCode));
+      }
       final microphoneInvalid = await stopIfStartupInvalid(
         V2VConnectionStage.microphone,
         voiceMode: confirmedVoiceMode,
@@ -917,7 +1194,33 @@ class V2VClient {
   }
 
   /// Disconnect and clean up all resources.
-  Future<void> disconnect() async {
+  Future<void> disconnect() {
+    final pending = _disconnectFuture;
+    if (pending != null) return pending;
+    final cleanup = Completer<void>();
+    _disconnectFuture = cleanup.future;
+    Future<void> runCleanup() async {
+      try {
+        await _disconnectResources();
+        cleanup.complete();
+      } catch (error, stackTrace) {
+        cleanup.completeError(error, stackTrace);
+      } finally {
+        if (_activeClient == this && _audioCallLease?.isOwner != true) _activeClient = null;
+        _disconnectFuture = null;
+      }
+    }
+
+    unawaited(runCleanup());
+    return cleanup.future;
+  }
+
+  Future<void> _disconnectResources() async {
+    final reservation = _audioCallLease;
+    _providerReadiness?.fail('connect_cancelled');
+    _providerReadiness = null;
+    _providerAcknowledged = false;
+    _requiresProviderReady = false;
     final consentLease = _aiConsentLease;
     _aiConsentLease = null;
     consentLease?.stop();
@@ -928,11 +1231,7 @@ class V2VClient {
     _connectedSessionId = '';
     _connectionAnnounced = false;
     if (shouldAnnounceDisconnect) onConnectionChanged?.call(false);
-    if (_activeClient == this) {
-      _activeClient = null;
-    }
-
-    _wsSub?.cancel();
+    await _wsSub?.cancel();
     _wsSub = null;
 
     try {
@@ -941,13 +1240,17 @@ class V2VClient {
     _channel = null;
 
     await _stopMicStream(reason: 'disconnect');
-    try {
-      await _stopAudioPlayback(dispose: true);
-    } catch (_) {}
-    try {
-      await (_audioSessionReleaser?.call() ??
-          EllaVoiceAudioRoute.release(usage: EllaVoiceAudioUsage.interactive).then<void>((_) {}));
-    } catch (_) {}
+    if (reservation != null) {
+      await _teardownOutputLifetime(_lifetimeFor(reservation));
+    } else if (_outputLifetime != null) {
+      await _teardownOutputLifetime(_outputLifetime!);
+    } else if (_audioSessionReleaser != null) {
+      await _audioSessionReleaser!(); // Existing no-route fixture, no production effect.
+    }
+    await reservation?.stop();
+    if (identical(_audioCallLease, reservation)) _audioCallLease = null;
+    if (identical(_outputLifetime?.lease, reservation)) _outputLifetime = null;
+    _outputLifetimes.remove(reservation);
     _resetTurnState();
   }
 
@@ -957,9 +1260,7 @@ class V2VClient {
     _finishPlaybackTimer?.cancel();
     _finishPlaybackTimer = null;
     final shouldResumeMic = _micSuspendedForPlayback;
-    try {
-      await _stopAudioPlayback();
-    } catch (_) {}
+    await _stopAudioPlayback();
     _isPlaying = false;
     _pcmBuffer.clear();
     _chunkCount = 0;
@@ -980,8 +1281,11 @@ class V2VClient {
     _micGateFuture = _micGateFuture.then((_) async {
       await _stopMicStream(reason: 'playback_gate:$reason');
     }).catchError((error) {
-      Logger.error('[V2V] Mic gate close failed: $error');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic gate close failed: $error'));
+      // Keep the future observed, but do not turn an ambiguous physical stop
+      // into permission to play or restart another microphone transport.
+      _micGateFailure = error;
+      Logger.error('[V2V] Mic gate close failed: ${error.runtimeType}');
+      onEvent?.call(const V2VEvent(type: 'error', text: 'Voice microphone teardown failed'));
     });
   }
 
@@ -999,6 +1303,7 @@ class V2VClient {
     _finishPlaybackTimer = null;
     _finishingPlayback = false;
     _micGateFuture = Future.value();
+    _micGateFailure = null;
   }
 
   // --- Audio session ---
@@ -1050,10 +1355,27 @@ class V2VClient {
       );
       if (response == null || response.statusCode != 200) {
         _logRegistryReceipt(provider, response?.statusCode, 'registry_unavailable');
+        if (provider == 'grok-voice') {
+          return V2VConnectionReceipt(
+              connected: false,
+              provider: provider,
+              stage: V2VConnectionStage.providerRegistry,
+              httpStatus: response?.statusCode,
+              errorCode: 'registry_unavailable');
+        }
         return null;
       }
 
-      final providers = availableSessionProviders(jsonDecode(response.body));
+      final decodedRegistry = jsonDecode(response.body);
+      if (provider == 'grok-voice' && !registrySupportsGrokReady(decodedRegistry)) {
+        return V2VConnectionReceipt(
+            connected: false,
+            provider: provider,
+            stage: V2VConnectionStage.providerRegistry,
+            httpStatus: response.statusCode,
+            errorCode: 'provider_ready_protocol_unsupported');
+      }
+      final providers = availableSessionProviders(decodedRegistry);
       if (!providers.contains(provider)) {
         return V2VConnectionReceipt(
           connected: false,
@@ -1066,6 +1388,13 @@ class V2VClient {
       _logRegistryReceipt(provider, response.statusCode, 'available');
     } catch (_) {
       _logRegistryReceipt(provider, null, 'registry_unavailable');
+      if (provider == 'grok-voice') {
+        return V2VConnectionReceipt(
+            connected: false,
+            provider: provider,
+            stage: V2VConnectionStage.providerRegistry,
+            errorCode: 'registry_unavailable');
+      }
     }
     return null;
   }
@@ -1270,6 +1599,9 @@ class V2VClient {
     required AiConsentAuthoritySnapshot authority,
     required bool Function() shouldContinue,
   }) async {
+    if (_outputLifetime?.failed == true || (_outputLifetime?.retiring == true || _outputLifetime?.stopping == true))
+      return false;
+    if (!_reserveAudioCall(authority, shouldContinue)) return false;
     _activeConsentAuthority = authority;
     _sessionShouldContinue = shouldContinue;
     _aiConsentLease ??= AiConsentActiveSessionLease(
@@ -1298,115 +1630,113 @@ class V2VClient {
   }
 
   Future<bool> _startMicStream() async {
+    AudioCaptureTransport? transport;
+    V2VMicrophoneRecorder? recorder;
     try {
-      if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
+      if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) return false;
+      if (_recorder != null || _micSub != null) return _micTransport?.isCurrent == true;
+      transport = _audioCallLease!.createTransport();
+      _micTransport = transport;
+      recorder = _microphoneRecorderFactory();
+      _recorder = recorder;
+      await recorder.useEllaManagedAudioSession();
+      if (!transport.isCurrent || !identical(_recorder, recorder)) {
+        await _stopMicStream(reason: 'cancelled_before_permission', expectedTransport: transport);
         return false;
       }
-      if (_recorder != null || _micSub != null) {
-        Logger.debug('[V2V] Mic stream already active, not starting duplicate recorder');
-        return true;
-      }
-
-      _recorder = _microphoneRecorderFactory();
-      await _recorder!.useEllaManagedAudioSession();
-
-      final hasPermission = await _recorder!.hasPermission();
-      if (!hasPermission) {
-        Logger.error('[V2V] Mic permission denied');
-        onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic permission denied'));
-        await _recorder?.dispose();
-        _recorder = null;
+      final hasPermission = whisperDeliveryProtocol1
+          ? await WhisperDeliveryRuntime.shared.withoutWhisperOutput(() => recorder!.hasPermission())
+          : await recorder.hasPermission();
+      if (!hasPermission || !transport.isCurrent || !_hasCurrentSessionAuthority()) {
+        await _stopMicStream(reason: 'permission_or_authority_unavailable', expectedTransport: transport);
         return false;
       }
-      if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
-        await _recorder?.dispose();
-        _recorder = null;
-        return false;
-      }
-
-      final stream = await _recorder!.startStream(
-        const RecordConfig(
-          encoder: AudioEncoder.pcm16bits,
-          sampleRate: 24000,
-          numChannels: 1,
-          autoGain: true,
-          echoCancel: true,
-          noiseSuppress: true,
-          iosConfig: IosRecordConfig(
-            categoryOptions: [
-              IosAudioCategoryOption.defaultToSpeaker,
-              IosAudioCategoryOption.allowBluetooth,
-              IosAudioCategoryOption.allowBluetoothA2DP,
-              IosAudioCategoryOption.allowAirPlay,
-            ],
-          ),
-        ),
+      late final Stream<Uint8List> stream;
+      StreamSubscription? ownedSubscription;
+      final ownedRecorder = recorder;
+      final ownedTransport = transport;
+      await transport.start(
+        start: () async {
+          stream = await ownedRecorder.startStream(
+            const RecordConfig(
+              encoder: AudioEncoder.pcm16bits,
+              sampleRate: 24000,
+              numChannels: 1,
+              autoGain: true,
+              echoCancel: true,
+              noiseSuppress: true,
+              iosConfig: IosRecordConfig(
+                categoryOptions: [
+                  IosAudioCategoryOption.defaultToSpeaker,
+                  IosAudioCategoryOption.allowBluetooth,
+                  IosAudioCategoryOption.allowBluetoothA2DP,
+                  IosAudioCategoryOption.allowAirPlay,
+                ],
+              ),
+            ),
+          );
+        },
+        stopAndConfirm: () async {
+          await ownedSubscription?.cancel();
+          await ownedRecorder.stop();
+          if (await ownedRecorder.isRecording()) throw StateError('V2V microphone stop not confirmed');
+          await ownedRecorder.dispose();
+        },
       );
-      if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
-        await _recorder?.stop();
-        await _recorder?.dispose();
-        _recorder = null;
+      if (!transport.isCurrent || !_hasCurrentSessionAuthority() || !await _ensureInteractiveOutput()) {
+        await _stopMicStream(reason: 'post_start_admission_unavailable', expectedTransport: transport);
         return false;
       }
-      if (!await _interactiveOutputEnforcer()) {
-        await _recorder?.stop();
-        await _recorder?.dispose();
-        _recorder = null;
-        Logger.error('[V2V] Mic start failed: Ella route verification rejected recorder session');
-        onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic unavailable'));
+      if (!transport.isCurrent || !_hasCurrentSessionAuthority()) {
+        await _stopMicStream(reason: 'late_route_verification', expectedTransport: transport);
         return false;
       }
-
       _micChunksSent = 0;
       _micBytesSent = 0;
-      _micSub = stream.listen((data) {
-        if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
-          unawaited(_handleRuntimeAuthorityLoss());
-          return;
-        }
+      ownedSubscription = stream.listen((data) {
+        if (!ownedTransport.isCurrent || !_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) return;
         if (_isConnected && _channel != null && !_micMuted && !_isPlaying && !_micSuspendedForPlayback) {
           _onProtectedEgress?.call(V2VProtectedEgressBoundary.microphoneFrame);
           _channel!.send(data);
           _micChunksSent++;
           _micBytesSent += data.length;
-          if (_micChunksSent % 50 == 0) {
-            Logger.debug('[V2V] Mic streamed $_micChunksSent chunks, $_micBytesSent bytes');
-          }
         }
       });
-
+      _micSub = ownedSubscription;
       _micMuted = false;
       _micSuspendedForPlayback = false;
-      Logger.debug('[V2V] Mic gate open: recording at 24kHz');
       onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic active'));
       return true;
     } catch (error) {
+      if (transport != null) {
+        await _stopMicStream(reason: 'start_failed', expectedTransport: transport);
+      }
       Logger.error('[V2V] Mic start failed: ${error.runtimeType}');
       onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic unavailable'));
       return false;
     }
   }
 
-  Future<void> _stopMicStream({required String reason}) async {
-    final hadMic = _micSub != null || _recorder != null;
-    if (hadMic) {
-      Logger.debug('[V2V] Mic stream stopping: reason=$reason');
+  Future<void> _stopMicStream({required String reason, AudioCaptureTransport? expectedTransport}) async {
+    final transport = expectedTransport ?? _micTransport;
+    if (expectedTransport != null && !identical(_micTransport, expectedTransport)) return;
+    final recorder = _recorder;
+    if (transport != null) {
+      await transport.stop();
+      // Before native start there is no physical recording, but the owned
+      // recorder object may already exist while its permission dialog is held.
+      if (!transport.hasAttemptedStart) await recorder?.dispose();
     }
-
-    await _micSub?.cancel();
-    _micSub = null;
-    try {
-      await _recorder?.stop();
-      await _recorder?.dispose();
-    } catch (_) {}
-    _recorder = null;
-
-    if (hadMic) {
-      Logger.debug('[V2V] Mic stream stopped: reason=$reason');
+    if (identical(_micTransport, transport)) {
+      _micTransport = null;
+      _micSub = null;
+      if (identical(_recorder, recorder)) _recorder = null;
     }
   }
 
   Future<void> _resumeMicAfterPlayback() async {
+    if (_outputLifetime?.failed == true || (_outputLifetime?.retiring == true || _outputLifetime?.stopping == true))
+      return;
     if (!_micSuspendedForPlayback) {
       _micMuted = false;
       return;
@@ -1416,6 +1746,7 @@ class V2VClient {
     onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic gate cooldown'));
     await Future.delayed(_playbackMicCooldown);
     await _micGateFuture;
+    if (_micGateFailure != null) return;
 
     if (!_hasLiveSessionTransport) {
       Logger.debug('[V2V] Mic gate remains closed: session disconnected');
@@ -1440,7 +1771,7 @@ class V2VClient {
       await _handleRuntimeAuthorityLoss();
       return;
     }
-    if (!await _interactiveOutputEnforcer()) {
+    if (!await _ensureInteractiveOutput()) {
       Logger.error('[V2V] Interactive audio route could not be restored after playback');
       await disconnect();
       return;
@@ -1455,7 +1786,11 @@ class V2VClient {
 
   /// Buffer provider PCM16 until its explicit completion marker arrives.
   void _bufferAudioChunk(Uint8List pcmData) {
-    if (pcmData.isEmpty || !_hasLiveSessionTransport) return;
+    if (pcmData.isEmpty ||
+        !_hasLiveSessionTransport ||
+        _outputLifetime?.failed == true ||
+        (_outputLifetime?.retiring == true || _outputLifetime?.stopping == true) ||
+        !_hasCurrentSessionAuthority()) return;
 
     // A binary frame proves that this response has audio. Transcript events do
     // not: some provider turns are intentionally text-only.
@@ -1474,36 +1809,179 @@ class V2VClient {
     }
   }
 
-  Future<void> _stopAudioPlayback({bool dispose = false}) async {
-    final player = _audioPlayer;
-    if (player == null) return;
+  void _registerOutputLifetime(AudioCaptureLease lease) {
+    final existing = _outputLifetimes[lease];
+    if (existing != null) {
+      _outputLifetime = existing;
+      return;
+    }
+    final lifetime = _V2VOutputLifetime(lease);
+    _outputLifetimes[lease] = lifetime;
+    _outputLifetime = lifetime;
+    lease.addStopAndConfirm(() => _teardownOutputLifetime(lifetime));
+  }
+
+  _V2VOutputLifetime _lifetimeFor(AudioCaptureLease lease) {
+    final lifetime = _outputLifetimes[lease];
+    if (lifetime == null) throw StateError('V2V output lifetime unavailable');
+    return lifetime;
+  }
+
+  Future<T> _withOutputSetup<T>(Future<T> Function() action) async {
+    final lifetime = _outputLifetime;
+    if (lifetime == null || !lifetime.lease.isCurrent || lifetime.retiring || lifetime.stopping || lifetime.failed) {
+      throw StateError('V2V output owner unavailable');
+    }
+    final receipt = Completer<void>();
+    final preceding = lifetime.setup;
+    lifetime.setup = receipt.future;
     try {
-      await player.stop();
-    } catch (_) {}
-    if (dispose) {
-      try {
-        await player.dispose();
-      } catch (_) {}
-      if (identical(_audioPlayer, player)) _audioPlayer = null;
+      if (preceding != null) {
+        try {
+          await preceding;
+        } catch (_) {}
+      }
+      if (!lifetime.lease.isCurrent || lifetime.retiring || lifetime.stopping || lifetime.failed)
+        throw StateError('V2V output setup retired');
+      lifetime.routeAttempted = true;
+      lifetime.routeReleased = false;
+      return await action();
+    } finally {
+      receipt.complete();
+      if (identical(lifetime.setup, receipt.future)) lifetime.setup = null;
+    }
+  }
+
+  Future<bool> _ensureInteractiveOutput() => _withOutputSetup(_interactiveOutputEnforcer);
+
+  Future<void> _releaseOutputRoute(_V2VOutputLifetime lifetime) async {
+    if (!lifetime.routeAttempted || lifetime.routeReleased) return;
+    final injectedReceipt = _audioSessionReleaseReceipt;
+    if (injectedReceipt != null) {
+      if (!await injectedReceipt()) throw StateError('V2V audio route release not confirmed');
+    } else if (_audioSessionReleaser != null) {
+      await _audioSessionReleaser!();
+    } else if (!await EllaVoiceAudioRoute.release(usage: EllaVoiceAudioUsage.interactive)) {
+      throw StateError('V2V audio route release not confirmed');
+    }
+    lifetime.routeReleased = true;
+  }
+
+  Future<void> _teardownOutputLifetime(_V2VOutputLifetime lifetime) {
+    final pending = lifetime.teardown;
+    if (pending != null) return pending;
+    lifetime.retiring = true;
+    _playbackGeneration++;
+    _finishPlaybackTimer?.cancel();
+    _finishPlaybackTimer = null;
+    final receipt = Completer<void>();
+    lifetime.teardown = receipt.future;
+    () async {
+      await lifetime.setup;
+      await _stopOutputPlayer(lifetime, dispose: true);
+      await _releaseOutputRoute(lifetime);
+      lifetime.failed = false;
+      lifetime.outputPermit.releaseAfterConfirmedTeardown();
+    }()
+        .then(receipt.complete, onError: (Object error, StackTrace stack) {
+      lifetime.failed = true;
+      receipt.completeError(error, stack);
+      _reportUnconfirmedOutput();
+    }).whenComplete(() => lifetime.teardown = null);
+    return receipt.future;
+  }
+
+  Future<void> _stopOutputPlayer(_V2VOutputLifetime lifetime, {required bool dispose}) async {
+    final pending = lifetime.playerStop;
+    if (pending != null) {
+      await pending;
+      if (dispose) await _stopOutputPlayer(lifetime, dispose: true);
+      return;
+    }
+    final receipt = Completer<void>();
+    lifetime.playerStop = receipt.future;
+    try {
+      await _stopOutputPlayerOwned(lifetime, dispose: dispose);
+      receipt.complete();
+    } catch (error, stack) {
+      receipt.completeError(error, stack);
+    } finally {
+      lifetime.playerStop = null;
+    }
+    return receipt.future;
+  }
+
+  Future<void> _stopOutputPlayerOwned(_V2VOutputLifetime lifetime, {required bool dispose}) async {
+    final injected = lifetime.injectedPlayback;
+    if (injected != null) {
+      final confirmation = _injectedPlaybackStopReceipt;
+      if (confirmation != null) {
+        if (!await confirmation()) throw StateError('V2V injected output stop not confirmed');
+      } else {
+        try {
+          await injected;
+        } catch (_) {}
+      }
+      lifetime.injectedPlayback = null;
+    }
+    final player = lifetime.player;
+    if (player == null) return;
+    if (!await player.stopAndConfirm()) throw StateError('V2V output stop not confirmed');
+    if (dispose && !await player.disposeAndConfirm()) throw StateError('V2V output disposal not confirmed');
+    if (dispose || !player.reusableAfterStop) lifetime.player = null;
+  }
+
+  Future<void> _stopAudioPlayback({bool dispose = false}) async {
+    final lifetime = _outputLifetime;
+    if (lifetime == null) return;
+    lifetime.stopping = true;
+    try {
+      await lifetime.setup;
+      await _stopOutputPlayer(lifetime, dispose: dispose);
+      lifetime.failed = false;
+    } catch (_) {
+      lifetime.failed = true;
+      _micMuted = true;
+      _micSuspendedForPlayback = true;
+      _reportUnconfirmedOutput();
+      rethrow;
+    } finally {
+      lifetime.stopping = false;
     }
   }
 
   Future<void> _playWav(Uint8List wavBytes, int generation) async {
+    final lifetime = _outputLifetime;
+    if (lifetime == null || lifetime.failed || lifetime.retiring || lifetime.stopping)
+      throw StateError('V2V output unavailable');
     final injectedPlayback = _wavPlayback;
     if (injectedPlayback != null) {
-      await injectedPlayback(wavBytes);
+      if (generation != _playbackGeneration || !lifetime.lease.isCurrent) return;
+      final playing = Future<void>.sync(() => injectedPlayback(wavBytes));
+      lifetime.injectedPlayback = playing;
+      await playing;
+      if (identical(lifetime.injectedPlayback, playing)) lifetime.injectedPlayback = null;
       return;
     }
-
     final path = '${Directory.systemTemp.path}/ella_v2v_${DateTime.now().microsecondsSinceEpoch}_$generation.wav';
     final file = File(path);
-    await file.writeAsBytes(wavBytes, flush: true);
     try {
-      final player = _audioPlayer ??= AudioPlayer();
-      await player.setVolume(1.0);
-      await player.setFilePath(path);
-      if (generation != _playbackGeneration || !_hasLiveSessionTransport) return;
-      await player.play();
+      await _withOutputSetup(() async {
+        await file.writeAsBytes(wavBytes, flush: true);
+        if (!lifetime.lease.isCurrent || lifetime.retiring || lifetime.stopping || generation != _playbackGeneration)
+          return;
+        final player = lifetime.player ??= _outputPlayerFactory();
+        await player.setVolume(1.0);
+        if (!lifetime.lease.isCurrent || lifetime.retiring || lifetime.stopping || generation != _playbackGeneration)
+          return;
+        await player.setFilePath(path);
+      });
+      if (generation != _playbackGeneration ||
+          !_hasLiveSessionTransport ||
+          !lifetime.lease.isCurrent ||
+          lifetime.retiring ||
+          lifetime.stopping) return;
+      await lifetime.player?.play();
     } finally {
       try {
         await file.delete();
@@ -1531,6 +2009,8 @@ class V2VClient {
   /// Called after audio/output completion quiets. A complete WAV source gives
   /// just_audio a deterministic duration and an awaitable completion boundary.
   Future<void> _finishPlayback({required String reason}) async {
+    if (_outputLifetime?.failed == true || (_outputLifetime?.retiring == true || _outputLifetime?.stopping == true))
+      return;
     if (_finishingPlayback) {
       Logger.debug('[V2V] Playback finish already in progress, ignoring reason=$reason');
       return;
@@ -1556,12 +2036,13 @@ class V2VClient {
 
     try {
       await _micGateFuture;
+      if (_micGateFailure != null) return;
       if (generation != _playbackGeneration || !_hasLiveSessionTransport) return;
       if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
         await _handleRuntimeAuthorityLoss();
         return;
       }
-      if (!await _playbackOutputEnforcer()) {
+      if (!await _withOutputSetup(_playbackOutputEnforcer)) {
         throw StateError('Ella voice playback route could not be made audible');
       }
 
@@ -1575,10 +2056,14 @@ class V2VClient {
       if (generation != _playbackGeneration) return;
       await _onPlaybackComplete(generation);
     } catch (error) {
-      if (generation != _playbackGeneration) return;
+      if (generation != _playbackGeneration || _outputLifetime?.failed == true) return;
       Logger.error('[V2V] WAV playback error: ${error.runtimeType}');
       onEvent?.call(const V2VEvent(type: 'error', text: 'Voice audio playback failed'));
-      await _stopAudioPlayback();
+      try {
+        await _stopAudioPlayback();
+      } catch (_) {
+        return;
+      }
       _isPlaying = false;
       await _resumeMicAfterPlayback();
       onEvent?.call(const V2VEvent(type: 'playback_complete'));
@@ -1626,6 +2111,7 @@ class V2VClient {
 
   void _handleMessage(dynamic message) {
     if (message is List<int>) {
+      if (_requiresProviderReady && (!_providerAcknowledged || !_isConnected)) return;
       // Binary frame = raw PCM16 audio from proxy.
       _bufferAudioChunk(Uint8List.fromList(message));
       return;
@@ -1637,6 +2123,34 @@ class V2VClient {
         final json = jsonDecode(message) as Map<String, dynamic>;
         final type = json['type'] as String? ?? 'unknown';
         final text = _eventText(json);
+        if (_requiresProviderReady && (type == 'error' || type == 'session_end')) {
+          final policyReason = _eventPolicyReason(json);
+          final legacyCode = safeErrorCode(jsonEncode(json), fallback: 'provider_startup_failed');
+          final consentDenied = const {'ai_consent_required', 'consent_authority_lost'}.contains(legacyCode);
+          if (policyReason != null) {
+            _providerReadiness?.fail(ellaVoicePolicyReasonCode(policyReason));
+            onEvent?.call(V2VEvent(type: type, policyReason: policyReason, resetsAt: _eventResetsAt(json)));
+          } else if (consentDenied) {
+            _providerReadiness?.fail(legacyCode);
+            onEvent?.call(const V2VEvent(type: 'consent_authority_lost'));
+          } else {
+            _providerReadiness?.handle(json);
+          }
+          final failure = _providerReadiness?.outcome;
+          _completeReceipt(V2VConnectionReceipt(
+              connected: false,
+              provider: 'grok-voice',
+              stage: V2VConnectionStage.providerReady,
+              errorCode: failure?.errorCode ?? 'provider_startup_failed',
+              httpStatus: failure?.httpStatus));
+          _disconnectAfterEvent();
+          return;
+        }
+        if (_requiresProviderReady && (!_providerAcknowledged || !_isConnected)) {
+          _providerReadiness?.handle(json);
+          return;
+        }
+        if (_requiresProviderReady && type == 'provider_ready') return;
 
         if (type == 'transcript_turn') {
           final terminalTurn = V2VTerminalTranscriptTurn.tryParse(json);
@@ -1728,7 +2242,7 @@ class V2VClient {
                 resetsAt: _eventResetsAt(json),
               ),
             );
-            disconnect();
+            _disconnectAfterEvent();
             break;
           case 'error':
             Logger.error('[V2V] Server error event');

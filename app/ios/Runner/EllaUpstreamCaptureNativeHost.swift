@@ -16,12 +16,14 @@
 #if ELLA_UPSTREAM_CAPTURE_ENABLED_YES
 import Flutter
 import UIKit
+import FirebaseAuth
 
 final class EllaUpstreamCaptureNativeHost {
     static let shared = EllaUpstreamCaptureNativeHost()
 
     private var phoneMicController: PhoneMicController?
     private var capturePolicyChannel: FlutterMethodChannel?
+    private var captureAuthorizationChannel: FlutterMethodChannel?
     private var syncTransferChannel: FlutterMethodChannel?
     private var syncTransferBackgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var lifecycleObservers: [NSObjectProtocol] = []
@@ -62,6 +64,42 @@ final class EllaUpstreamCaptureNativeHost {
         phoneMicController = micController
         PhoneMicHostApiSetup.setUp(binaryMessenger: messenger, api: PhoneMicHostApiImpl(controller: micController))
         NSLog("[EllaUpstreamCapture] PhoneMic Pigeon APIs registered")
+
+        // Separate Ella account/consent authorization from upstream user mute.
+        captureAuthorizationChannel = FlutterMethodChannel(name: "com.ella/capture_authorization", binaryMessenger: messenger)
+        captureAuthorizationChannel?.setMethodCallHandler { call, result in
+            if call.method == "getRevision" {
+                result(EllaNativeCaptureAuthorization.currentRevision())
+                return
+            }
+            guard call.method == "setAuthorization",
+                  let args = call.arguments as? [String: Any],
+                  let operation = args["operation"] as? String, UUID(uuidString: operation) != nil,
+                  let number = args["allowed"] as? NSNumber,
+                  String(cString: number.objCType) == "c",
+                  let revision = CaptureAdmissionPolicy.channelRevision(args["revision"]), revision > 0 else {
+                result(FlutterError(code: "INVALID_CAPTURE_AUTHORIZATION", message: "Invalid native admission request", details: nil))
+                return
+            }
+            let allowed = number.boolValue
+            if allowed {
+                guard let uid = args["uid"] as? String, !uid.isEmpty,
+                      Auth.auth().currentUser?.uid == uid else {
+                    _ = EllaNativeCaptureAuthorization.apply(allowed: false, revision: revision, operation: operation)
+                    result(FlutterError(code: "CAPTURE_ACCOUNT_MISMATCH", message: "Current native account required", details: nil))
+                    return
+                }
+            }
+            switch EllaNativeCaptureAuthorization.apply(allowed: allowed, revision: revision, operation: operation) {
+            case .applied:
+                result(["allowed": allowed, "revision": revision, "operation": operation, "ownedDenied": !allowed])
+            case .retired:
+                result(["allowed": false, "revision": EllaNativeCaptureAuthorization.currentRevision(),
+                        "operation": operation, "ownedDenied": true])
+            case .stale:
+                result(FlutterError(code: "STALE_CAPTURE_AUTHORIZATION", message: "Native admission revision retired", details: nil))
+            }
+        }
 
         // Native capture admission latch read by upstream's native batch writers.
         capturePolicyChannel = FlutterMethodChannel(name: "com.omi/capture_policy", binaryMessenger: messenger)

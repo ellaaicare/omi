@@ -25,17 +25,11 @@ EllaDisplayValue parseEllaDisplayValue(String value) {
 String stripEllaDisplayPrefix(String value) => parseEllaDisplayValue(value).text;
 
 String safeMemoryDisplayTitle(String value, String fallback) {
+  // Keep explicitly sensitive medical titles private. Ordinary user titles
+  // retain their complete phrase; clinical words alone are not metadata.
+  if (RegExp(r'^\s*(?:🪽\s*)?\[MED\]', caseSensitive: false).hasMatch(value)) return fallback;
   var title = value.replaceFirst(RegExp(r'^🪽\s*'), '').replaceFirst(RegExp(r'^(?:\[[^\]]+\]\s*)+'), '').trim();
-  title = title.split(RegExp(r'\s*(?:,|\band\b)\s*', caseSensitive: false)).first.trim();
-  title = title.replaceAll(
-    RegExp(
-      r'\b(?:doctor|medical|clinical|monitoring|emergency|alert|tracking|detecting)(?:[- ]\w+)?\b',
-      caseSensitive: false,
-    ),
-    '',
-  );
-  final words = title.split(RegExp(r'\s+')).where((word) => word.isNotEmpty).take(4).toList();
-  return words.isEmpty ? fallback : words.join(' ');
+  return title.isEmpty ? fallback : title;
 }
 
 String persistEllaDisplayValue(String value, {required bool isEllaGenerated}) {

@@ -102,8 +102,7 @@ class _EllaEmergencyButtonState extends State<EllaEmergencyButton> with SingleTi
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(horizontal: EllaSizes.spacingL),
                   decoration: BoxDecoration(
-                    color:
-                        isIdle ? (_isPressed ? EllaColors.primaryDark : EllaColors.primary) : EllaColors.bgTertiary,
+                    color: isIdle ? (_isPressed ? EllaColors.primaryDark : EllaColors.primary) : EllaColors.bgTertiary,
                     borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
                     boxShadow: isIdle
                         ? [

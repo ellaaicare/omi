@@ -34,6 +34,8 @@ import 'package:omi/providers/people_provider.dart';
 import 'package:omi/providers/usage_provider.dart';
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/mic/audio_capture_ownership.dart';
+import 'package:omi/services/mic/owned_legacy_mic.dart';
 import 'package:omi/services/sockets/transcription_service.dart';
 import 'package:omi/services/sockets/transcription_socket_recovery.dart';
 import 'package:omi/services/wals.dart';
@@ -307,11 +309,13 @@ typedef DeviceTranscriptionSocketPreparer = Future<TranscriptSegmentSocketServic
     {required bool force});
 
 class _DeviceCaptureAttempt {
-  _DeviceCaptureAttempt({required this.id, required this.deviceId, required this.accountGeneration});
+  _DeviceCaptureAttempt(
+      {required this.id, required this.deviceId, required this.accountGeneration, required this.audioLease});
 
   final int id;
   final String deviceId;
   final int accountGeneration;
+  final AudioCaptureLease audioLease;
   final Completer<void> cancelled = Completer<void>();
   ActiveWalAuthority? authority;
   TranscriptSegmentSocketService? socket;
@@ -342,6 +346,7 @@ class _DeviceCaptureSession {
     required this.authority,
     required this.socket,
     required this.cancelled,
+    required this.audioLease,
   });
 
   final int id;
@@ -351,6 +356,9 @@ class _DeviceCaptureSession {
   final ActiveWalAuthority authority;
   TranscriptSegmentSocketService socket;
   final Completer<void> cancelled;
+  final AudioCaptureLease audioLease;
+  AudioCaptureTransport? audioTransport;
+  bool stopCameraAtTeardown = false;
   StreamSubscription? bytesStream;
   StreamSubscription? buttonStream;
   StreamSubscription? photoStream;
@@ -545,6 +553,8 @@ class CaptureProvider extends ChangeNotifier
   List<int> _systemAudioBuffer = [];
   bool _systemAudioCaching = true;
   Future<PhoneCaptureStartResult>? _micStartFuture;
+  AudioCaptureLease? _phoneAudioReservation;
+  OwnedLegacyMic? _ownedPhoneMic;
   int _phoneCaptureReleaseOperations = 0;
   Future<void>? _phoneCaptureTransportStopFuture;
   Future<PhoneCaptureStopResult>? _phoneCaptureStopFuture;
@@ -554,12 +564,14 @@ class CaptureProvider extends ChangeNotifier
   ActiveWalAuthority? _systemAudioCaptureAuthority;
   Timer? _systemAudioCacheTimer;
   int _captureGeneration = 0;
+  bool _captureDisposed = false;
   int _transcriptMomentGeneration = 0;
   int _deviceCaptureGeneration = 0;
   int _deviceCaptureFailureTransitions = 0;
   _DeviceCaptureAttempt? _deviceCaptureAttempt;
   Future<void>? _deviceCaptureStartFuture;
   _DeviceCaptureSession? _deviceCaptureSession;
+  AudioCaptureLease? _deviceAudioLease;
   final ActiveAccountAuthorityProvider _activeAccountAuthority;
   final ActiveWalAuthorityProvider _activeWalAuthority;
   final CaptureGeolocationSender? _geolocationSender;
@@ -931,6 +943,35 @@ class CaptureProvider extends ChangeNotifier
     _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.failed, failure: failure);
   }
 
+  /// Closed admission evidence only: no content, account, device or session IDs.
+  Map<String, bool> get dictationAdmissionPendingStates => Map.unmodifiable({
+        'recording_stopped': recordingState == RecordingState.stop,
+        'device_service_ready': recordingDeviceServiceReady,
+        'phone_audio_owned': phoneCaptureOwnsMobileAudio,
+        'phone_mic_start_pending': _micStartFuture != null,
+        'phone_release_pending': _phoneCaptureReleaseOperations > 0,
+        'device_start_pending': _deviceCaptureStartFuture != null,
+        'system_start_pending': _systemAudioStartFuture != null,
+        'phone_stop_pending': _phoneCaptureStopFuture != null,
+        'device_finalization_pending': _deviceCaptureFinalizationFuture != null,
+        'device_boundary_pending': _deviceCaptureBoundaryFuture != null,
+        'device_attempt_present': _deviceCaptureAttempt != null,
+        'device_session_present': _deviceCaptureSession != null,
+      });
+
+  /// Diagnostic upload admission only; does not certify other playback/acoustic routes.
+  bool get isCaptureQuiescentForDiagnostic =>
+      recordingState == RecordingState.stop &&
+      !recordingDeviceServiceReady &&
+      !phoneCaptureOwnsMobileAudio &&
+      _deviceCaptureStartFuture == null &&
+      _systemAudioStartFuture == null &&
+      _phoneCaptureStopFuture == null &&
+      _deviceCaptureFinalizationFuture == null &&
+      _deviceCaptureBoundaryFuture == null &&
+      _deviceCaptureAttempt == null &&
+      _deviceCaptureSession == null;
+
   bool get phoneCaptureOwnsMobileAudio =>
       _micStartFuture != null || _phoneCaptureReleaseOperations > 0 || recordingState == RecordingState.record;
 
@@ -1024,11 +1065,13 @@ class CaptureProvider extends ChangeNotifier
   }
 
   bool _isDeviceCaptureAttemptCurrent(_DeviceCaptureAttempt attempt) =>
+      attempt.audioLease.isCurrent &&
       identical(_deviceCaptureAttempt, attempt) &&
       attempt.id == _deviceCaptureGeneration &&
       attempt.accountGeneration == _captureGeneration;
 
   bool _isDeviceCaptureCurrent(_DeviceCaptureSession session) =>
+      session.audioLease.isCurrent &&
       identical(_deviceCaptureSession, session) &&
       session.id == _deviceCaptureGeneration &&
       session.accountGeneration == _captureGeneration &&
@@ -2060,7 +2103,7 @@ class CaptureProvider extends ChangeNotifier
     _bleReceiveRateKbps = 0.0;
     _wsSendRateKbps = 0.0;
     _metricsLastCalculated = null;
-    notifyListeners();
+    if (!_captureDisposed) notifyListeners();
   }
 
   /// Triggers a metrics calculation for testing.
@@ -2079,9 +2122,23 @@ class CaptureProvider extends ChangeNotifier
     }
     final session = _deviceCaptureSession;
     if (session != null) {
-      await _closeDeviceCaptureSession(session, stopSocket: false, stopCamera: stopCamera);
+      session.stopCameraAtTeardown = stopCamera;
+      if (invalidateDeviceCapture) {
+        await session.audioLease.stop();
+        if (identical(_deviceAudioLease, session.audioLease)) _deviceAudioLease = null;
+      } else if (session.audioTransport != null) {
+        await session.audioTransport!.stop();
+      } else {
+        final closed = await _closeDeviceCaptureSession(session, stopSocket: false, stopCamera: stopCamera);
+        if (!closed) throw StateError('device capture teardown not acknowledged');
+      }
       notifyListeners();
       return;
+    }
+    if (invalidateDeviceCapture) {
+      final reservation = _deviceAudioLease;
+      await reservation?.stop();
+      if (identical(_deviceAudioLease, reservation)) _deviceAudioLease = null;
     }
     final bytesStream = _bleBytesStream;
     final photoStream = _blePhotoStream;
@@ -2104,6 +2161,13 @@ class CaptureProvider extends ChangeNotifier
 
   @override
   void dispose() {
+    _captureDisposed = true;
+    unawaited(_stopOwnedPhoneMic().catchError((Object error) {
+      Logger.error('Owned phone stop remains unconfirmed during disposal: ${error.runtimeType}');
+    }));
+    unawaited(_deviceAudioLease?.stop().catchError((Object error) {
+      Logger.error('Owned device stop remains unconfirmed during disposal: ${error.runtimeType}');
+    }));
     _captureGeneration++;
     _deviceCaptureGeneration++;
     _deviceCaptureAttempt?.cancel();
@@ -2242,6 +2306,15 @@ class CaptureProvider extends ChangeNotifier
         ),
       );
 
+  Future<void> _stopOwnedPhoneMic() async {
+    await _ownedPhoneMic?.stop();
+    final reservation = _phoneAudioReservation;
+    if (reservation != null) {
+      await reservation.stop();
+      if (identical(_phoneAudioReservation, reservation)) _phoneAudioReservation = null;
+    }
+  }
+
   Future<PhoneCaptureStartResult> streamRecording() {
     final activeStart = _micStartFuture;
     if (activeStart != null) return activeStart;
@@ -2253,8 +2326,28 @@ class CaptureProvider extends ChangeNotifier
       return Future.value(PhoneCaptureStartResult.cancelled);
     }
 
+    final generation = _captureGeneration;
+    final preferences = SharedPreferencesUtil();
+    final uid = preferences.uid;
+    final terminalGeneration = preferences.terminalAccountConsentAuthorityGeneration;
+    bool currentBoundary() =>
+        generation == _captureGeneration &&
+        preferences.uid == uid &&
+        preferences.terminalAccountConsentAuthorityGeneration == terminalGeneration;
+    final reservation = AudioCaptureOwnership.shared.reserve(source: 'phone-capture', hasAuthority: currentBoundary);
+    if (reservation == null) return Future.value(PhoneCaptureStartResult.cancelled);
+    _phoneAudioReservation = reservation;
+    if (_phoneCaptureStarter == null && (_phoneMicRecorder != null || ServiceManager.isInitialized)) {
+      _ownedPhoneMic = OwnedLegacyMic(
+        inner: _phoneMicRecorder ?? ServiceManager.instance().mic,
+        source: 'phone-capture',
+        hasAuthority: currentBoundary,
+      )..adoptReservation(reservation);
+    }
+
     late final Future<PhoneCaptureStartResult> trackedStart;
-    trackedStart = _streamRecording().whenComplete(() {
+    trackedStart = _streamRecording().whenComplete(() async {
+      if (recordingState != RecordingState.record) await _stopOwnedPhoneMic();
       if (identical(_micStartFuture, trackedStart)) {
         _micStartFuture = null;
         notifyListeners();
@@ -2346,7 +2439,11 @@ class CaptureProvider extends ChangeNotifier
     // Native start plus a nonempty microphone frame prove physical capture.
     // Transcription delivery remains separate so network delay cannot make a
     // running recorder appear stopped.
-    final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
+    final mic = _ownedPhoneMic ??= OwnedLegacyMic(
+      inner: _phoneMicRecorder ?? ServiceManager.instance().mic,
+      source: 'phone-capture',
+      hasAuthority: () => _isPhoneCaptureCurrent(generation, captureAuthority),
+    )..adoptReservation(_phoneAudioReservation!);
     CaptureDiagnosticFailure? startFailure;
     var started = false;
     for (var attempt = 0; attempt < 2 && !started; attempt++) {
@@ -2473,15 +2570,15 @@ class CaptureProvider extends ChangeNotifier
     try {
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
       await _cleanupCurrentState();
-      final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
-      await mic.stop();
+      final mic = _ownedPhoneMic;
+      await _stopOwnedPhoneMic();
       if (pendingStart != null) {
         try {
           await pendingStart;
         } catch (error) {
           Logger.error('Pending phone capture start failed during regular stop: $error');
         }
-        await mic.stop();
+        await mic?.stop();
       }
       updateRecordingState(RecordingState.stop);
       await _socket?.stop(reason: 'stop stream recording');
@@ -2528,8 +2625,8 @@ class CaptureProvider extends ChangeNotifier
       final stoppingTranscriptMomentGeneration = _transcriptMomentGeneration;
       _updateCaptureDiagnostics(phase: CaptureDiagnosticPhase.stopping);
       await _cleanupCurrentState();
-      final mic = _phoneMicRecorder ?? ServiceManager.instance().mic;
-      await mic.stop();
+      final mic = _ownedPhoneMic;
+      await _stopOwnedPhoneMic();
       if (pendingStart != null) {
         try {
           await pendingStart;
@@ -2538,7 +2635,7 @@ class CaptureProvider extends ChangeNotifier
         }
         // A native/injected start can finish after the first stop. Reassert the
         // stop only after the generation-fenced start future has settled.
-        await mic.stop();
+        await mic?.stop();
       }
       final pendingSegmentsSettled = await _awaitPendingSegmentHandlersForGeneration(
         captureGeneration: stoppingCaptureGeneration,
@@ -2604,7 +2701,7 @@ class CaptureProvider extends ChangeNotifier
     _systemAudioBuffer.clear();
     await _closeBleStream(stopCamera: false, invalidateDeviceCapture: false);
     if (_phoneMicRecorder != null || ServiceManager.isInitialized) {
-      final stops = <Future<void>>[(_phoneMicRecorder ?? ServiceManager.instance().mic).stop()];
+      final stops = <Future<void>>[_stopOwnedPhoneMic()];
       if (PlatformService.isDesktop) {
         stops.add(ServiceManager.instance().systemAudio.stopAndClearCallbacks());
       }
@@ -2624,15 +2721,45 @@ class CaptureProvider extends ChangeNotifier
     reset();
   }
 
-  Future<void> streamDeviceRecording({BtDevice? device}) async {
+  Future<void> streamDeviceRecording({BtDevice? device}) {
+    final target = device ?? _recordingDevice;
+    if (target == null || target.id.isEmpty) {
+      if (recordingState != RecordingState.record && _micStartFuture == null)
+        updateRecordingState(RecordingState.error);
+      return Future<void>.value();
+    }
+    if (phoneCaptureOwnsMobileAudio) return Future<void>.value();
+    var reservation = _deviceAudioLease;
+    if (reservation?.isOwner == true && reservation?.isCurrent != true) return Future<void>.value();
+    if (reservation?.isOwner != true) {
+      final preferences = SharedPreferencesUtil();
+      final uid = preferences.uid;
+      final terminalGeneration = preferences.terminalAccountConsentAuthorityGeneration;
+      reservation = AudioCaptureOwnership.shared.reserve(
+          source: 'device-capture',
+          hasAuthority: () =>
+              preferences.uid == uid && preferences.terminalAccountConsentAuthorityGeneration == terminalGeneration);
+      if (reservation == null) return Future<void>.value();
+      _deviceAudioLease = reservation;
+    }
+    final owned = reservation!;
+    return _streamDeviceRecordingAdmitted(device: target, audioLease: owned).whenComplete(() async {
+      if (_deviceCaptureSession?.audioLease != owned && _deviceCaptureAttempt?.audioLease != owned) {
+        await owned.stop();
+        if (identical(_deviceAudioLease, owned)) _deviceAudioLease = null;
+      }
+    });
+  }
+
+  Future<void> _streamDeviceRecordingAdmitted({required BtDevice device, required AudioCaptureLease audioLease}) async {
     final activeBoundary = _deviceCaptureBoundaryFuture;
     if (activeBoundary != null) await activeBoundary;
 
     final activeFinalization = _deviceCaptureFinalizationFuture;
     if (activeFinalization != null) await activeFinalization;
 
-    final targetDevice = device ?? _recordingDevice;
-    if (targetDevice == null || targetDevice.id.isEmpty) {
+    final targetDevice = device;
+    if (!audioLease.isCurrent || targetDevice.id.isEmpty) {
       if (recordingState != RecordingState.record && _micStartFuture == null) {
         updateRecordingState(RecordingState.error);
       }
@@ -2665,6 +2792,7 @@ class CaptureProvider extends ChangeNotifier
       id: ++_deviceCaptureGeneration,
       deviceId: targetDevice.id,
       accountGeneration: _captureGeneration,
+      audioLease: audioLease,
     );
     _deviceCaptureAttempt = attempt;
     final priorStart = _deviceCaptureStartFuture;
@@ -2767,11 +2895,25 @@ class CaptureProvider extends ChangeNotifier
       authority: captureAuthority,
       socket: socket,
       cancelled: attempt.cancelled,
+      audioLease: attempt.audioLease,
     );
     _deviceCaptureSession = session;
     bool started;
     try {
-      started = await (_deviceCaptureStarter?.call() ?? _startDeviceCaptureTransport(session, targetDevice));
+      final transport = session.audioLease.createTransport();
+      session.audioTransport = transport;
+      var admittedStart = false;
+      await transport.start(
+        start: () async {
+          admittedStart = await (_deviceCaptureStarter?.call() ?? _startDeviceCaptureTransport(session, targetDevice));
+        },
+        stopAndConfirm: () async {
+          final closed =
+              await _closeDeviceCaptureSession(session, stopSocket: false, stopCamera: session.stopCameraAtTeardown);
+          if (!closed) throw StateError('device capture teardown not acknowledged');
+        },
+      );
+      started = admittedStart;
     } catch (error) {
       Logger.error('Necklace capture transport could not start: $error');
       started = false;
@@ -3484,7 +3626,7 @@ class CaptureProvider extends ChangeNotifier
     if (err is AiConsentAuthorityLostException) {
       _keepAliveTimer?.cancel();
       _shouldAutoResumeAfterWake = false;
-      ServiceManager.instance().mic.stop();
+      unawaited(_stopOwnedPhoneMic());
       if (recordingState == RecordingState.systemAudioRecord && PlatformService.isDesktop) {
         ServiceManager.instance().systemAudio.stopAndClearCallbacks();
       }

@@ -14,6 +14,7 @@ import 'package:omi/upstream_capture/services/devices/connectors/device_connecti
 import 'package:omi/upstream_capture/services/devices/transports/device_transport.dart' as upstream_transport;
 import 'package:omi/upstream_capture/services/services.dart' as upstream_services;
 import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 
 typedef UpstreamDeviceServiceLoader = Future<upstream_service.DeviceService> Function();
 typedef UpstreamDeviceConnector = Future<bool> Function(String ownerId, upstream_device.BtDevice device);
@@ -97,12 +98,15 @@ class EllaUpstreamDeviceServiceAdapter
 
     final lifecycleGeneration = _lifecycleGeneration;
     late final Future<upstream_service.DeviceService> next;
+    DebugLogManager.deviceAdapterState = 'initializing';
+    DebugLogManager.deviceAdapterFailure = 'none';
     next = _serviceLoader().then((service) {
       if (lifecycleGeneration != _lifecycleGeneration || _status == legacy_service.DeviceServiceStatus.stop) {
         return service;
       }
       _service?.unsubscribe(this);
       _service = service;
+      DebugLogManager.deviceAdapterState = 'ready';
       service.subscribe(this, this);
       service.start();
       for (final connection in service.connections) {
@@ -111,6 +115,12 @@ class EllaUpstreamDeviceServiceAdapter
         }
       }
       return service;
+    }).catchError((Object error) {
+      if (lifecycleGeneration == _lifecycleGeneration) {
+        DebugLogManager.deviceAdapterState = 'initialization_failed';
+        DebugLogManager.deviceAdapterFailure = DebugLogManager.safeDeviceFailure(error);
+      }
+      throw error;
     }).whenComplete(() {
       if (identical(_loadingService, next)) _loadingService = null;
     });
@@ -136,11 +146,13 @@ class EllaUpstreamDeviceServiceAdapter
 
   @override
   Future<void> stop() async {
+    DebugLogManager.discoveryProvenance.retire();
     final stopGeneration = ++_lifecycleGeneration;
     _operationGeneration++;
     _acceptingDiscoveryEvents = false;
     _activeDiscovery = null;
     _status = legacy_service.DeviceServiceStatus.stop;
+    DebugLogManager.deviceAdapterState = 'stopped';
     _notifyStatus();
 
     upstream_service.DeviceService? service = _service;
@@ -176,6 +188,7 @@ class EllaUpstreamDeviceServiceAdapter
     if (_status != legacy_service.DeviceServiceStatus.ready) return Future<void>.value();
 
     final operationGeneration = ++_operationGeneration;
+    final diagnosticPass = DebugLogManager.discoveryProvenance.current;
     _acceptingDiscoveryEvents = true;
     _status = legacy_service.DeviceServiceStatus.scanning;
     _notifyStatus();
@@ -185,10 +198,18 @@ class EllaUpstreamDeviceServiceAdapter
       try {
         final service = await _ensureService();
         if (!_isCurrent(operationGeneration)) return;
+        DebugLogManager.deviceAdapterState = 'discover_invoked';
+        DebugLogManager.deviceAdapterFailure = 'none';
+        DebugLogManager.discoveryProvenance.retainedPublication(
+          diagnosticPass, service.devices.map((d) => d.id));
         await service.discover(desirableDeviceId: desirableDeviceId, timeout: timeout);
         if (!_isCurrent(operationGeneration)) return;
+        DebugLogManager.deviceAdapterState = 'discover_returned';
         _publishDevices(service.devices);
       } catch (error) {
+        if (_isCurrent(operationGeneration)) {
+          DebugLogManager.deviceAdapterFailure = DebugLogManager.safeDeviceFailure(error);
+        }
         Logger.debug('[EllaUpstreamDeviceAdapter] discovery failed: ${error.runtimeType}');
       } finally {
         if (_isCurrent(operationGeneration)) {
@@ -327,6 +348,7 @@ class EllaUpstreamDeviceServiceAdapter
   @override
   Future<void> cancelPendingConnection() async {
     _operationGeneration++;
+    DebugLogManager.deviceAdapterState = 'cancelled';
     _acceptingDiscoveryEvents = false;
     _activeDiscovery = null;
     try {

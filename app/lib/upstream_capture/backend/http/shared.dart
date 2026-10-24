@@ -15,6 +15,7 @@ import 'package:omi/upstream_capture/utils/jwt_expiry.dart';
 import 'package:omi/upstream_capture/services/account_cutover/account_cutover_runtime.dart';
 import 'package:omi/services/auth/auth_token_result.dart';
 import 'package:omi/services/auth_service.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
@@ -59,7 +60,8 @@ bool isTransientNetworkError(Object e) {
       lower.contains('software caused connection abort');
 }
 
-Future<String> getAuthHeader({bool expireTerminalSession = true}) async {
+Future<String> getAuthHeader({bool expireTerminalSession = true, ExactAccountAuthorityVerifier? exactAuthority}) async {
+  verifySyncRequestAuthority(exactAuthority);
   if (!AuthService.instance.isSignedIn()) {
     throw AuthTokenUnavailableException(const AuthTokenMissingUser());
   }
@@ -76,7 +78,9 @@ Future<String> getAuthHeader({bool expireTerminalSession = true}) async {
       (expiry.isBefore(DateTime.now().add(const Duration(minutes: 5))) && expiry.isAfter(DateTime.now())));
 
   if (!hasAuthToken || !isExpirationDateValid) {
+    verifySyncRequestAuthority(exactAuthority);
     final refreshResult = await AuthService.instance.refreshIdToken();
+    verifySyncRequestAuthority(exactAuthority);
     switch (refreshResult) {
       case AuthTokenSuccess(:final token):
         SharedPreferencesUtil().authToken = token;
@@ -123,7 +127,9 @@ Future<Map<String, String>> buildHeaders({
   String? url,
   String? method,
   bool forWebSocket = false,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
+  verifySyncRequestAuthority(exactAuthority);
   final headers = <String, String>{
     'X-Request-Start-Time': (DateTime.now().millisecondsSinceEpoch / 1000).toString(),
     'X-App-Platform': PlatformManager.instance.platform,
@@ -150,10 +156,19 @@ Future<Map<String, String>> buildHeaders({
   if (requireAuthCheck) {
     // Authenticated requests must never degrade into anonymous traffic. A
     // typed exception stops the request before it reaches the network.
-    headers['Authorization'] = await getAuthHeader(expireTerminalSession: expireTerminalSession);
+    headers['Authorization'] =
+        await getAuthHeader(expireTerminalSession: expireTerminalSession, exactAuthority: exactAuthority);
   }
 
+  verifySyncRequestAuthority(exactAuthority);
   return headers;
+}
+
+void verifySyncRequestAuthority(ExactAccountAuthorityVerifier? authority) {
+  if (authority != null &&
+      (!authority.isExactCurrent() || AuthService.instance.getFirebaseUser()?.uid != authority.uid)) {
+    throw ExactAccountAuthorityChangedException('Sync upload owner changed');
+  }
 }
 
 @visibleForTesting
@@ -270,7 +285,9 @@ Future<http.Response> _materializeErrorResponse(http.StreamedResponse response) 
 Future<void> _handleAuthUnavailable(
   AuthTokenUnavailableException exception, {
   required bool expireTerminalSession,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
+  verifySyncRequestAuthority(exactAuthority);
   if (!expireTerminalSession) return;
   final event = switch (exception.result) {
     AuthTokenMissingUser() => null,
@@ -293,22 +310,38 @@ Future<T> refreshAndReplayAfter401<T>({
   Future<void> Function(T response)? disposeUnauthorizedResponse,
   AuthService? authService,
   void Function(AuthTokenResult refresh)? onAuthRefresh,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  Future<AuthTokenResult> Function()? tokenRefresh,
 }) async {
+  void verify() {
+    if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
+      throw ExactAccountAuthorityChangedException('Owner changed during auth refresh');
+    }
+  }
+
+  verify();
   final service = authService ?? AuthService.instance;
   await disposeUnauthorizedResponse?.call(firstResponse);
-  final refresh = await service.refreshIdToken();
+  verify();
+  final refresh = await (tokenRefresh ?? service.refreshIdToken)();
+  verify();
   onAuthRefresh?.call(refresh);
+  verify();
   switch (refresh) {
     case AuthTokenSuccess():
       late T replayed;
       try {
+        verify();
         replayed = await replay();
+        verify();
       } catch (_) {
+        verify();
         service.recordAuthenticatedRequest401(recovered: false, outcome: 'replay_failed');
         rethrow;
       }
       final recovered = statusCode(replayed) != 401;
       if (!recovered) await disposeUnauthorizedResponse?.call(replayed);
+      verify();
       service.recordAuthenticatedRequest401(
         recovered: recovered,
         outcome: recovered ? 'refresh_succeeded' : 'backend_rejected_refreshed_token',
@@ -359,9 +392,11 @@ Future<http.Response> sendUncaughtApiCall({
   Duration? timeout,
   int? retries,
   bool signOutOn401 = true,
+  ExactAccountAuthorityVerifier? exactAuthority,
   ApiExecutionSeams? execution,
   void Function(AuthTokenResult refresh)? onAuthRefresh,
 }) async {
+  verifySyncRequestAuthority(exactAuthority);
   if (execution != null) {
     var builtHeaders = await execution.headers(ApiRequest(url: url, method: method, headers: headers, body: body));
     var response = await execution.transport(ApiRequest(url: url, method: method, headers: builtHeaders, body: body));
@@ -388,13 +423,17 @@ Future<http.Response> sendUncaughtApiCall({
     expireTerminalSession: signOutOn401,
     url: url,
     method: method,
+    exactAuthority: exactAuthority,
   );
 
   final effectiveTimeout = timeout ?? (method == 'GET' ? ApiClient.requestTimeoutRead : ApiClient.requestTimeoutWrite);
   final effectiveRetries = retries ?? 1;
 
   http.Response response = await HttpPoolManager.instance.send(
-    () => _buildRequest(url, builtHeaders, body, method),
+    () {
+      verifySyncRequestAuthority(exactAuthority);
+      return _buildRequest(url, builtHeaders, body, method);
+    },
     timeout: effectiveTimeout,
     retries: effectiveRetries,
   );
@@ -412,9 +451,13 @@ Future<http.Response> sendUncaughtApiCall({
           expireTerminalSession: signOutOn401,
           url: url,
           method: method,
+          exactAuthority: exactAuthority,
         );
         return HttpPoolManager.instance.send(
-          () => _buildRequest(url, builtHeaders, body, method),
+          () {
+            verifySyncRequestAuthority(exactAuthority);
+            return _buildRequest(url, builtHeaders, body, method);
+          },
           timeout: effectiveTimeout,
           retries: 0,
         );
@@ -422,6 +465,7 @@ Future<http.Response> sendUncaughtApiCall({
     );
   }
 
+  verifySyncRequestAuthority(exactAuthority);
   _checkClockSkewResponse(response);
   return response;
 }
@@ -434,6 +478,7 @@ Future<http.Response?> makeApiCall({
   Duration? timeout,
   int? retries,
   bool signOutOn401 = true,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   try {
     return await sendUncaughtApiCall(
@@ -444,6 +489,7 @@ Future<http.Response?> makeApiCall({
       timeout: timeout,
       retries: retries,
       signOutOn401: signOutOn401,
+      exactAuthority: exactAuthority,
     );
   } on AuthTokenUnavailableException catch (e) {
     await _handleAuthUnavailable(e, expireTerminalSession: signOutOn401);
@@ -484,10 +530,15 @@ bool isOmiListTruncated(http.Response? response) {
 
 Future<http.StreamedResponse> _sendMultipartWithProgress(
   http.MultipartRequest request,
-  UploadProgressCallback? onProgress,
-) async {
+  UploadProgressCallback? onProgress, {
+  ExactAccountAuthorityVerifier? exactAuthority,
+  void Function()? onSendAttempt,
+}) async {
   if (onProgress == null) {
-    return HttpPoolManager.instance.sendStreaming(request);
+    verifySyncRequestAuthority(exactAuthority);
+    final future = HttpPoolManager.instance.sendStreaming(request);
+    onSendAttempt?.call();
+    return future;
   }
 
   final totalBytes = request.contentLength;
@@ -521,7 +572,9 @@ Future<http.StreamedResponse> _sendMultipartWithProgress(
     cancelOnError: true,
   );
 
+  verifySyncRequestAuthority(exactAuthority);
   final future = HttpPoolManager.instance.sendStreaming(streamedRequest);
+  onSendAttempt?.call();
   future.whenComplete(subscription.cancel);
   return future;
 }
@@ -558,6 +611,9 @@ Future<http.Response> makeMultipartApiCall({
   String fileFieldName = 'files',
   String method = 'POST',
   UploadProgressCallback? onUploadProgress,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  void Function(int)? onHttpStatus,
+  void Function()? onSendAttempt,
 }) async {
   try {
     final bool requireAuthCheck = _isRequiredAuthCheck(url);
@@ -566,6 +622,7 @@ Future<http.Response> makeMultipartApiCall({
       fromHeaders: headers,
       url: url,
       method: method,
+      exactAuthority: exactAuthority,
     );
 
     var request = await _buildMultipartRequest(
@@ -577,16 +634,23 @@ Future<http.Response> makeMultipartApiCall({
       method: method,
     );
 
-    var streamedResponse = await _sendMultipartWithProgress(request, onUploadProgress);
+    verifySyncRequestAuthority(exactAuthority);
+    var streamedResponse = await _sendMultipartWithProgress(request, onUploadProgress,
+        exactAuthority: exactAuthority, onSendAttempt: onSendAttempt);
     var response = await http.Response.fromStream(streamedResponse);
+    verifySyncRequestAuthority(exactAuthority);
+    onHttpStatus?.call(response.statusCode);
 
     if (requireAuthCheck && response.statusCode == 401) {
       response = await refreshAndReplayAfter401(
         firstResponse: response,
         statusCode: (value) => value.statusCode,
         expireTerminalSession: true,
+        exactAuthority: exactAuthority,
         replay: () async {
-          builtHeaders = await buildHeaders(requireAuthCheck: true, fromHeaders: headers, url: url, method: method);
+          verifySyncRequestAuthority(exactAuthority);
+          builtHeaders = await buildHeaders(
+              requireAuthCheck: true, fromHeaders: headers, url: url, method: method, exactAuthority: exactAuthority);
           request = await _buildMultipartRequest(
             url: url,
             files: files,
@@ -595,8 +659,13 @@ Future<http.Response> makeMultipartApiCall({
             fileFieldName: fileFieldName,
             method: method,
           );
-          streamedResponse = await _sendMultipartWithProgress(request, onUploadProgress);
-          return http.Response.fromStream(streamedResponse);
+          verifySyncRequestAuthority(exactAuthority);
+          streamedResponse = await _sendMultipartWithProgress(request, onUploadProgress,
+              exactAuthority: exactAuthority, onSendAttempt: onSendAttempt);
+          final replayed = await http.Response.fromStream(streamedResponse);
+          verifySyncRequestAuthority(exactAuthority);
+          onHttpStatus?.call(replayed.statusCode);
+          return replayed;
         },
       );
     }
@@ -604,10 +673,11 @@ Future<http.Response> makeMultipartApiCall({
     _checkClockSkewResponse(response);
     return response;
   } on AuthTokenUnavailableException catch (e) {
-    await _handleAuthUnavailable(e, expireTerminalSession: true);
+    await _handleAuthUnavailable(e, expireTerminalSession: true, exactAuthority: exactAuthority);
     Logger.debug('Authenticated multipart request blocked before send: ${e.result.runtimeType}');
     return http.Response('', 401, reasonPhrase: 'Authentication unavailable');
   } catch (e, stackTrace) {
+    if (e is ExactAccountAuthorityChangedException) rethrow;
     Logger.debug('Multipart HTTP request failed: $e, $stackTrace');
     if (!isTransientNetworkError(e)) {
       PlatformManager.instance.crashReporter.reportCrash(e, stackTrace, userAttributes: {'url': url, 'method': method});

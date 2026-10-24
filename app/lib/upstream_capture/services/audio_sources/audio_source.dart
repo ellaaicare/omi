@@ -8,7 +8,9 @@ class WalFrame {
   final List<int> payload;
   final FrameSyncKey syncKey;
 
-  WalFrame({required this.payload, required this.syncKey});
+  /// Valid PCM bytes before source tail padding; null for unknown/non-PCM sources.
+  final int? validPcmByteLength;
+  WalFrame({required this.payload, required this.syncKey, this.validPcmByteLength});
 }
 
 /// Key for matching WAL frames during sync.

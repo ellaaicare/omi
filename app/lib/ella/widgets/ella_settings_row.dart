@@ -26,8 +26,22 @@ class EllaSettingsRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final effectiveIconColor = iconColor ?? EllaColors.primary;
+    final effectiveIconColor = iconColor ?? EllaPalette.of(context).primary;
     final effectiveIconBgColor = iconBgColor ?? effectiveIconColor;
+    final largeText = MediaQuery.textScalerOf(context).scale(18) >= 32;
+    final titleWidget = Text(title,
+        style: TextStyle(
+            fontSize: 18, fontWeight: FontWeight.w500, color: titleColor ?? EllaPalette.of(context).textPrimary));
+    final subtitleWidget = subtitle == null
+        ? null
+        : Text(subtitle!,
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: EllaPalette.of(context).textTertiary));
+    final iconWidget = Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: effectiveIconBgColor.withValues(alpha: .15)),
+        child: Icon(icon, size: 20, color: effectiveIconColor));
+    final chevron = Icon(Icons.chevron_right, size: 24, color: EllaPalette.of(context).textTertiary);
 
     return Semantics(
       button: true,
@@ -37,52 +51,28 @@ class EllaSettingsRow extends StatelessWidget {
         borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
         child: Container(
           constraints: const BoxConstraints(minHeight: 64),
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          padding: EdgeInsets.symmetric(horizontal: largeText ? 16 : 24, vertical: 16),
           decoration: BoxDecoration(
-            color: EllaColors.bgSecondary,
+            color: EllaPalette.of(context).bgSecondary,
             borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
           ),
-          child: Row(
-            children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: effectiveIconBgColor.withOpacity(0.15),
-                ),
-                child: Icon(icon, size: 20, color: effectiveIconColor),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w500,
-                        color: titleColor ?? EllaColors.textPrimary,
-                      ),
-                    ),
-                    if (subtitle != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        subtitle!,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w400,
-                          color: EllaColors.textTertiary,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              if (showChevron) const Icon(Icons.chevron_right, size: 24, color: EllaColors.textTertiary),
-            ],
-          ),
+          child: largeText
+              ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [iconWidget, const Spacer(), if (showChevron) chevron]),
+                  const SizedBox(height: 8),
+                  titleWidget,
+                  if (subtitleWidget != null) ...[const SizedBox(height: 4), subtitleWidget],
+                ])
+              : Row(children: [
+                  iconWidget,
+                  const SizedBox(width: 16),
+                  Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    titleWidget,
+                    if (subtitleWidget != null) ...[const SizedBox(height: 2), subtitleWidget],
+                  ])),
+                  if (showChevron) chevron,
+                ]),
         ),
       ),
     );

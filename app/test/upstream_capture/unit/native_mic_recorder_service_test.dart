@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,22 +11,28 @@ class FakePhoneMicHostApi extends PhoneMicHostApi {
   PhoneMicCaptureMode? lastStartMode;
   int lastStartSessionId = 0;
   PlatformException? startError;
+  Completer<void>? stopGate;
+  Completer<void>? startGate;
+  bool reportsRecording = false;
+  Completer<bool>? recordingGate;
 
   @override
   Future<void> start(PhoneMicCaptureMode mode, int sessionId) async {
     startCalls++;
     lastStartMode = mode;
     lastStartSessionId = sessionId;
+    await startGate?.future;
     if (startError != null) throw startError!;
   }
 
   @override
   Future<void> stop() async {
     stopCalls++;
+    await stopGate?.future;
   }
 
   @override
-  Future<bool> isRecording() async => false;
+  Future<bool> isRecording() async => recordingGate == null ? reportsRecording : await recordingGate!.future;
 }
 
 class Callbacks {
@@ -593,6 +600,177 @@ void main() {
       expect(cb.bytes, hasLength(1));
 
       service.stop();
+    });
+  });
+  test('confirmed stop awaits acknowledgement, clears frames early, and fires callback once', () async {
+    await startService();
+    host.stopGate = Completer<void>();
+    var done = false;
+    final stop = service.stopAndConfirm().then((_) => done = true);
+    service.onAudioFrame(Uint8List.fromList([1, 2]), host.lastStartSessionId);
+    await Future<void>.delayed(Duration.zero);
+    expect(done, isFalse);
+    expect(cb.bytes, isEmpty);
+    expect(cb.stops, 0);
+    await expectLater(startService(), throwsStateError);
+    host.stopGate!.complete();
+    await stop;
+    expect(cb.stops, 1);
+    service.stop();
+    expect(cb.stops, 1);
+  });
+
+  test('native still-recording read rejects a successful stop ack', () async {
+    await startService();
+    host.reportsRecording = true;
+    await expectLater(service.stopAndConfirm(), throwsStateError);
+    expect(cb.stops, 0);
+  });
+
+  test('confirmed stop timeout cannot restart before late acknowledgement', () {
+    fakeAsync((async) {
+      startService();
+      async.flushMicrotasks();
+      host.stopGate = Completer<void>();
+      Object? error;
+      service.stopAndConfirm().catchError((Object e) {
+        error = e;
+      });
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 10));
+      async.flushMicrotasks();
+      expect(error, isA<TimeoutException>());
+      expect(cb.stops, 0);
+      Object? startError;
+      startService().catchError((Object e) {
+        startError = e;
+      });
+      async.flushMicrotasks();
+      expect(startError, isA<StateError>());
+      host.stopGate!.complete();
+      async.flushMicrotasks();
+      expect(cb.stops, 0, reason: 'late receipt cannot claim successful pause after timeout');
+      startService();
+      async.flushMicrotasks();
+      expect(host.startCalls, 2);
+      service.stop();
+      async.flushMicrotasks();
+    });
+  });
+
+  test('held native state probe fences restart through timeout and late settlement', () {
+    fakeAsync((async) {
+      startService();
+      async.flushMicrotasks();
+      host.recordingGate = Completer<bool>();
+      Object? error;
+      service.stopAndConfirm().catchError((Object e) {
+        error = e;
+      });
+      async.flushMicrotasks();
+      Object? earlyStartError;
+      startService().catchError((Object e) {
+        earlyStartError = e;
+      });
+      async.flushMicrotasks();
+      expect(earlyStartError, isA<StateError>());
+      async.elapse(const Duration(seconds: 10));
+      async.flushMicrotasks();
+      expect(error, isA<TimeoutException>());
+      Object? lateStartError;
+      startBatchService().catchError((Object e) {
+        lateStartError = e;
+      });
+      async.flushMicrotasks();
+      expect(lateStartError, isA<StateError>());
+      host.recordingGate!.complete(false);
+      async.flushMicrotasks();
+      expect(cb.stops, 0);
+      startService();
+      async.flushMicrotasks();
+      expect(host.startCalls, 2);
+      service.stop();
+      async.flushMicrotasks();
+    });
+  });
+  test('held native start times out, retires callbacks and fences late receipt', () {
+    fakeAsync((clock) {
+      final host = FakePhoneMicHostApi()..startGate = Completer<void>();
+      final mic = NativeMicRecorderService(hostApi: host, registerFlutterApi: false);
+      var failed = false;
+      var frames = 0;
+      mic.start(onByteReceived: (_) => frames++).catchError((_) {
+        failed = true;
+      });
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(seconds: 12));
+      clock.flushMicrotasks();
+      expect(failed, isTrue);
+      expect(host.stopCalls, greaterThan(0));
+      mic.onAudioFrame(Uint8List(8), host.lastStartSessionId);
+      expect(frames, 0);
+      var blocked = false;
+      mic.startBatch().catchError((_) {
+        blocked = true;
+      });
+      clock.flushMicrotasks();
+      expect(blocked, isTrue);
+      host.startGate!.complete();
+      clock.flushMicrotasks();
+      host.startGate = null;
+      mic.start(onByteReceived: (_) => frames++);
+      clock.flushMicrotasks();
+      expect(host.startCalls, 2);
+      mic.stop();
+      clock.flushMicrotasks();
+    });
+  });
+  test('Stop while native start pending cannot report start success', () async {
+    final host = FakePhoneMicHostApi()..startGate = Completer<void>();
+    final mic = NativeMicRecorderService(hostApi: host, registerFlutterApi: false);
+    final start = mic.start(onByteReceived: (_) {});
+    final rejected = expectLater(start, throwsStateError);
+    mic.stop();
+    host.startGate!.complete();
+    await rejected;
+    expect(host.stopCalls, greaterThan(0));
+  });
+  test('legacy Stop receipt fences a replacement start until actual acknowledgement', () async {
+    await startService();
+    host.stopGate = Completer<void>();
+    service.stop();
+    var started = false;
+    final replacement = startService().then((_) => started = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(host.startCalls, 1);
+    expect(started, isFalse);
+    host.stopGate!.complete();
+    await replacement;
+    expect(host.startCalls, 2);
+    expect(started, isTrue);
+  });
+  test('legacy Stop wait times out without installing replacement callbacks', () {
+    fakeAsync((clock) {
+      startService();
+      clock.flushMicrotasks();
+      host.stopGate = Completer<void>();
+      service.stop();
+      Object? error;
+      startService().catchError((Object e) {
+        error = e;
+      });
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(seconds: 10));
+      clock.flushMicrotasks();
+      expect(error, isA<TimeoutException>());
+      expect(host.startCalls, 1);
+      service.onAudioFrame(Uint8List(8), host.lastStartSessionId);
+      expect(cb.bytes, isEmpty);
+      host.stopGate!.complete();
+      clock.flushMicrotasks();
+      startService();
+      clock.flushMicrotasks();
+      expect(host.startCalls, 2);
     });
   });
 }

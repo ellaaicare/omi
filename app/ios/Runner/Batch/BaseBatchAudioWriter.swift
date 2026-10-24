@@ -1,5 +1,51 @@
 import Foundation
 
+/// Ella account/consent denial is process-scoped and never writes the upstream
+/// user mute policy. A generation retires already-queued work across rebinds.
+/// The existing native host authenticates allow requests against Firebase.
+enum EllaNativeCaptureAuthorization {
+    private static let lock = NSLock()
+    #if ELLA_UPSTREAM_CAPTURE_ENABLED_YES
+    private static var enabled = true
+    #else
+    private static var enabled = false
+    #endif
+    private static var allowed = false
+    private static var operation: String?
+    enum UpdateResult: Equatable { case applied, retired, stale }
+    private static var generation: Int64 = 0
+
+    static func currentRevision() -> Int64 {
+        lock.lock(); defer { lock.unlock() }
+        return generation
+    }
+    static func apply(allowed next: Bool, revision: Int64, operation requested: String) -> UpdateResult {
+        lock.lock(); defer { lock.unlock() }
+        // A stale runtime may retire its own operation, never a newer owner's.
+        if !next && operation != requested { return .retired }
+        guard revision > generation else { return .stale }
+        enabled = true
+        generation = revision
+        allowed = next
+        operation = next ? requested : nil
+        return .applied
+    }
+    static func snapshot() -> Int64? {
+        lock.lock(); defer { lock.unlock() }
+        return enabled ? (allowed ? generation : nil) : 0
+    }
+    static func permits(_ stamp: Int64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !enabled ? stamp == 0 : allowed && generation == stamp
+    }
+    static func withAdmission(_ stamp: Int64, write: () -> Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !enabled ? stamp == 0 : allowed && generation == stamp else { return false }
+        // A denial cannot acknowledge while an earlier admitted write is active.
+        return write()
+    }
+}
+
 /// The persistent capture authorization shared by every live native batch sink.
 ///
 /// Flutter writes this as JSON so native capture can continue making the

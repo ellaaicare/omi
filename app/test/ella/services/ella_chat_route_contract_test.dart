@@ -12,6 +12,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/pages/chat/widgets/markdown_message_widget.dart';
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
@@ -69,6 +70,51 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({'uid': 'uid-a'});
     await SharedPreferencesUtil.init();
+  });
+
+  test('older history request retains its cursor and exposes a retryable 503', () async {
+    final before = DateTime.utc(2026, 10, 9, 21, 52);
+    final result = await fetchEllaChatHistoryPage(
+      before: before,
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: const _CurrentAuthority('uid-a'),
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async {
+        final query = Uri.parse(url).queryParameters;
+        expect(query['before'], before.toIso8601String());
+        expect(query['limit'], '50');
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(exactAuthority.isExactCurrent(), isTrue);
+        return http.Response('{"detail":{"code":"unavailable","retryable":true}}', 503);
+      },
+    );
+    expect(result.isFailure, isTrue);
+    expect(result.value, isNull, reason: 'a failed older page must never appear to be an empty successful history');
+    expect(result.failure!.statusCode, 503);
+    expect(result.failure!.retryable, isTrue);
+  });
+
+  test('synthetic 200-item history survives parsing serialization and display formatting', () async {
+    final full = List.generate(200, (i) => '${i + 1}. Synthetic item ${i + 1}').join('\n');
+    final result = await fetchEllaChatHistoryPage(
+      expectedAuthenticatedUid: 'uid-a',
+      exactAuthority: const _CurrentAuthority('uid-a'),
+      transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async => http.Response(
+          jsonEncode({
+            'hasMore': false,
+            'messages': [
+              {'id': 'synthetic-long', 'role': 'assistant', 'content': full, 'timestamp': '2026-10-09T21:52:00Z'}
+            ]
+          }),
+          200),
+    );
+    expect(result.isFailure, isFalse);
+    final message = result.value!.messages.single;
+    expect(message.text, full);
+    final restored = ServerMessage.fromJson(jsonDecode(jsonEncode(message.toJson())));
+    expect(restored.text, full);
+    expect(formatEllaReplyForDisplay(restored.text), contains('200. Synthetic item 200'));
+    SharedPreferencesUtil().cachedMessages = [restored];
+    expect(SharedPreferencesUtil().cachedMessages.single.text, full);
   });
 
   test('Ella stream sends the stable client turn identity without legacy session authority', () async {
@@ -293,8 +339,52 @@ void main() {
     expect(result.value, hasLength(2));
     expect(result.value![0].sender, MessageSender.ai);
     expect(result.value![0].text, 'You compared design options.');
+    expect(result.value![0].isCanonicalMemoryArtifact, isTrue);
+    expect(ServerMessage.fromJson(result.value![0].toJson()).isCanonicalMemoryArtifact, isTrue);
     expect(result.value![1].sender, MessageSender.human);
     expect(result.value![1].text, '[Ella] is the name I typed.');
+    expect(result.value![1].isCanonicalMemoryArtifact, isFalse);
+    expect(ServerMessage.fromJson(result.value![1].toJson()).isCanonicalMemoryArtifact, isFalse);
+  });
+
+  test('only explicit canonical Omi provenance marks overheard words; cache retains content', () async {
+    const authority = _CurrentAuthority('uid-a');
+    final result = await fetchEllaChatHistory(
+        expectedAuthenticatedUid: 'uid-a',
+        exactAuthority: authority,
+        transport: ({required url, required expectedAuthenticatedUid, required exactAuthority}) async => http.Response(
+            jsonEncode({
+              'messages': [
+                {
+                  'id': 'overheard',
+                  'sender': 'human',
+                  'text': 'SPEAKER_0: Synthetic overheard words',
+                  'metadata': {'source': 'canonical_timeline', 'channel': 'omi', 'provider': 'omi-backend'}
+                },
+                {'id': 'typed', 'sender': 'human', 'text': 'SPEAKER_0: is a label I typed'},
+                {
+                  'id': 'voice',
+                  'sender': 'human',
+                  'text': 'Direct voice conversation',
+                  'metadata': {'source': 'canonical_timeline', 'channel': 'chat', 'provider': 'omi-backend'}
+                },
+                {
+                  'id': 'other',
+                  'sender': 'human',
+                  'text': 'Speaker 0: preserved integration words',
+                  'metadata': {'source': 'other', 'channel': 'omi', 'provider': 'omi-backend'}
+                },
+              ],
+              'hasMore': false
+            }),
+            200));
+    expect(result.isSuccess, isTrue);
+    expect(result.value, hasLength(4));
+    expect(result.value!.first.isCanonicalOverheardTranscript, isTrue);
+    expect(result.value!.skip(1).every((m) => !m.isCanonicalOverheardTranscript), isTrue);
+    final cached = ServerMessage.fromJson(result.value!.first.toJson());
+    expect(cached.isCanonicalOverheardTranscript, isTrue);
+    expect(cached.text, 'SPEAKER_0: Synthetic overheard words');
   });
 
   test('history preserves equal-time turn pairs instead of grouping by role', () async {

@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Combine
+import FirebaseAuth
 
 /// GuardianModeManager - Progressive Buffering for 99.9% Reliability
 ///
@@ -23,6 +24,12 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
     private var healthTimer: DispatchSourceTimer?
     private var injectionTasks: [UUID: Task<Void, Never>] = [:]
     private var reportTasks: [UUID: Task<Void, Never>] = [:]
+    private let strictGate = GuardianStrictMediaGate()
+    private var strictActive = false
+    // Queue-confined permits are independent of saved mode/account data.
+    private var legacyOutputPermit: GuardianDictationOutputGate.Permit?
+    private var strictOutputPermit: GuardianDictationOutputGate.Permit?
+    var strictPlaybackFact: (([String: Any]) -> Void)?
     private let effectPath = GuardianModeManagerEffectPath()
 
     // Buffer configuration
@@ -81,11 +88,18 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
 
     func authenticatedUIDDidChange(_ uid: String?) {
         guard GuardianModeAvailability.shared.invalidateIfUIDChanged(uid) else { return }
+        strictGate.retire()
         stop()
     }
 
     /// Start Guardian Mode - begins silent audio loop with progressive buffering
     func start() throws {
+        if let uid = GuardianModeAvailability.shared.currentUID,
+           GuardianOutputStopBarrier.shared.operation(for: uid) != nil {
+            throw NSError(domain: "GuardianMode", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "Whisper output is stopped pending backlog discard acknowledgement"
+            ])
+        }
         guard let startLease = GuardianModeAvailability.shared.captureLease() else {
             throw NSError(domain: "GuardianMode", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "Guardian is unavailable in this build"
@@ -97,10 +111,19 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
                     NSLocalizedDescriptionKey: "Guardian is unavailable in this build"
                 ])
             }
+            if GuardianOutputStopBarrier.shared.operation(for: startLease.uid) != nil {
+                throw NSError(domain: "GuardianMode", code: 4, userInfo: nil)
+            }
+            guard !strictActive else { throw NSError(domain: "GuardianStrict", code: 1) }
             guard !isActive else {
                 NSLog("GuardianMode: Already active, ignoring start()")
                 return
             }
+
+            guard let outputPermit = GuardianDictationOutputGate.shared.beginOutput() else {
+                throw NSError(domain: "GuardianDictation", code: 1)
+            }
+            legacyOutputPermit = outputPermit
 
             // Guardian is playback-only. Keep it off the HFP/dialog route used
             // by interactive microphone sessions.
@@ -173,12 +196,123 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Playback-only local Stop. A persisted exact-owner barrier keeps poll/start
+    /// suspended until the server discard contract is acknowledged. It is not a
+    /// client-only backlog acknowledgement and does not touch capture/session routes.
+    func stopCurrentOutput() throws -> [String: Any] {
+        guard let oldLease = GuardianModeAvailability.shared.captureOwnerLease(),
+              let freshLease = GuardianModeAvailability.shared.retireOutput(oldLease) else {
+            throw NSError(domain: "GuardianMode", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "Whisper owner is unavailable"
+            ])
+        }
+        let operationID = GuardianOutputStopBarrier.shared.operation(for: freshLease.uid) ?? UUID().uuidString
+        try queue.sync {
+            GuardianOutputStopBarrier.shared.record(uid: freshLease.uid, operation: operationID)
+            guard GuardianModeAvailability.shared.isExactOwnerLease(freshLease) else {
+                throw NSError(domain: "GuardianMode", code: 6, userInfo: nil)
+            }
+            GuardianModePollingService.shared.stopPolling()
+            injectionTasks.values.forEach { $0.cancel() }
+            injectionTasks.removeAll()
+            reportTasks.values.forEach { $0.cancel() }
+            reportTasks.removeAll()
+            stopHealthMonitor()
+            audioPlayer?.pause()
+            audioPlayer?.removeAllItems()
+            audioPlayer = nil
+            activeLease = nil
+            cancellables.removeAll()
+            isActive = false
+        }
+        return ["localOutputStopped": true, "serverDiscardVerified": false,
+                "modeEnabled": GuardianModeAvailability.shared.isEnabled, "operationId": operationID]
+    }
+
+
+    /// No polling, silent loop, synthesis, legacy reporting, health recovery or retries.
+    /// Dart admits only a durable claimed event; native tickets fence actual media effects.
+    func activateStrict(_ ticket: GuardianStrictMediaTicket) throws {
+        try queue.sync {
+            let existing = strictOutputPermit
+            guard let permit = existing ?? GuardianDictationOutputGate.shared.beginOutput() else {
+                throw NSError(domain: "GuardianDictation", code: 1)
+            }
+            guard strictGate.activate(ticket) else {
+                if existing == nil { GuardianDictationOutputGate.shared.completeOutput(permit) }
+                throw NSError(domain: "GuardianStrict", code: 2)
+            }
+            strictOutputPermit = permit
+            strictActive = true
+        }
+    }
+
+    func stopStrict(uid: String, epoch: String?, generation: Int) -> Bool {
+        guard strictGate.close(uid: uid, epoch: epoch, generation: generation) else { return false }
+        queue.sync {
+            GuardianModePollingService.shared.stopPolling() // Also immediately retires legacy TTS.
+            injectionTasks.values.forEach { $0.cancel() }; injectionTasks.removeAll()
+            reportTasks.values.forEach { $0.cancel() }; reportTasks.removeAll()
+            stopHealthMonitor()
+            audioPlayer?.pause(); audioPlayer?.removeAllItems(); audioPlayer = nil
+            activeLease = nil; cancellables.removeAll(); isActive = false
+            strictActive = true // Strict choice cannot reactivate the legacy path on failure.
+            if let permit = strictOutputPermit {
+                strictOutputPermit = nil
+                GuardianDictationOutputGate.shared.completeOutput(permit)
+            }
+            // Per-item permits require the exact SDK terminal callback below.
+            // Early removal/Stop without terminal proof remains ambiguous.
+        }
+        return true
+    }
+
+    func playStrict(_ ticket: GuardianStrictMediaTicket, eventID: String, url: URL) throws {
+        guard ticket.presentation == "audio", url.scheme == "https", UUID(uuidString: eventID) != nil else {
+            throw NSError(domain: "GuardianStrict", code: 3)
+        }
+        try queue.sync {
+            var accepted = false
+            let performed = strictGate.perform(ticket) {
+                guard strictActive, Auth.auth().currentUser?.uid == ticket.uid else { return }
+                guard let outputPermit = GuardianDictationOutputGate.shared.beginOutput() else { return }
+                guard EllaVoiceAudioRoutePolicy().apply(usage: .playback,
+                    session: SystemEllaVoiceAudioSession()).success else { return }
+                if audioPlayer == nil { audioPlayer = AVQueuePlayer(); audioPlayer?.actionAtItemEnd = .advance }
+                guard let player = audioPlayer else { return }
+                let item = AVPlayerItem(url: url)
+                guard player.canInsert(item, after: nil) else { return }
+                let payload: [String: Any] = ["uid": ticket.uid, "client_epoch": ticket.epoch,
+                    "session_id": ticket.session, "generation": ticket.generation, "event_id": eventID]
+                var started = false
+                player.publisher(for: \.timeControlStatus).sink { [weak self, weak player, weak item] status in
+                    guard status == .playing else { return }
+                    self?.queue.async { [weak self, weak player, weak item] in
+                        guard let self, let player, let item, player.currentItem === item, !started else { return }
+                        _ = self.strictGate.perform(ticket) { started = true; self.strictPlaybackFact?(payload.merging(["status":"started"]) { _, new in new }) }
+                    }
+                }.store(in: &cancellables)
+                NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime, object: item)
+                    .sink { [weak self] _ in
+                        GuardianDictationOutputGate.shared.completeOutput(outputPermit)
+                        self?.queue.async { [weak self] in
+                            guard let self else { return }
+                            _ = self.strictGate.perform(ticket) { self.strictPlaybackFact?(payload.merging(["status":"completed"]) { _, new in new }) }
+                        }
+                    }.store(in: &cancellables)
+                player.insert(item, after: nil); player.play(); accepted = true
+            }
+            guard performed && accepted else { throw NSError(domain: "GuardianStrict", code: 4) }
+        }
+    }
+
     /// Stop Guardian Mode
     func stop() {
         // Advance the native generation before waiting for the manager queue.
         // An older task can no longer begin an insert/play side effect after
         // this call returns from configure.
         GuardianModeAvailability.shared.disable()
+        strictGate.retire()
         queue.sync {
             GuardianModePollingService.shared.stopPolling()
 
@@ -189,6 +323,14 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
             reportTasks.removeAll()
             pendingReports.forEach { $0.cancel() }
 
+            if strictActive {
+                stopHealthMonitor(); audioPlayer?.pause(); audioPlayer?.removeAllItems(); audioPlayer = nil
+                strictActive = false
+                if let permit = strictOutputPermit {
+                    strictOutputPermit = nil
+                    GuardianDictationOutputGate.shared.completeOutput(permit)
+                }
+            }
             guard isActive else {
                 cancellables.removeAll()
                 NSLog("GuardianMode: Already stopped, ignoring stop()")
@@ -202,6 +344,8 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
             activeLease = nil
             cancellables.removeAll()
             isActive = false
+            // Legacy looping playback has no terminal/disposal receipt. Keep
+            // its permit after Stop; this new gate cannot certify its silence.
 
             let rate = totalInjections > 0
                 ? String(format: "%.1f%%", Double(successfulInjections) / Double(totalInjections) * 100)
@@ -400,7 +544,7 @@ class GuardianModeManager: NSObject, @unchecked Sendable {
     ) {
         // Increment sequence counter on queue for thread-safety
         queue.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, !self.strictActive else { return }
             let lease: GuardianWorkLease
             if let pollLease {
                 lease = pollLease

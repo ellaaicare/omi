@@ -1,7 +1,11 @@
+import 'package:omi/ella/upstream_capture/ella_native_capture_authorization.dart';
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
+import 'package:omi/ella/services/whisper_delivery_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -28,6 +32,10 @@ import 'package:omi/upstream_capture/services/capture/conversation_location_capt
 import 'package:omi/upstream_capture/services/capture/scenarios/native_event_vector.dart';
 import 'package:omi/upstream_capture/services/capture/stt_mode_resolver.dart';
 import 'package:omi/upstream_capture/services/mic/native_mic_recorder_service.dart';
+import 'package:omi/upstream_capture/services/services.dart';
+import 'package:omi/upstream_capture/services/devices/connectors/device_connection.dart';
+import 'package:omi/upstream_capture/services/mic/mic_arbiter.dart';
+import 'package:omi/services/mic/audio_capture_ownership.dart';
 import 'package:omi/upstream_capture/services/sockets/transcription_service.dart';
 import 'package:omi/upstream_capture/services/wals/recording_transfer_coordinator.dart';
 import 'package:omi/upstream_capture/services/wals/sync_rate_limiter.dart';
@@ -43,6 +51,47 @@ import '../../../upstream_capture/support/capture/virtual_capture_time.dart';
 
 const String accountA = 'uid-a';
 const String accountB = 'uid-b';
+
+/// Protocol receipts only; no backend or physical recording is contacted.
+class WhisperProtocolTransport extends ScriptedPureSocket {
+  WhisperProtocolTransport(this.number, {this.beforeConnect, this.beforeDrain, this.beforeReady});
+  final int number;
+  final Future<void> Function()? beforeConnect;
+  final Future<void> Function()? beforeDrain;
+  final Future<void> Function()? beforeReady;
+  Map<String, dynamic> get authority => {
+        'protocol_version': 2,
+        'conversation_id': 'synthetic-conversation-$number',
+        'generation': 'synthetic-generation-$number',
+        'owner_token': 'synthetic-owner-$number',
+      };
+  @override
+  Future<bool> connect() async {
+    await beforeConnect?.call();
+    final connected = await super.connect();
+    if (connected)
+      Timer.run(() async {
+        await beforeReady?.call();
+        onMessage(jsonEncode({
+          'type': 'service_status',
+          'status': 'capture_protocol_ready',
+          ...authority,
+        }));
+      });
+    return connected;
+  }
+
+  @override
+  void send(dynamic message) {
+    super.send(message);
+    if (message is String && (jsonDecode(message) as Map)['type'] == 'capture_drain') {
+      () async {
+        await beforeDrain?.call();
+        onMessage(jsonEncode({'type': 'service_status', 'status': 'capture_protocol_drained', ...authority}));
+      }();
+    }
+  }
+}
 
 /// Grants a fork (Ella) consent authority for [uid] in the shared prefs, exactly
 /// like the existing AiConsentActiveSessionLease tests do.
@@ -122,6 +171,8 @@ class EllaUpstreamCaptureHarness {
   late final VirtualClock clock;
   late final ManualScheduler scheduler;
   late final ScriptedUploads uploads;
+  BleAudioCodec diagnosticPendantCodec = BleAudioCodec.pcm16;
+  Future<SyncJobFetch> Function(String)? jobFetcher;
   late final FakePhoneMicHostApi hostApi;
   late final NativeMicRecorderService mic;
   late final WalService wal;
@@ -133,9 +184,54 @@ class EllaUpstreamCaptureHarness {
   late final fork.SharedPreferencesUtil ellaPreferences;
   final List<AiConsentActiveSessionLease> leases = [];
   final List<({String? source, ScriptedPureSocket transport, TranscriptSegmentSocketService service})> sockets = [];
+  final List<Map<String, String>> socketDeliveryQueries = [];
+  Listenable? deliveryChanges;
+  WhisperDeliveryScope? Function()? deliveryScope;
+  Completer<void>? holdNextSocketStart;
+  Completer<void>? nextSocketStartEntered;
+  Completer<void>? holdNextDrain;
+  Completer<void>? nextDrainEntered;
+  Completer<void>? holdNextReady;
+  Completer<void>? nextReadyEntered;
+  Completer<void>? holdNextAuth;
+  Completer<void>? nextAuthEntered;
 
   ScriptedDeviceConnection? deviceConnection;
   String authenticatedUid = accountA;
+  bool nativeCaptureAllowed = false;
+  bool malformedNativeDenial = false;
+  bool malformedNativeAllow = false;
+  String? nativeCaptureOperation;
+  int nativeCaptureRevision = 0;
+  Completer<void>? holdNextNativeAllow;
+  Completer<void>? nextNativeAllowEntered;
+  late final nativeAuthorization = EllaNativeCaptureAuthorization(invoke: (method, arguments) async {
+    if (method == 'getRevision') return nativeCaptureRevision;
+    if (arguments['allowed'] == true) {
+      final hold = holdNextNativeAllow;
+      final entered = nextNativeAllowEntered;
+      holdNextNativeAllow = null;
+      nextNativeAllowEntered = null;
+      entered?.complete();
+      await hold?.future;
+    }
+    final operation = arguments['operation'] as String;
+    if (arguments['allowed'] == false && nativeCaptureOperation != operation) {
+      return {'revision': nativeCaptureRevision, 'allowed': false, 'operation': operation, 'ownedDenied': true};
+    }
+    final next = arguments['revision'] as int;
+    if (next <= nativeCaptureRevision) throw StateError('stale native command');
+    nativeCaptureRevision = next;
+    nativeCaptureAllowed = arguments['allowed'] as bool;
+    nativeCaptureOperation = nativeCaptureAllowed ? operation : null;
+    if (nativeCaptureAllowed ? malformedNativeAllow : malformedNativeDenial) return null;
+    return {
+      'revision': nativeCaptureRevision,
+      'allowed': nativeCaptureAllowed,
+      'operation': operation,
+      'ownedDenied': !nativeCaptureAllowed
+    };
+  });
   bool connected = true;
   bool protocolV2 = false;
   EllaCaptureProtocolSocket? Function()? diagnosticSocket;
@@ -145,6 +241,13 @@ class EllaUpstreamCaptureHarness {
   String? processedMemoryId;
   int processCalls = 0;
   int connectionAttempts = 0;
+  Future<DeviceConnection?> Function(String, {required bool force})? ensureConnectionOverride;
+  Future<void> Function()? beforeDeviceDisconnect;
+  final List<String> disconnectedDevices = [];
+  Object? finalizationError;
+  Future<void> Function()? beforeFinalization;
+  IMicRecorderService Function(NativeMicRecorderService)? phoneMicWrapper;
+  Future<bool> Function()? permissionRequester;
   final List<({String conversationId, int protocolVersion, String generation, String ownerToken})>
       protocolFinalizations = [];
 
@@ -160,6 +263,11 @@ class EllaUpstreamCaptureHarness {
     AccountCommitAuthority? Function()? memoryAccountAuthority,
     List<Duration>? memoryRetryDelays,
     String? processedMemoryId,
+    Listenable? deliveryChanges,
+    WhisperDeliveryScope? Function()? deliveryScope,
+    Future<SyncJobFetch> Function(String)? jobFetcher,
+    IMicRecorderService Function(NativeMicRecorderService)? phoneMicWrapper,
+    Future<bool> Function()? permissionRequester,
   }) async {
     TestWidgetsFlutterBinding.ensureInitialized();
     final harness = EllaUpstreamCaptureHarness._(tempDir);
@@ -170,6 +278,11 @@ class EllaUpstreamCaptureHarness {
     harness.memoryAccountAuthority = memoryAccountAuthority;
     harness.memoryRetryDelays = memoryRetryDelays;
     harness.processedMemoryId = processedMemoryId;
+    harness.deliveryChanges = deliveryChanges;
+    harness.deliveryScope = deliveryScope;
+    harness.jobFetcher = jobFetcher;
+    harness.phoneMicWrapper = phoneMicWrapper;
+    harness.permissionRequester = permissionRequester;
     await harness._boot(grantConsent: grantConsent);
     return harness;
   }
@@ -209,7 +322,8 @@ class EllaUpstreamCaptureHarness {
       phoneUploadGate: uploads.buildGate(),
       phoneNow: clock.now,
       phonePeriodic: scheduler.periodic,
-      phoneJobStatusFetcher: (jobId) async => const SyncJobFetch(SyncJobFetchOutcome.notFound),
+      phoneJobStatusFetcher: (jobId) =>
+          jobFetcher?.call(jobId) ?? Future.value(const SyncJobFetch(SyncJobFetchOutcome.notFound)),
     );
     wal.start();
     await wal.syncs.phone.walReady;
@@ -234,13 +348,26 @@ class EllaUpstreamCaptureHarness {
     );
     runtime = EllaUpstreamCaptureRuntime(
       authority: authority,
+      nativeAuthorization: nativeAuthorization,
+      deliveryChanges: deliveryChanges,
+      deliveryScope: deliveryScope,
       memoryLoader: memoryLoader,
       memoryAccountAuthority: memoryAccountAuthority,
       memoryRetryDelays: memoryRetryDelays ?? const [Duration(seconds: 2)],
       bootForTesting: () async => provider,
+      ensureDeviceConnectionForTesting: (id, {required force}) async {
+        final override = ensureConnectionOverride;
+        if (override != null) return override(id, force: force);
+        connectionAttempts++;
+        return deviceConnection;
+      },
       connectDeviceForTesting: (_) async {
         connectionAttempts++;
         return deviceConnection;
+      },
+      disconnectDeviceForTesting: (id) async {
+        await beforeDeviceDisconnect?.call();
+        disconnectedDevices.add(id);
       },
       activeProtocolSocket: diagnosticSocket ??
           () => !protocolV2 || sockets.isEmpty ? null : sockets.last.service as EllaCaptureProtocolSocket,
@@ -259,6 +386,8 @@ class EllaUpstreamCaptureHarness {
           generation: generation,
           ownerToken: ownerToken,
         ));
+        await beforeFinalization?.call();
+        if (finalizationError != null) throw finalizationError!;
         return ella_schema.CreateConversationResponse.fromJson({
           'messages': const [],
           'conversation': {
@@ -290,7 +419,8 @@ class EllaUpstreamCaptureHarness {
     provider = runtime.compose(
       EllaUpstreamCaptureWiring(
         wal: wal,
-        phoneMic: mic,
+        phoneMic: phoneMicWrapper?.call(mic) ??
+            ArbitratedMic(inner: mic, arbiter: MicArbiter(ownership: AudioCaptureOwnership()), owner: 'test-phone'),
         openConversationSocket: _openSocket,
         ensureDeviceConnection: (deviceId) async => deviceConnection,
         owner: CaptureSessionOwner(coordinator: coordinator, startForeground: () async {}, stopForeground: () async {}),
@@ -311,8 +441,8 @@ class EllaUpstreamCaptureHarness {
           requestPermission: () async => LocationPermission.denied,
           now: clock.now,
         ),
-        codec: (deviceId) async => BleAudioCodec.pcm16,
-        microphonePermission: () async => true,
+        codec: (deviceId) async => diagnosticPendantCodec,
+        microphonePermission: permissionRequester ?? () async => true,
         refreshConversation: (_) async {},
         processInProgressConversation: protocolV2
             ? null
@@ -347,7 +477,53 @@ class EllaUpstreamCaptureHarness {
     customSttConfig,
     geolocation,
   }) async {
-    final transport = ScriptedPureSocket();
+    if (deliveryScope != null && sockets.isNotEmpty) {
+      await sockets.last.service.stop(reason: 'scripted production socket replacement');
+    }
+    final query = Map<String, String>.of(runtime.captureDeliveryQuery);
+    final originUid = authority.boundUid;
+    final originEpoch = authority.bindingEpoch;
+    bool originCurrent() =>
+        !runtime.isDisposed &&
+        authority.hasCurrentAuthority &&
+        authority.boundUid == originUid &&
+        authority.bindingEpoch == originEpoch;
+    final auth = holdNextAuth;
+    final authEntered = nextAuthEntered;
+    holdNextAuth = null;
+    nextAuthEntered = null;
+    final hold = holdNextSocketStart;
+    final entered = nextSocketStartEntered;
+    holdNextSocketStart = null;
+    nextSocketStartEntered = null;
+    final drain = holdNextDrain;
+    final drainEntered = nextDrainEntered;
+    holdNextDrain = null;
+    nextDrainEntered = null;
+    final ready = holdNextReady;
+    final readyEntered = nextReadyEntered;
+    holdNextReady = null;
+    nextReadyEntered = null;
+    final transport = protocolV2 && deliveryScope != null
+        ? WhisperProtocolTransport(sockets.length, beforeConnect: () async {
+            await ellaCaptureSocketHeaders(() async {
+              authEntered?.complete();
+              await auth?.future;
+              return const <String, String>{};
+            },
+                hasOriginAuthority: originCurrent,
+                hasCurrentDeliveryBinding: () => mapEquals(query, runtime.captureDeliveryQuery))();
+            entered?.complete();
+            await hold?.future;
+          }, beforeDrain: () async {
+            drainEntered?.complete();
+            await drain?.future;
+          }, beforeReady: () async {
+            readyEntered?.complete();
+            await ready?.future;
+          })
+        : ScriptedPureSocket();
+    socketDeliveryQueries.add(query);
     transport.connectAllowed = () => connected;
     final service = protocolV2
         ? EllaCaptureProtocolSocket.withTransport(
@@ -357,7 +533,12 @@ class EllaUpstreamCaptureHarness {
             transport,
             source: source,
             clientConversationId: clientConversationId,
-            hasOriginAuthority: () => authority.hasCurrentAuthority,
+            hasOriginAuthority: () =>
+                !runtime.isDisposed &&
+                authority.hasCurrentAuthority &&
+                (deliveryScope == null || (authority.boundUid == originUid && authority.bindingEpoch == originEpoch)),
+            deliveryQuery: query,
+            hasCurrentDeliveryBinding: () => deliveryScope == null || mapEquals(query, runtime.captureDeliveryQuery),
           )
         : TranscriptSegmentSocketService.withSocket(
             sampleRate,
@@ -423,6 +604,7 @@ class EllaUpstreamCaptureHarness {
       await coordinator.waitUntilIdle();
       await pumpEventQueue();
       await runtime.pendingTeardown;
+      await runtime.pendingDefaultRecordingForTesting;
       await scheduler.waitForCallbackIo();
       await coordinator.waitUntilIdle();
       if (!coordinator.hasInFlight && !scheduler.hasInFlightIo) return;
@@ -448,6 +630,7 @@ class EllaUpstreamCaptureHarness {
     await coordinator.waitUntilIdle();
     authority.release();
     await runtime.pendingTeardown;
+    runtime.dispose();
     authority.dispose();
     for (final lease in leases) {
       lease.stop();

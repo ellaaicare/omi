@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -638,14 +639,26 @@ enum SyncRateLimitKind { fairUse, backendCapacity }
 bool shouldRequestSyncCaptureManifest(String? conversationId, bool claimLiveCapture) =>
     conversationId != null && claimLiveCapture;
 
-Future<String?> _createSyncCaptureManifest(List<File> files, String conversationId) async {
+@visibleForTesting
+Future<List<Map<String, String>>> buildSyncCaptureManifestClaims(List<File> files,
+    {ExactAccountAuthorityVerifier? exactAuthority}) async {
+  verifySyncRequestAuthority(exactAuthority);
   final claims = <Map<String, String>>[];
   for (final file in files) {
+    verifySyncRequestAuthority(exactAuthority);
     final digest = await sha256.bind(file.openRead()).first;
     claims.add({'name': file.uri.pathSegments.last, 'sha256': digest.toString()});
   }
+  verifySyncRequestAuthority(exactAuthority);
+  return claims;
+}
+
+Future<String?> _createSyncCaptureManifest(List<File> files, String conversationId,
+    {ExactAccountAuthorityVerifier? exactAuthority}) async {
+  final claims = await buildSyncCaptureManifestClaims(files, exactAuthority: exactAuthority);
   final response = await makeApiCall(
     url: '${Env.apiBaseUrl}v2/sync-capture-manifest',
+    exactAuthority: exactAuthority,
     headers: const {},
     body: jsonEncode(
       wire.GeneratedSyncCaptureManifestRequest(
@@ -780,39 +793,68 @@ bool isSyncUploadRateLimitResponse(http.Response response) {
 /// `uploaded` and a reconciler resolves [jobId] later via [fetchSyncJobStatus].
 /// Error-status mapping matches the old polling path so callers' retry logic
 /// is unchanged.
+@visibleForTesting
+String requireRecoveryCaptureManifest(String? manifest) {
+  if (manifest == null || manifest.isEmpty) throw StateError('Capture recovery manifest unavailable');
+  return manifest;
+}
+
+/// Null in production; tests replace only the HTTP transport response, never
+/// the production upload status decoder or WAL completion policy.
+typedef SyncUploadMultipartCall = Future<http.Response> Function({
+  required String url,
+  required List<File> files,
+  Map<String, String> headers,
+  Map<String, String> fields,
+  UploadProgressCallback? onUploadProgress,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  void Function(int)? onHttpStatus,
+  void Function()? onSendAttempt,
+});
+
 Future<UploadFilesResult> uploadLocalFilesV2(
   List<File> files, {
   UploadProgressCallback? onUploadProgress,
   String? conversationId,
+  Map<String, dynamic>? sourceCoverage,
   bool claimLiveCapture = false,
   Geolocation? geolocation,
+  ExactAccountAuthorityVerifier? exactAuthority,
+  void Function(int)? onHttpStatus,
+  void Function()? onSendAttempt,
+  SyncUploadMultipartCall? multipartCall,
 }) async {
   assertWalSyncFilesAreFramedBins(files.map((file) => file.path));
   String? captureManifest;
-  if (shouldRequestSyncCaptureManifest(conversationId, claimLiveCapture)) {
-    captureManifest = await _createSyncCaptureManifest(files, conversationId!);
+  if (shouldRequestSyncCaptureManifest(conversationId, claimLiveCapture || sourceCoverage != null)) {
+    captureManifest = await _createSyncCaptureManifest(files, conversationId!, exactAuthority: exactAuthority);
+    // Missing attribution must not silently downgrade a full-window repair to
+    // an unclaimed upload that can append duplicate transcript on retry.
+    captureManifest = requireRecoveryCaptureManifest(captureManifest);
   }
   var url = '${Env.apiBaseUrl}v2/sync-local-files';
   if (conversationId != null) {
     url += '?conversation_id=${Uri.encodeQueryComponent(conversationId)}';
   }
-  var response = await makeMultipartApiCall(
+  var response = await (multipartCall ?? makeMultipartApiCall)(
     url: url,
     files: files,
+    fields: {if (sourceCoverage != null) 'coverage': jsonEncode(sourceCoverage)},
     headers: {
       if (captureManifest != null) 'X-Omi-Sync-Capture-Manifest': captureManifest,
       if (geolocation != null) 'X-Omi-Conversation-Geolocation': jsonEncode(geolocation.toJson()),
     },
     onUploadProgress: onUploadProgress,
+    exactAuthority: exactAuthority,
+    onHttpStatus: onHttpStatus,
+    onSendAttempt: onSendAttempt,
   );
 
   if (response.statusCode == 200) {
     // Fast-path: server processed synchronously and returned the result. A
     // legacy server can still encode partial work in a 200, which must follow
     // the retry path rather than acknowledging/deleting the local WAL.
-    final completed = SyncLocalFilesResponse.fromGenerated(
-      wire.GeneratedSyncLocalFilesResultResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>),
-    );
+    final completed = SyncLocalFilesResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
     return UploadFilesResult.done(requireCompleteSyncUpload(completed));
   }
   if (response.statusCode == 202) {
@@ -874,9 +916,10 @@ class SyncJobFetch {
 
 /// Single GET of a sync job's status — no polling loop. The reconciler owns
 /// the polling cadence and decides what to do per [SyncJobFetchOutcome].
-Future<SyncJobFetch> fetchSyncJobStatus(String jobId) async {
+Future<SyncJobFetch> fetchSyncJobStatus(String jobId, {ExactAccountAuthorityVerifier? exactAuthority}) async {
   final response = await makeApiCall(
     url: '${Env.apiBaseUrl}v2/sync-local-files/$jobId',
+    exactAuthority: exactAuthority,
     headers: {},
     method: 'GET',
     body: '',

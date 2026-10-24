@@ -9,6 +9,7 @@ import 'package:omi/backend/http/client_api_failure.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/ella/services/ella_service_result.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/chat/page.dart';
@@ -36,18 +37,30 @@ class _ChatMessageProvider extends MessageProvider {
     required super.activeAuthority,
     required super.aiConsentEnsurer,
     required super.ellaChatStreamSender,
+    super.ellaChatHistoryFetcher,
+    EllaChatTurnLookup? ellaChatTurnLookup,
   }) : super(
           chatAppsRetriever: () async => [],
-          ellaChatTurnLookup: ({
-            required clientMessageId,
-            required expectedAuthenticatedUid,
-            required exactAuthority,
-          }) async =>
-              const EllaServiceResult.success(false),
+          ellaChatTurnLookup: ellaChatTurnLookup ??
+              ({
+                required clientMessageId,
+                required expectedAuthenticatedUid,
+                required exactAuthority,
+              }) async =>
+                  const EllaServiceResult.success(false),
         );
 
+  bool allowHistoryRefresh = false;
+
   @override
-  Future<void> refreshMessages({bool dropdownSelected = false}) async {}
+  Future<void> refreshMessages({bool dropdownSelected = false}) async {
+    if (allowHistoryRefresh) await super.refreshMessages(dropdownSelected: dropdownSelected);
+  }
+
+  Future<void> refreshSyntheticHistory() async {
+    allowHistoryRefresh = true;
+    await super.refreshMessages();
+  }
 
   @override
   Future<void> fetchChatApps() async {}
@@ -127,6 +140,162 @@ void main() {
     addTearDown(messages.dispose);
     return messages;
   }
+
+  for (final historyAfterSend in [false, true]) {
+    for (final historyFails in [true, false]) {
+      testWidgets(
+          'late history ${historyFails ? "failure" : "success"} preserves a send (history after terminal: $historyAfterSend)',
+          (tester) async {
+        final history = Completer<EllaServiceResult<EllaChatHistoryPage>>();
+        final reply = StreamController<ServerMessageChunk>();
+        final messages = _ChatMessageProvider(
+          activeAuthority: () => _CurrentAuthority(),
+          aiConsentEnsurer: () async => true,
+          ellaChatHistoryFetcher: (
+                  {required limit, required before, required expectedAuthenticatedUid, required exactAuthority}) =>
+              history.future,
+          ellaChatStreamSender: (text,
+                  {required clientMessageId, required clientSentAt, expectedAuthenticatedUid, exactAuthority}) =>
+              reply.stream,
+        );
+        addTearDown(messages.dispose);
+        final l10n = await mountChat(tester, messages);
+        final refresh = messages.refreshSyntheticHistory();
+        final send = messages.sendMessageStreamToServer('Synthetic pending turn');
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 29));
+        expect(messages.showTypingIndicator, isTrue);
+        expect(messages.messages.length, 2);
+        if (historyAfterSend) {
+          reply.add(ServerMessageChunk('synthetic-reply', '', MessageChunkType.done,
+              message: ServerMessage('synthetic-reply', DateTime(2026, 1, 1), 'Synthetic reply received',
+                  MessageSender.ai, MessageType.text, null, false, [], [], [])));
+          await reply.close();
+          await send;
+        }
+        history.complete(historyFails
+            ? const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true))
+            : const EllaServiceResult.success(EllaChatHistoryPage(messages: [], hasMore: false)));
+        await refresh;
+        await tester.pump();
+        expect(find.text(l10n.ellaChatCouldntSend), findsNothing,
+            reason: 'History loading must not claim that the still-pending outgoing turn failed');
+        expect(messages.messages.length, 2, reason: 'History must retain the active assistant placeholder');
+        expect(messages.showTypingIndicator, !historyAfterSend);
+        if (!historyAfterSend) {
+          reply.add(ServerMessageChunk('synthetic-reply', '', MessageChunkType.done,
+              message: ServerMessage('synthetic-reply', DateTime(2026, 1, 1), 'Synthetic reply received',
+                  MessageSender.ai, MessageType.text, null, false, [], [], [])));
+          await reply.close();
+          await send;
+        }
+        await tester.pump();
+        expect(messages.showTypingIndicator, isFalse);
+        expect(messages.sendingMessage, isFalse);
+        expect(messages.messages.where((message) => message.sender == MessageSender.ai).single.text,
+            'Synthetic reply received');
+        expect(messages.messages.where((message) => message.sender == MessageSender.human).single.clientDeliveryState,
+            isNull);
+        expect(find.text(l10n.ellaChatCouldntSend), findsNothing);
+        await tester.pumpWidget(const SizedBox.shrink());
+      });
+    }
+  }
+
+  testWidgets('exact accepted-turn lookup is not erased by an older history response', (tester) async {
+    final history = Completer<EllaServiceResult<EllaChatHistoryPage>>();
+    var sends = 0;
+    final messages = _ChatMessageProvider(
+      activeAuthority: () => _CurrentAuthority(),
+      aiConsentEnsurer: () async => true,
+      ellaChatHistoryFetcher: (
+              {required limit, required before, required expectedAuthenticatedUid, required exactAuthority}) =>
+          history.future,
+      ellaChatTurnLookup: (
+              {required clientMessageId, required expectedAuthenticatedUid, required exactAuthority}) async =>
+          const EllaServiceResult.success(true),
+      ellaChatStreamSender: (text,
+          {required clientMessageId, required clientSentAt, expectedAuthenticatedUid, exactAuthority}) async* {
+        sends++;
+        throw const ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true);
+      },
+    );
+    addTearDown(messages.dispose);
+    await mountChat(tester, messages);
+    await messages.sendMessageStreamToServer('Synthetic lost acknowledgment');
+    final originalId = messages.messages.single.id;
+    final refresh = messages.refreshSyntheticHistory();
+    await messages.retryLastFailedMessage();
+    expect(messages.messages.single.clientDeliveryState, isNull);
+    history.complete(const EllaServiceResult.success(EllaChatHistoryPage(messages: [], hasMore: false)));
+    await refresh;
+    expect(sends, 1, reason: 'An accepted user event must not create a second provider invocation');
+    expect(messages.messages.single.id, originalId);
+    expect(messages.messages.single.clientDeliveryState, isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('terminal error clears pending UI even when the source stream stays open', (tester) async {
+    final reply = StreamController<ServerMessageChunk>();
+    final messages = _ChatMessageProvider(
+      activeAuthority: () => _CurrentAuthority(),
+      aiConsentEnsurer: () async => true,
+      ellaChatStreamSender: (text,
+              {required clientMessageId, required clientSentAt, expectedAuthenticatedUid, exactAuthority}) =>
+          reply.stream,
+    );
+    addTearDown(messages.dispose);
+    addTearDown(reply.close);
+    final l10n = await mountChat(tester, messages);
+    final send = messages.sendMessageStreamToServer('Synthetic terminal error');
+    await tester.pump();
+    expect(messages.showTypingIndicator, isTrue);
+    expect(reply.hasListener, isTrue);
+    reply.add(ServerMessageChunk('synthetic-error', '', MessageChunkType.error));
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+    expect(reply.hasListener, isFalse, reason: 'Collector cancels terminal failure');
+    await tester.runAsync(() => send.timeout(const Duration(seconds: 1)));
+    await tester.pump();
+    expect(messages.showTypingIndicator, isFalse, reason: 'A known terminal error must not wait for stream EOF');
+    expect(messages.sendingMessage, isFalse);
+    expect(messages.messages.single.clientDeliveryState, ClientMessageDeliveryState.failed);
+    expect(find.text(l10n.ellaChatCouldntSend), findsOneWidget);
+    await send;
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('empty history failure offers a history-only retry', (tester) async {
+    var fetches = 0;
+    var sends = 0;
+    final messages = _ChatMessageProvider(
+      activeAuthority: () => _CurrentAuthority(),
+      aiConsentEnsurer: () async => true,
+      ellaChatHistoryFetcher: (
+          {required limit, required before, required expectedAuthenticatedUid, required exactAuthority}) async {
+        fetches++;
+        return fetches == 1
+            ? const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.unavailable, retryable: true))
+            : const EllaServiceResult.success(EllaChatHistoryPage(messages: [], hasMore: false));
+      },
+      ellaChatStreamSender: (text,
+          {required clientMessageId, required clientSentAt, expectedAuthenticatedUid, exactAuthority}) async* {
+        sends++;
+      },
+    );
+    addTearDown(messages.dispose);
+    final l10n = await mountChat(tester, messages);
+    await messages.refreshSyntheticHistory();
+    await tester.pump();
+    expect(find.text(l10n.ellaChatCouldntSend), findsNothing);
+    expect(find.text(l10n.ellaChatHistoryUnavailableTitle), findsOneWidget);
+    await tester.tap(find.byKey(const Key('ella-chat-retry-history')));
+    await tester.pump();
+    expect(fetches, 2);
+    expect(sends, 0);
+    expect(messages.lastHistoryFailure, isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   for (final failure in ['timeout', '503', 'socket', 'stale-no-interface']) {
     testWidgets('$failure passive probe does not contradict a successful Chat send', (tester) async {

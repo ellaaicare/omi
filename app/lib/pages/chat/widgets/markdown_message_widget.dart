@@ -20,31 +20,31 @@ String formatEllaReplyForDisplay(String message) {
   return paragraphs.join('\n\n');
 }
 
-Widget getMarkdownWidget(BuildContext context, String message, {Function(String)? onAskOmi}) {
+Widget getMarkdownWidget(BuildContext context, String message, {Function(String)? onAskOmi, double fontSize = 18}) {
   return MarkdownBody(
     data: formatEllaReplyForDisplay(message),
     selectable: false,
     styleSheet: MarkdownStyleSheet(
-      p: EllaTextStyles.body,
-      a: const TextStyle(color: EllaColors.tealDeep, fontSize: 18, decoration: TextDecoration.underline),
-      listBullet: EllaTextStyles.body,
-      blockquote: const TextStyle(
-        color: EllaColors.textPrimary,
-        fontSize: 18,
+      p: EllaTypography.of(context).body.copyWith(fontSize: fontSize),
+      a: TextStyle(color: EllaPalette.of(context).tealDeep, fontSize: fontSize, decoration: TextDecoration.underline),
+      listBullet: EllaTypography.of(context).body.copyWith(fontSize: fontSize),
+      blockquote: TextStyle(
+        color: EllaPalette.of(context).textPrimary,
+        fontSize: fontSize,
         height: 1.4,
         backgroundColor: Colors.transparent,
       ),
       blockquoteDecoration: BoxDecoration(
-        color: EllaColors.bgTertiary,
+        color: EllaPalette.of(context).bgTertiary,
         borderRadius: BorderRadius.circular(4),
       ),
-      code: const TextStyle(
-        color: EllaColors.textPrimary,
+      code: TextStyle(
+        color: EllaPalette.of(context).textPrimary,
         backgroundColor: Colors.transparent,
         fontFamily: 'monospace',
       ),
       codeblockDecoration: BoxDecoration(
-        color: EllaColors.bgSecondary,
+        color: EllaPalette.of(context).bgSecondary,
         borderRadius: BorderRadius.circular(8),
       ),
     ),

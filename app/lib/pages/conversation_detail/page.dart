@@ -1,3 +1,5 @@
+import 'package:omi/ella/widgets/retained_summary_card.dart';
+import 'package:omi/ella/widgets/summary_refresh_notice.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -155,6 +157,11 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
   void initState() {
     super.initState();
 
+    selectedTab = switch (widget.initialTabIndex) {
+      0 => ConversationTab.transcript,
+      2 => ConversationTab.actionItems,
+      _ => ConversationTab.summary,
+    };
     _controller = TabController(length: 3, vsync: this, initialIndex: widget.initialTabIndex);
     _controller!.addListener(() {
       setState(() {
@@ -319,10 +326,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
 
   void _handleMenuSelection(BuildContext context, String value, ConversationDetailProvider provider) async {
     // Track the menu action selection
-    MixpanelManager().conversationThreeDotsMenuActionSelected(
-      conversationId: provider.conversation.id,
-      action: value,
-    );
+    MixpanelManager().conversationThreeDotsMenuActionSelected(conversationId: provider.conversation.id, action: value);
 
     switch (value) {
       case 'copy_transcript':
@@ -333,8 +337,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
         final conversation = provider.conversation;
         final summaryContent =
             conversation.appResults.isNotEmpty && conversation.appResults[0].content.trim().isNotEmpty
-                ? conversation.appResults[0].content.trim()
-                : conversation.structured.toString();
+            ? conversation.appResults[0].content.trim()
+            : conversation.structured.toString();
         _copyContent(context, summaryContent);
         break;
       case 'download_audio':
@@ -387,8 +391,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
             if (!mounted) return;
             setState(() => _isDeletingMemory = true);
             final deleted = await context.read<ConversationProvider>().deleteConversationPermanently(
-                  provider.conversation,
-                );
+              provider.conversation,
+            );
             if (!mounted) return;
             setState(() => _isDeletingMemory = false);
             if (deleted) {
@@ -420,9 +424,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
 
   void _copyContent(BuildContext context, String content) {
     Clipboard.setData(ClipboardData(text: content));
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(context.l10n.contentCopied)),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.contentCopied)));
     HapticFeedback.lightImpact();
   }
 
@@ -437,10 +439,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
     final startTime = DateTime.now();
 
     // Track share start
-    MixpanelManager().audioShareStarted(
-      conversationId: provider.conversation.id,
-      audioFileCount: audioFileCount,
-    );
+    MixpanelManager().audioShareStarted(conversationId: provider.conversation.id, audioFileCount: audioFileCount);
 
     AudioDownloadState currentState = AudioDownloadState.preparing;
     double currentProgress = 0.0;
@@ -457,10 +456,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
       builder: (context) => StatefulBuilder(
         builder: (context, setState) {
           updateSheet = setState;
-          return AudioDownloadProgressSheet(
-            state: currentState,
-            progress: currentProgress,
-          );
+          return AudioDownloadProgressSheet(state: currentState, progress: currentProgress);
         },
       ),
     );
@@ -501,9 +497,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
           Navigator.of(sheetContext).pop();
         }
 
-        await Share.shareXFiles(
-          [XFile(file.path, mimeType: 'audio/wav')],
-        );
+        await Share.shareXFiles([XFile(file.path, mimeType: 'audio/wav')]);
 
         // Track successful completion
         final durationSeconds = DateTime.now().difference(startTime).inSeconds;
@@ -530,10 +524,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
       Logger.debug('Error downloading audio: $e');
 
       // Track failure
-      MixpanelManager().audioShareFailed(
-        conversationId: provider.conversation.id,
-        errorMessage: e.toString(),
-      );
+      MixpanelManager().audioShareFailed(conversationId: provider.conversation.id, errorMessage: e.toString());
 
       currentState = AudioDownloadState.error;
       updateSheet?.call(() {});
@@ -546,10 +537,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(context.l10n.audioDownloadFailed),
-            action: SnackBarAction(
-              label: context.l10n.retry,
-              onPressed: () => _downloadAudio(context, provider),
-            ),
+            action: SnackBarAction(label: context.l10n.retry, onPressed: () => _downloadAudio(context, provider)),
           ),
         );
       }
@@ -598,6 +586,20 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
   //   });
   // }
 
+  double _memoryToolbarHeight(BuildContext context) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: context.l10n.irisMemorySourceAction,
+        style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 18, fontWeight: FontWeight.w600),
+      ),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+    )..layout(maxWidth: MediaQuery.sizeOf(context).width - 80);
+    final height = painter.height + 16;
+    painter.dispose();
+    return height < 56 ? 56 : height;
+  }
+
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -605,8 +607,9 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
       child: MessageListener<ConversationDetailProvider>(
         showError: (error) {
           if (error == 'REPROCESS_FAILED') {
-            ScaffoldMessenger.of(context)
-                .showSnackBar(SnackBar(content: Text(context.l10n.errorProcessingConversation)));
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(context.l10n.errorProcessingConversation)));
           }
         },
         showInfo: (info) {},
@@ -616,29 +619,31 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
           backgroundColor: Theme.of(context).colorScheme.primary,
           appBar: AppBar(
             automaticallyImplyLeading: false,
+            toolbarHeight: _memoryToolbarHeight(context),
             backgroundColor: Theme.of(context).colorScheme.primary,
             leading: Container(
-              width: 36,
-              height: 36,
-              margin: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.grey.withOpacity(0.3),
-                shape: BoxShape.circle,
-              ),
+              width: 48,
+              height: 48,
+              margin: const EdgeInsets.all(4),
+              decoration: BoxDecoration(color: Colors.grey.withOpacity(0.3), shape: BoxShape.circle),
               child: IconButton(
                 padding: EdgeInsets.zero,
+                tooltip: context.l10n.back,
                 onPressed: () {
                   HapticFeedback.mediumImpact();
                   if (widget.isFromOnboarding) {
                     SchedulerBinding.instance.addPostFrameCallback((_) {
                       Navigator.pushAndRemoveUntil(
-                          context, MaterialPageRoute(builder: (context) => const HomePageWrapper()), (route) => false);
+                        context,
+                        MaterialPageRoute(builder: (context) => const HomePageWrapper()),
+                        (route) => false,
+                      );
                     });
                   } else {
                     Navigator.pop(context);
                   }
                 },
-                icon: const FaIcon(FontAwesomeIcons.arrowLeft, size: 16.0, color: EllaColors.textPrimary),
+                icon: FaIcon(FontAwesomeIcons.arrowLeft, size: 16.0, color: EllaPalette.of(context).textPrimary),
               ),
             ),
             title: Align(
@@ -646,9 +651,9 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
               child: Padding(
                 padding: const EdgeInsets.only(left: 8.0),
                 child: Text(
-                  _getTabTitle(context, selectedTab),
-                  style: const TextStyle(
-                    color: EllaColors.textPrimary,
+                  context.l10n.irisMemorySourceAction,
+                  style: TextStyle(
+                    color: EllaPalette.of(context).textPrimary,
                     fontSize: 18,
                     fontWeight: FontWeight.w600,
                   ),
@@ -656,267 +661,6 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
               ),
             ),
             titleSpacing: 0,
-            actions: [
-              Consumer<ConversationDetailProvider>(builder: (context, provider, child) {
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Star button (first) - toggle starred status
-                      Container(
-                        width: 36,
-                        height: 36,
-                        margin: const EdgeInsets.only(right: 8),
-                        decoration: BoxDecoration(
-                          color: provider.conversation.starred
-                              ? Colors.amber.withValues(alpha: 0.3)
-                              : Colors.grey.withValues(alpha: 0.3),
-                          shape: BoxShape.circle,
-                        ),
-                        child: IconButton(
-                          padding: EdgeInsets.zero,
-                          onPressed: _isTogglingStarred
-                              ? null
-                              : () async {
-                                  setState(() {
-                                    _isTogglingStarred = true;
-                                  });
-                                  HapticFeedback.mediumImpact();
-                                  try {
-                                    final newStarredState = !provider.conversation.starred;
-                                    bool success = await setConversationStarred(
-                                      provider.conversation.id,
-                                      newStarredState,
-                                    );
-                                    if (!mounted) return;
-                                    if (success) {
-                                      provider.conversation.starred = newStarredState;
-                                      // Update in conversation provider
-                                      context.read<ConversationProvider>().updateConversationInSortedList(
-                                            provider.conversation,
-                                          );
-                                      // Track star/unstar action
-                                      MixpanelManager().conversationStarToggled(
-                                        conversation: provider.conversation,
-                                        starred: newStarredState,
-                                        source: 'detail_page_button',
-                                      );
-                                    } else {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(content: Text(context.l10n.failedToUpdateStarred)),
-                                      );
-                                    }
-                                  } catch (e) {
-                                    Logger.debug('Failed to toggle starred status: $e');
-                                  } finally {
-                                    if (mounted) {
-                                      setState(() {
-                                        _isTogglingStarred = false;
-                                      });
-                                    }
-                                  }
-                                },
-                          icon: _isTogglingStarred
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                  ),
-                                )
-                              : FaIcon(
-                                  provider.conversation.starred ? FontAwesomeIcons.solidStar : FontAwesomeIcons.star,
-                                  size: 16.0,
-                                  color: provider.conversation.starred ? Colors.amber : EllaColors.textPrimary,
-                                ),
-                        ),
-                      ),
-                      // Share button (second) - directly share summary link
-                      Container(
-                        key: _shareButtonKey,
-                        width: 36,
-                        height: 36,
-                        margin: const EdgeInsets.only(right: 8),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.withOpacity(0.3),
-                          shape: BoxShape.circle,
-                        ),
-                        child: IconButton(
-                          padding: EdgeInsets.zero,
-                          onPressed: _isSharing
-                              ? null
-                              : () async {
-                                  setState(() {
-                                    _isSharing = true;
-                                  });
-                                  HapticFeedback.mediumImpact();
-                                  try {
-                                    // Directly share the summary link
-                                    bool shared = await setConversationVisibility(provider.conversation.id);
-                                    if (!shared) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(content: Text(context.l10n.conversationUrlNotShared)),
-                                      );
-                                      setState(() {
-                                        _isSharing = false;
-                                      });
-                                      return;
-                                    }
-                                    String content =
-                                        'https://ella-ai-care.com/conversations/${provider.conversation.id}';
-                                    // Track share event
-                                    MixpanelManager().conversationShared(
-                                      conversation: provider.conversation,
-                                      shareMethod: 'url_share',
-                                    );
-                                    // Start sharing and get the position for iOS
-                                    final RenderBox? box =
-                                        _shareButtonKey.currentContext?.findRenderObject() as RenderBox?;
-                                    if (box != null) {
-                                      final Offset position = box.localToGlobal(Offset.zero);
-                                      final Size size = box.size;
-                                      Share.share(
-                                        content,
-                                        subject: provider.conversation.structured.title,
-                                        sharePositionOrigin:
-                                            Rect.fromLTWH(position.dx, position.dy, size.width, size.height),
-                                      );
-                                    } else {
-                                      Share.share(content, subject: provider.conversation.structured.title);
-                                    }
-                                    // Small delay to let share sheet appear, then clear loading
-                                    await Future.delayed(const Duration(milliseconds: 150));
-                                    setState(() {
-                                      _isSharing = false;
-                                    });
-                                  } catch (e) {
-                                    setState(() {
-                                      _isSharing = false;
-                                    });
-                                  }
-                                },
-                          icon: _isSharing
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                  ),
-                                )
-                              : const FaIcon(FontAwesomeIcons.arrowUpFromBracket,
-                                  size: 16.0, color: EllaColors.textPrimary),
-                        ),
-                      ),
-                      // Search button (second) - only show on transcript and summary tabs
-                      if (_controller?.index != 2)
-                        Container(
-                          width: 36,
-                          height: 36,
-                          margin: const EdgeInsets.only(right: 8),
-                          decoration: BoxDecoration(
-                            color: _isSearching ? EllaColors.primary.withOpacity(0.8) : Colors.grey.withOpacity(0.3),
-                            shape: BoxShape.circle,
-                          ),
-                          child: IconButton(
-                            padding: EdgeInsets.zero,
-                            onPressed: () {
-                              setState(() {
-                                _isSearching = !_isSearching;
-                                if (!_isSearching) {
-                                  _searchQuery = '';
-                                  _searchController.clear();
-                                  _searchFocusNode.unfocus();
-                                } else {
-                                  _searchFocusNode.requestFocus();
-                                  MixpanelManager().conversationDetailSearchClicked(
-                                    conversationId: provider.conversation.id,
-                                  );
-                                }
-                              });
-                              HapticFeedback.mediumImpact();
-                            },
-                            icon: const FaIcon(FontAwesomeIcons.magnifyingGlass,
-                                size: 16.0, color: EllaColors.textPrimary),
-                          ),
-                        ),
-                      // Developer Tools button (third) - iOS style pull-down menu
-                      Container(
-                        width: 36,
-                        height: 36,
-                        margin: const EdgeInsets.only(right: 8),
-                        child: PullDownButton(
-                          itemBuilder: (context) => [
-                            PullDownMenuItem(
-                              title: context.l10n.copyTranscript,
-                              iconWidget: FaIcon(FontAwesomeIcons.copy, size: 16),
-                              onTap: () => _handleMenuSelection(context, 'copy_transcript', provider),
-                            ),
-                            PullDownMenuItem(
-                              title: context.l10n.copySummary,
-                              iconWidget: FaIcon(FontAwesomeIcons.clone, size: 16),
-                              onTap: () => _handleMenuSelection(context, 'copy_summary', provider),
-                            ),
-                            if (provider.conversation.hasAudio())
-                              PullDownMenuItem(
-                                title: context.l10n.shareAudio,
-                                iconWidget: const FaIcon(FontAwesomeIcons.share, size: 16),
-                                onTap: _isDownloadingAudio
-                                    ? null
-                                    : () => _handleMenuSelection(context, 'download_audio', provider),
-                              ),
-                            // PullDownMenuItem(
-                            //   title: 'Trigger Integration',
-                            //   iconWidget: FaIcon(FontAwesomeIcons.paperPlane, size: 16),
-                            //   onTap: () => _handleMenuSelection(context, 'trigger_integration', provider),
-                            // ),
-                            PullDownMenuItem(
-                              title: context.l10n.testPrompt,
-                              iconWidget: FaIcon(FontAwesomeIcons.commentDots, size: 16),
-                              onTap: () => _handleMenuSelection(context, 'test_prompt', provider),
-                            ),
-                            if (!provider.conversation.discarded)
-                              PullDownMenuItem(
-                                title: context.l10n.reprocessConversation,
-                                iconWidget: FaIcon(FontAwesomeIcons.arrowsRotate, size: 16),
-                                onTap: () => _handleMenuSelection(context, 'reprocess', provider),
-                              ),
-                            PullDownMenuItem(
-                              title: context.l10n.deleteConversation,
-                              iconWidget: FaIcon(FontAwesomeIcons.trashCan, size: 16, color: Colors.red),
-                              onTap: () => _handleMenuSelection(context, 'delete', provider),
-                            ),
-                          ],
-                          buttonBuilder: (context, showMenu) => GestureDetector(
-                            onTap: () {
-                              HapticFeedback.mediumImpact();
-                              MixpanelManager().conversationThreeDotsMenuOpened(
-                                conversationId: provider.conversation.id,
-                              );
-                              showMenu();
-                            },
-                            child: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: Colors.grey.withOpacity(0.3),
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Center(
-                                child: FaIcon(FontAwesomeIcons.ellipsisVertical,
-                                    size: 16.0, color: EllaColors.textPrimary),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }),
-            ],
           ),
           // Removed floating action button as we now have the more button in the bottom bar
           body: Stack(
@@ -951,113 +695,426 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                         }
                       }
                     : null,
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Builder(builder: (context) {
-                          return TabBarView(
-                            controller: _controller,
-                            physics: const NeverScrollableScrollPhysics(),
-                            children: [
-                              TranscriptWidgets(
-                                searchQuery: _searchQuery,
-                                currentResultIndex: getCurrentResultIndexForHighlighting(),
-                                onTapWhenSearchEmpty: () {
-                                  if (_isSearching && _searchQuery.isEmpty) {
-                                    setState(() {
-                                      _isSearching = false;
-                                      _searchController.clear();
-                                      _searchFocusNode.unfocus();
+                child: NestedScrollView(
+                  headerSliverBuilder: (context, innerBoxIsScrolled) => [
+                    SliverToBoxAdapter(
+                      child: Column(
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: ExpansionTile(
+                              key: const Key('iris-memory-controls'),
+                              title: Text(context.l10n.irisMemoryControls),
+                              children: [
+                                Consumer<ConversationDetailProvider>(
+                                  builder: (context, provider, child) {
+                                    return Padding(
+                                      padding: const EdgeInsets.only(right: 8),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          // Star button (first) - toggle starred status
+                                          Container(
+                                            width: 48,
+                                            height: 48,
+                                            margin: const EdgeInsets.only(right: 8),
+                                            decoration: BoxDecoration(
+                                              color: provider.conversation.starred
+                                                  ? Colors.amber.withValues(alpha: 0.3)
+                                                  : Colors.grey.withValues(alpha: 0.3),
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: IconButton(
+                                              tooltip: context.l10n.starConversation,
+                                              isSelected: provider.conversation.starred,
+                                              padding: EdgeInsets.zero,
+                                              onPressed: _isTogglingStarred
+                                                  ? null
+                                                  : () async {
+                                                      setState(() {
+                                                        _isTogglingStarred = true;
+                                                      });
+                                                      HapticFeedback.mediumImpact();
+                                                      try {
+                                                        final newStarredState = !provider.conversation.starred;
+                                                        bool success = await setConversationStarred(
+                                                          provider.conversation.id,
+                                                          newStarredState,
+                                                        );
+                                                        if (!mounted) return;
+                                                        if (success) {
+                                                          provider.conversation.starred = newStarredState;
+                                                          // Update in conversation provider
+                                                          context
+                                                              .read<ConversationProvider>()
+                                                              .updateConversationInSortedList(provider.conversation);
+                                                          // Track star/unstar action
+                                                          MixpanelManager().conversationStarToggled(
+                                                            conversation: provider.conversation,
+                                                            starred: newStarredState,
+                                                            source: 'detail_page_button',
+                                                          );
+                                                        } else {
+                                                          ScaffoldMessenger.of(context).showSnackBar(
+                                                            SnackBar(content: Text(context.l10n.failedToUpdateStarred)),
+                                                          );
+                                                        }
+                                                      } catch (e) {
+                                                        Logger.debug('Failed to toggle starred status: $e');
+                                                      } finally {
+                                                        if (mounted) {
+                                                          setState(() {
+                                                            _isTogglingStarred = false;
+                                                          });
+                                                        }
+                                                      }
+                                                    },
+                                              icon: _isTogglingStarred
+                                                  ? const SizedBox(
+                                                      width: 16,
+                                                      height: 16,
+                                                      child: CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                                      ),
+                                                    )
+                                                  : FaIcon(
+                                                      provider.conversation.starred
+                                                          ? FontAwesomeIcons.solidStar
+                                                          : FontAwesomeIcons.star,
+                                                      size: 16.0,
+                                                      color: provider.conversation.starred
+                                                          ? Colors.amber
+                                                          : EllaColors.textPrimary,
+                                                    ),
+                                            ),
+                                          ),
+                                          // Share button (second) - directly share summary link
+                                          Container(
+                                            key: _shareButtonKey,
+                                            width: 48,
+                                            height: 48,
+                                            margin: const EdgeInsets.only(right: 8),
+                                            decoration: BoxDecoration(
+                                              color: Colors.grey.withOpacity(0.3),
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: IconButton(
+                                              tooltip: context.l10n.share,
+                                              padding: EdgeInsets.zero,
+                                              onPressed: _isSharing
+                                                  ? null
+                                                  : () async {
+                                                      setState(() {
+                                                        _isSharing = true;
+                                                      });
+                                                      HapticFeedback.mediumImpact();
+                                                      try {
+                                                        // Directly share the summary link
+                                                        bool shared = await setConversationVisibility(
+                                                          provider.conversation.id,
+                                                        );
+                                                        if (!shared) {
+                                                          ScaffoldMessenger.of(context).showSnackBar(
+                                                            SnackBar(
+                                                              content: Text(context.l10n.conversationUrlNotShared),
+                                                            ),
+                                                          );
+                                                          setState(() {
+                                                            _isSharing = false;
+                                                          });
+                                                          return;
+                                                        }
+                                                        String content =
+                                                            'https://ella-ai-care.com/conversations/${provider.conversation.id}';
+                                                        // Track share event
+                                                        MixpanelManager().conversationShared(
+                                                          conversation: provider.conversation,
+                                                          shareMethod: 'url_share',
+                                                        );
+                                                        // Start sharing and get the position for iOS
+                                                        final RenderBox? box =
+                                                            _shareButtonKey.currentContext?.findRenderObject()
+                                                                as RenderBox?;
+                                                        if (box != null) {
+                                                          final Offset position = box.localToGlobal(Offset.zero);
+                                                          final Size size = box.size;
+                                                          Share.share(
+                                                            content,
+                                                            subject: provider.conversation.structured.title,
+                                                            sharePositionOrigin: Rect.fromLTWH(
+                                                              position.dx,
+                                                              position.dy,
+                                                              size.width,
+                                                              size.height,
+                                                            ),
+                                                          );
+                                                        } else {
+                                                          Share.share(
+                                                            content,
+                                                            subject: provider.conversation.structured.title,
+                                                          );
+                                                        }
+                                                        // Small delay to let share sheet appear, then clear loading
+                                                        await Future.delayed(const Duration(milliseconds: 150));
+                                                        setState(() {
+                                                          _isSharing = false;
+                                                        });
+                                                      } catch (e) {
+                                                        setState(() {
+                                                          _isSharing = false;
+                                                        });
+                                                      }
+                                                    },
+                                              icon: _isSharing
+                                                  ? const SizedBox(
+                                                      width: 16,
+                                                      height: 16,
+                                                      child: CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                                      ),
+                                                    )
+                                                  : const FaIcon(
+                                                      FontAwesomeIcons.arrowUpFromBracket,
+                                                      size: 16.0,
+                                                      color: EllaColors.textPrimary,
+                                                    ),
+                                            ),
+                                          ),
+                                          // Search button (second) - only show on transcript and summary tabs
+                                          if (_controller?.index != 2)
+                                            Container(
+                                              width: 48,
+                                              height: 48,
+                                              margin: const EdgeInsets.only(right: 8),
+                                              decoration: BoxDecoration(
+                                                color: _isSearching
+                                                    ? EllaColors.primary.withOpacity(0.8)
+                                                    : Colors.grey.withOpacity(0.3),
+                                                shape: BoxShape.circle,
+                                              ),
+                                              child: IconButton(
+                                                tooltip: context.l10n.search,
+                                                padding: EdgeInsets.zero,
+                                                onPressed: () {
+                                                  setState(() {
+                                                    _isSearching = !_isSearching;
+                                                    if (!_isSearching) {
+                                                      _searchQuery = '';
+                                                      _searchController.clear();
+                                                      _searchFocusNode.unfocus();
+                                                    } else {
+                                                      _searchFocusNode.requestFocus();
+                                                      MixpanelManager().conversationDetailSearchClicked(
+                                                        conversationId: provider.conversation.id,
+                                                      );
+                                                    }
+                                                  });
+                                                  HapticFeedback.mediumImpact();
+                                                },
+                                                icon: const FaIcon(
+                                                  FontAwesomeIcons.magnifyingGlass,
+                                                  size: 16.0,
+                                                  color: EllaColors.textPrimary,
+                                                ),
+                                              ),
+                                            ),
+                                          // Developer Tools button (third) - iOS style pull-down menu
+                                          Container(
+                                            width: 48,
+                                            height: 48,
+                                            margin: const EdgeInsets.only(right: 8),
+                                            child: PullDownButton(
+                                              itemBuilder: (context) => [
+                                                PullDownMenuItem(
+                                                  title: context.l10n.copyTranscript,
+                                                  iconWidget: FaIcon(FontAwesomeIcons.copy, size: 16),
+                                                  onTap: () =>
+                                                      _handleMenuSelection(context, 'copy_transcript', provider),
+                                                ),
+                                                PullDownMenuItem(
+                                                  title: context.l10n.copySummary,
+                                                  iconWidget: FaIcon(FontAwesomeIcons.clone, size: 16),
+                                                  onTap: () => _handleMenuSelection(context, 'copy_summary', provider),
+                                                ),
+                                                if (provider.conversation.hasAudio())
+                                                  PullDownMenuItem(
+                                                    title: context.l10n.shareAudio,
+                                                    iconWidget: const FaIcon(FontAwesomeIcons.share, size: 16),
+                                                    onTap: _isDownloadingAudio
+                                                        ? null
+                                                        : () =>
+                                                              _handleMenuSelection(context, 'download_audio', provider),
+                                                  ),
+                                                // PullDownMenuItem(
+                                                //   title: 'Trigger Integration',
+                                                //   iconWidget: FaIcon(FontAwesomeIcons.paperPlane, size: 16),
+                                                //   onTap: () => _handleMenuSelection(context, 'trigger_integration', provider),
+                                                // ),
+                                                PullDownMenuItem(
+                                                  title: context.l10n.testPrompt,
+                                                  iconWidget: FaIcon(FontAwesomeIcons.commentDots, size: 16),
+                                                  onTap: () => _handleMenuSelection(context, 'test_prompt', provider),
+                                                ),
+                                                if (!provider.conversation.discarded)
+                                                  PullDownMenuItem(
+                                                    title: context.l10n.reprocessConversation,
+                                                    iconWidget: FaIcon(FontAwesomeIcons.arrowsRotate, size: 16),
+                                                    onTap: () => _handleMenuSelection(context, 'reprocess', provider),
+                                                  ),
+                                                PullDownMenuItem(
+                                                  title: context.l10n.deleteConversation,
+                                                  iconWidget: FaIcon(
+                                                    FontAwesomeIcons.trashCan,
+                                                    size: 16,
+                                                    color: Colors.red,
+                                                  ),
+                                                  onTap: () => _handleMenuSelection(context, 'delete', provider),
+                                                ),
+                                              ],
+                                              buttonBuilder: (context, showMenu) => IconButton(
+                                                tooltip: context.l10n.irisMemoryControls,
+                                                padding: EdgeInsets.zero,
+                                                onPressed: () {
+                                                  HapticFeedback.mediumImpact();
+                                                  MixpanelManager().conversationThreeDotsMenuOpened(
+                                                    conversationId: provider.conversation.id,
+                                                  );
+                                                  showMenu();
+                                                },
+                                                icon: Container(
+                                                  width: 48,
+                                                  height: 48,
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.grey.withOpacity(0.3),
+                                                    shape: BoxShape.circle,
+                                                  ),
+                                                  child: const Center(
+                                                    child: FaIcon(
+                                                      FontAwesomeIcons.ellipsisVertical,
+                                                      size: 16.0,
+                                                      color: EllaColors.textPrimary,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Consumer<ConversationDetailProvider>(
+                              builder: (context, provider, child) {
+                                final conversation = provider.conversation;
+                                final hasActionItems = conversation.structured.actionItems
+                                    .where((item) => !item.deleted)
+                                    .isNotEmpty;
+                                return ConversationBottomBar(
+                                  mode: ConversationBottomBarMode.memorySource,
+                                  selectedTab: selectedTab,
+                                  conversation: conversation,
+                                  hasSegments:
+                                      conversation.transcriptSegments.isNotEmpty ||
+                                      conversation.photos.isNotEmpty ||
+                                      conversation.externalIntegration != null,
+                                  hasActionItems: hasActionItems,
+                                  onSeekFunctionReady: (seekFunction) {
+                                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                                      if (mounted) {
+                                        setState(() {
+                                          _seekToSegmentCallback = seekFunction;
+                                        });
+                                      }
                                     });
-                                  }
-                                },
-                                onSegmentTap: (segment) async {
-                                  if (selectedTab != ConversationTab.transcript) {
-                                    setState(() {
-                                      selectedTab = ConversationTab.transcript;
-                                    });
-                                    _controller!.animateTo(0);
-                                  }
-
-                                  // Seek to segment using callback
-                                  if (_seekToSegmentCallback != null) {
-                                    await _seekToSegmentCallback!(segment.start);
-                                    HapticFeedback.lightImpact();
-                                  }
-                                },
-                              ),
-                              SummaryTab(
-                                searchQuery: _searchQuery,
-                                currentResultIndex: getCurrentResultIndexForHighlighting(),
-                                onTapWhenSearchEmpty: () {
-                                  if (_isSearching && _searchQuery.isEmpty) {
-                                    setState(() {
-                                      _isSearching = false;
-                                      _searchController.clear();
-                                      _searchFocusNode.unfocus();
-                                    });
-                                  }
-                                },
-                              ),
-                              ActionItemsTab(),
-                            ],
-                          );
-                        }),
+                                  },
+                                  onTabSelected: (tab) {
+                                    int index;
+                                    switch (tab) {
+                                      case ConversationTab.transcript:
+                                        index = 0;
+                                        break;
+                                      case ConversationTab.summary:
+                                        index = 1;
+                                        break;
+                                      case ConversationTab.actionItems:
+                                        index = 2;
+                                        break;
+                                    }
+                                    _controller!.animateTo(index);
+                                  },
+                                  onStopPressed: () {
+                                    // Empty since we don't show the stop button in detail mode
+                                  },
+                                );
+                              },
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
-                ),
-              ),
+                  body: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Builder(
+                      builder: (context) {
+                        return TabBarView(
+                          controller: _controller,
+                          physics: const NeverScrollableScrollPhysics(),
+                          children: [
+                            TranscriptWidgets(
+                              searchQuery: _searchQuery,
+                              currentResultIndex: getCurrentResultIndexForHighlighting(),
+                              onTapWhenSearchEmpty: () {
+                                if (_isSearching && _searchQuery.isEmpty) {
+                                  setState(() {
+                                    _isSearching = false;
+                                    _searchController.clear();
+                                    _searchFocusNode.unfocus();
+                                  });
+                                }
+                              },
+                              onSegmentTap: (segment) async {
+                                if (selectedTab != ConversationTab.transcript) {
+                                  setState(() {
+                                    selectedTab = ConversationTab.transcript;
+                                  });
+                                  _controller!.animateTo(0);
+                                }
 
-              // Floating bottom bar
-              Positioned(
-                bottom: 32,
-                left: 0,
-                right: 0,
-                child: Consumer<ConversationDetailProvider>(
-                  builder: (context, provider, child) {
-                    final conversation = provider.conversation;
-                    final hasActionItems =
-                        conversation.structured.actionItems.where((item) => !item.deleted).isNotEmpty;
-                    return ConversationBottomBar(
-                      mode: ConversationBottomBarMode.detail,
-                      selectedTab: selectedTab,
-                      conversation: conversation,
-                      hasSegments: conversation.transcriptSegments.isNotEmpty ||
-                          conversation.photos.isNotEmpty ||
-                          conversation.externalIntegration != null,
-                      hasActionItems: hasActionItems,
-                      onSeekFunctionReady: (seekFunction) {
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted) {
-                            setState(() {
-                              _seekToSegmentCallback = seekFunction;
-                            });
-                          }
-                        });
+                                // Seek to segment using callback
+                                if (_seekToSegmentCallback != null) {
+                                  await _seekToSegmentCallback!(segment.start);
+                                  HapticFeedback.lightImpact();
+                                }
+                              },
+                            ),
+                            SummaryTab(
+                              searchQuery: _searchQuery,
+                              currentResultIndex: getCurrentResultIndexForHighlighting(),
+                              onTapWhenSearchEmpty: () {
+                                if (_isSearching && _searchQuery.isEmpty) {
+                                  setState(() {
+                                    _isSearching = false;
+                                    _searchController.clear();
+                                    _searchFocusNode.unfocus();
+                                  });
+                                }
+                              },
+                            ),
+                            ActionItemsTab(),
+                          ],
+                        );
                       },
-                      onTabSelected: (tab) {
-                        int index;
-                        switch (tab) {
-                          case ConversationTab.transcript:
-                            index = 0;
-                            break;
-                          case ConversationTab.summary:
-                            index = 1;
-                            break;
-                          case ConversationTab.actionItems:
-                            index = 2;
-                            break;
-                        }
-                        _controller!.animateTo(index);
-                      },
-                      onStopPressed: () {
-                        // Empty since we don't show the stop button in detail mode
-                      },
-                    );
-                  },
+                    ),
+                  ),
                 ),
               ),
 
@@ -1206,9 +1263,10 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                                 child: Text(
                                                   '$_currentSearchIndex/$_totalSearchResults',
                                                   style: const TextStyle(
-                                                      color: EllaColors.textPrimary,
-                                                      fontSize: 11,
-                                                      fontWeight: FontWeight.w500),
+                                                    color: EllaColors.textPrimary,
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w500,
+                                                  ),
                                                 ),
                                               ),
                                               const SizedBox(width: 4),
@@ -1220,14 +1278,14 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                                   child: Container(
                                                     width: 28,
                                                     height: 28,
-                                                    decoration: BoxDecoration(
-                                                      borderRadius: BorderRadius.circular(18),
+                                                    decoration: BoxDecoration(borderRadius: BorderRadius.circular(18)),
+                                                    child: Icon(
+                                                      Icons.keyboard_arrow_up,
+                                                      color: _totalSearchResults > 0
+                                                          ? EllaColors.textSecondary
+                                                          : EllaColors.textDisabled,
+                                                      size: 22,
                                                     ),
-                                                    child: Icon(Icons.keyboard_arrow_up,
-                                                        color: _totalSearchResults > 0
-                                                            ? EllaColors.textSecondary
-                                                            : EllaColors.textDisabled,
-                                                        size: 22),
                                                   ),
                                                 ),
                                               ),
@@ -1239,14 +1297,14 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                                   child: Container(
                                                     width: 28,
                                                     height: 28,
-                                                    decoration: BoxDecoration(
-                                                      borderRadius: BorderRadius.circular(18),
+                                                    decoration: BoxDecoration(borderRadius: BorderRadius.circular(18)),
+                                                    child: Icon(
+                                                      Icons.keyboard_arrow_down,
+                                                      color: _totalSearchResults > 0
+                                                          ? EllaColors.textSecondary
+                                                          : EllaColors.textDisabled,
+                                                      size: 22,
                                                     ),
-                                                    child: Icon(Icons.keyboard_arrow_down,
-                                                        color: _totalSearchResults > 0
-                                                            ? EllaColors.textSecondary
-                                                            : EllaColors.textDisabled,
-                                                        size: 22),
                                                   ),
                                                 ),
                                               ),
@@ -1267,11 +1325,12 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                                 child: Container(
                                                   width: 28,
                                                   height: 28,
-                                                  decoration: BoxDecoration(
-                                                    borderRadius: BorderRadius.circular(16),
+                                                  decoration: BoxDecoration(borderRadius: BorderRadius.circular(16)),
+                                                  child: const Icon(
+                                                    Icons.clear,
+                                                    color: EllaColors.textSecondary,
+                                                    size: 22,
                                                   ),
-                                                  child: const Icon(Icons.clear,
-                                                      color: EllaColors.textSecondary, size: 22),
                                                 ),
                                               ),
                                             ),
@@ -1323,12 +1382,7 @@ class SummaryTab extends StatefulWidget {
   final int currentResultIndex;
   final VoidCallback? onTapWhenSearchEmpty;
 
-  const SummaryTab({
-    super.key,
-    this.searchQuery = '',
-    this.currentResultIndex = -1,
-    this.onTapWhenSearchEmpty,
-  });
+  const SummaryTab({super.key, this.searchQuery = '', this.currentResultIndex = -1, this.onTapWhenSearchEmpty});
 
   @override
   State<SummaryTab> createState() => _SummaryTabState();
@@ -1360,45 +1414,59 @@ class _SummaryTabState extends State<SummaryTab> with AutomaticKeepAliveClientMi
   Widget build(BuildContext context) {
     super.build(context);
     return Listener(
-        onPointerDown: (PointerDownEvent event) {
+      onPointerDown: (PointerDownEvent event) {
+        FocusScope.of(context).unfocus();
+        if (widget.searchQuery.isEmpty && widget.onTapWhenSearchEmpty != null) {
+          widget.onTapWhenSearchEmpty!();
+        }
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () {
           FocusScope.of(context).unfocus();
+          // If search is empty, call the callback to close search
           if (widget.searchQuery.isEmpty && widget.onTapWhenSearchEmpty != null) {
             widget.onTapWhenSearchEmpty!();
           }
         },
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: () {
-            FocusScope.of(context).unfocus();
-            // If search is empty, call the callback to close search
-            if (widget.searchQuery.isEmpty && widget.onTapWhenSearchEmpty != null) {
-              widget.onTapWhenSearchEmpty!();
-            }
+        onLongPress: () => _maybeShowInternalAssessment(context),
+        child: Selector<ConversationDetailProvider, Tuple3<bool, bool, Function(int)>>(
+          selector: (context, provider) =>
+              Tuple3(provider.conversation.discarded, provider.showRatingUI, provider.setConversationRating),
+          builder: (context, data, child) {
+            return Stack(
+              children: [
+                ListView(
+                  shrinkWrap: true,
+                  children: [
+                    Consumer<ConversationDetailProvider>(
+                      builder: (context, provider, _) => Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: SummaryRefreshNotice(
+                          observation: provider.summaryRead,
+                          conversation: provider.conversation,
+                          onRefresh: () => provider.refreshConversation(),
+                        ),
+                      ),
+                    ),
+                    const GetSummaryWidgets(),
+                    data.item1
+                        ? const ReprocessDiscardedWidget()
+                        : GetAppsWidgets(
+                            searchQuery: widget.searchQuery,
+                            currentResultIndex: widget.currentResultIndex,
+                          ),
+                    RetainedSummaryCard(conversationId: context.read<ConversationDetailProvider>().conversation.id),
+                    const GetGeolocationWidgets(),
+                    const SizedBox(height: 150),
+                  ],
+                ),
+              ],
+            );
           },
-          onLongPress: () => _maybeShowInternalAssessment(context),
-          child: Selector<ConversationDetailProvider, Tuple3<bool, bool, Function(int)>>(
-            selector: (context, provider) =>
-                Tuple3(provider.conversation.discarded, provider.showRatingUI, provider.setConversationRating),
-            builder: (context, data, child) {
-              return Stack(
-                children: [
-                  ListView(
-                    shrinkWrap: true,
-                    children: [
-                      const GetSummaryWidgets(),
-                      data.item1
-                          ? const ReprocessDiscardedWidget()
-                          : GetAppsWidgets(
-                              searchQuery: widget.searchQuery, currentResultIndex: widget.currentResultIndex),
-                      const GetGeolocationWidgets(),
-                      const SizedBox(height: 150),
-                    ],
-                  ),
-                ],
-              );
-            },
-          ),
-        ));
+        ),
+      ),
+    );
   }
 }
 
@@ -1428,71 +1496,70 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
   Widget build(BuildContext context) {
     super.build(context);
     return Listener(
-        onPointerDown: (PointerDownEvent event) {
+      onPointerDown: (PointerDownEvent event) {
+        FocusScope.of(context).unfocus();
+        if (widget.searchQuery.isEmpty && widget.onTapWhenSearchEmpty != null) {
+          widget.onTapWhenSearchEmpty!();
+        }
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () {
           FocusScope.of(context).unfocus();
           if (widget.searchQuery.isEmpty && widget.onTapWhenSearchEmpty != null) {
             widget.onTapWhenSearchEmpty!();
           }
         },
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: () {
-            FocusScope.of(context).unfocus();
-            if (widget.searchQuery.isEmpty && widget.onTapWhenSearchEmpty != null) {
-              widget.onTapWhenSearchEmpty!();
+        child: Consumer<ConversationDetailProvider>(
+          builder: (context, provider, child) {
+            final conversation = provider.conversation;
+            final segments = conversation.transcriptSegments;
+            final photos = conversation.photos;
+
+            if (segments.isEmpty && photos.isEmpty) {
+              return Padding(
+                padding: const EdgeInsets.only(top: 32),
+                child: ExpandableTextWidget(
+                  text: (provider.conversation.externalIntegration?.text ?? '').decodeString,
+                  maxLines: 1000,
+                  linkColor: EllaColors.primary,
+                  style: const TextStyle(color: EllaColors.textSecondary, fontSize: 15, height: 1.3),
+                  toggleExpand: () {
+                    provider.toggleIsTranscriptExpanded();
+                  },
+                  isExpanded: provider.isTranscriptExpanded,
+                ),
+              );
             }
-          },
-          child: Consumer<ConversationDetailProvider>(
-            builder: (context, provider, child) {
-              final conversation = provider.conversation;
-              final segments = conversation.transcriptSegments;
-              final photos = conversation.photos;
 
-              if (segments.isEmpty && photos.isEmpty) {
-                return Padding(
-                  padding: const EdgeInsets.only(top: 32),
-                  child: ExpandableTextWidget(
-                    text: (provider.conversation.externalIntegration?.text ?? '').decodeString,
-                    maxLines: 1000,
-                    linkColor: EllaColors.primary,
-                    style: const TextStyle(color: EllaColors.textSecondary, fontSize: 15, height: 1.3),
-                    toggleExpand: () {
-                      provider.toggleIsTranscriptExpanded();
-                    },
-                    isExpanded: provider.isTranscriptExpanded,
-                  ),
-                );
-              }
-
-              return getTranscriptWidget(
-                false,
-                segments,
-                photos,
-                null,
-                horizontalMargin: false,
-                topMargin: false,
-                canDisplaySeconds: provider.canDisplaySeconds,
-                isConversationDetail: true,
-                bottomMargin: 150,
-                searchQuery: widget.searchQuery,
-                currentResultIndex: widget.currentResultIndex,
-                onTapWhenSearchEmpty: widget.onTapWhenSearchEmpty,
-                onSegmentTap: widget.onSegmentTap,
-                editSegment: (segmentId, speakerId) {
-                  final connectivityProvider = Provider.of<ConnectivityProvider>(context, listen: false);
-                  if (!connectivityProvider.isConnected) {
-                    ConnectivityProvider.showNoInternetDialog(context);
-                    return;
-                  }
-                  showModalBottomSheet(
-                    context: context,
-                    isScrollControlled: true,
-                    backgroundColor: EllaColors.bgPrimary,
-                    shape: const RoundedRectangleBorder(
-                      borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-                    ),
-                    builder: (context) {
-                      return Consumer<PeopleProvider>(builder: (context, peopleProvider, child) {
+            return getTranscriptWidget(
+              false,
+              segments,
+              photos,
+              null,
+              horizontalMargin: false,
+              topMargin: false,
+              canDisplaySeconds: provider.canDisplaySeconds,
+              isConversationDetail: true,
+              bottomMargin: 150,
+              searchQuery: widget.searchQuery,
+              currentResultIndex: widget.currentResultIndex,
+              onTapWhenSearchEmpty: widget.onTapWhenSearchEmpty,
+              onSegmentTap: widget.onSegmentTap,
+              editSegment: (segmentId, speakerId) {
+                final connectivityProvider = Provider.of<ConnectivityProvider>(context, listen: false);
+                if (!connectivityProvider.isConnected) {
+                  ConnectivityProvider.showNoInternetDialog(context);
+                  return;
+                }
+                showModalBottomSheet(
+                  context: context,
+                  isScrollControlled: true,
+                  backgroundColor: EllaColors.bgPrimary,
+                  shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+                  builder: (context) {
+                    return Consumer<PeopleProvider>(
+                      builder: (context, peopleProvider, child) {
                         return NameSpeakerBottomSheet(
                           speakerId: speakerId,
                           segmentId: segmentId,
@@ -1513,12 +1580,14 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
                             MixpanelManager().taggedSegment(finalPersonId == 'user' ? 'User' : 'User Person');
 
                             for (final segmentId in segmentIds) {
-                              final segmentIndex =
-                                  provider.conversation.transcriptSegments.indexWhere((s) => s.id == segmentId);
+                              final segmentIndex = provider.conversation.transcriptSegments.indexWhere(
+                                (s) => s.id == segmentId,
+                              );
                               if (segmentIndex == -1) continue;
                               provider.conversation.transcriptSegments[segmentIndex].isUser = finalPersonId == 'user';
-                              provider.conversation.transcriptSegments[segmentIndex].personId =
-                                  finalPersonId == 'user' ? null : finalPersonId;
+                              provider.conversation.transcriptSegments[segmentIndex].personId = finalPersonId == 'user'
+                                  ? null
+                                  : finalPersonId;
                             }
                             await assignBulkConversationTranscriptSegments(
                               provider.conversation.id,
@@ -1529,14 +1598,16 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
                             provider.toggleEditSegmentLoading(false);
                           },
                         );
-                      });
-                    },
-                  );
-                },
-              );
-            },
-          ),
-        ));
+                      },
+                    );
+                  },
+                );
+              },
+            );
+          },
+        ),
+      ),
+    );
   }
 }
 
@@ -1544,11 +1615,7 @@ class ActionItemDetailWidget extends StatefulWidget {
   final ActionItem actionItem;
   final String conversationId;
 
-  const ActionItemDetailWidget({
-    super.key,
-    required this.actionItem,
-    required this.conversationId,
-  });
+  const ActionItemDetailWidget({super.key, required this.actionItem, required this.conversationId});
 
   @override
   State<ActionItemDetailWidget> createState() => _ActionItemDetailWidgetState();
@@ -1570,8 +1637,10 @@ class _ActionItemDetailWidgetState extends State<ActionItemDetailWidget> {
     return Consumer<ConversationDetailProvider>(
       builder: (context, provider, child) {
         // Find the current action item by description to get the latest state
-        final actionItem = provider.conversation.structured.actionItems
-            .firstWhere((item) => item.description == widget.actionItem.description, orElse: () => widget.actionItem);
+        final actionItem = provider.conversation.structured.actionItems.firstWhere(
+          (item) => item.description == widget.actionItem.description,
+          orElse: () => widget.actionItem,
+        );
 
         // Check if this specific item has a pending state change
         final isCompleted = _pendingStates.containsKey(widget.actionItem.description)
@@ -1586,11 +1655,7 @@ class _ActionItemDetailWidgetState extends State<ActionItemDetailWidget> {
               color: EllaColors.bgSecondary,
               borderRadius: BorderRadius.circular(16),
               boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.05),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
-                ),
+                BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4, offset: const Offset(0, 2)),
               ],
             ),
             child: Material(
@@ -1618,19 +1683,10 @@ class _ActionItemDetailWidgetState extends State<ActionItemDetailWidget> {
                               height: 20,
                               decoration: BoxDecoration(
                                 color: isCompleted ? Colors.green : Colors.transparent,
-                                border: Border.all(
-                                  color: isCompleted ? Colors.green : Colors.grey,
-                                  width: 2,
-                                ),
+                                border: Border.all(color: isCompleted ? Colors.green : Colors.grey, width: 2),
                                 borderRadius: BorderRadius.circular(4),
                               ),
-                              child: isCompleted
-                                  ? const Icon(
-                                      Icons.check,
-                                      size: 14,
-                                      color: Colors.white,
-                                    )
-                                  : null,
+                              child: isCompleted ? const Icon(Icons.check, size: 14, color: Colors.white) : null,
                             ),
                           ),
                         ),
@@ -1689,8 +1745,9 @@ class _ActionItemDetailWidgetState extends State<ActionItemDetailWidget> {
       });
 
       // Track analytics - find the current index for analytics
-      final currentIndex =
-          provider.conversation.structured.actionItems.indexWhere((item) => item.description == itemDescription);
+      final currentIndex = provider.conversation.structured.actionItems.indexWhere(
+        (item) => item.description == itemDescription,
+      );
       if (currentIndex != -1) {
         if (newValue) {
           MixpanelManager().checkedActionItem(provider.conversation, currentIndex);
@@ -1720,188 +1777,163 @@ class ActionItemsTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<ConversationDetailProvider>(builder: (context, provider, child) {
-      final allActionItems = provider.conversation.structured.actionItems.where((item) => !item.deleted).toList();
-      final incompleteItems = allActionItems.where((item) => !item.completed).toList();
-      final completedItems = allActionItems.where((item) => item.completed).toList();
+    return Consumer<ConversationDetailProvider>(
+      builder: (context, provider, child) {
+        final allActionItems = provider.conversation.structured.actionItems.where((item) => !item.deleted).toList();
+        final incompleteItems = allActionItems.where((item) => !item.completed).toList();
+        final completedItems = allActionItems.where((item) => item.completed).toList();
 
-      if (allActionItems.isEmpty) {
-        return _buildEmptyState(context);
-      }
+        if (allActionItems.isEmpty) {
+          return _buildEmptyState(context);
+        }
 
-      return CustomScrollView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        slivers: [
-          // Header section with title and count
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(8.0, 24.0, 8.0, 0.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Text(
-                        'To-Do',
-                        style: TextStyle(
-                          color: EllaColors.textPrimary,
-                          fontSize: 20,
-                          fontWeight: FontWeight.w600,
+        return CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
+            // Header section with title and count
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(8.0, 24.0, 8.0, 0.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        const Text(
+                          'To-Do',
+                          style: TextStyle(color: EllaColors.textPrimary, fontSize: 20, fontWeight: FontWeight.w600),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: EllaColors.bgTertiary,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          '${incompleteItems.length}',
-                          style: const TextStyle(
-                            color: EllaColors.textTertiary,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: EllaColors.bgTertiary,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${incompleteItems.length}',
+                            style: const TextStyle(
+                              color: EllaColors.textTertiary,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                ],
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                ),
               ),
             ),
-          ),
 
-          // Incomplete action items
-          if (incompleteItems.isNotEmpty)
-            SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (context, index) {
+            // Incomplete action items
+            if (incompleteItems.isNotEmpty)
+              SliverList(
+                delegate: SliverChildBuilderDelegate((context, index) {
                   final item = incompleteItems[index];
                   return Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    child: ActionItemDetailWidget(
-                      actionItem: item,
-                      conversationId: provider.conversation.id,
-                    ),
+                    child: ActionItemDetailWidget(actionItem: item, conversationId: provider.conversation.id),
                   );
-                },
-                childCount: incompleteItems.length,
-              ),
-            )
-          else
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8.0),
-                child: Container(
-                  height: 52,
-                  decoration: BoxDecoration(
-                    color: EllaColors.bgSecondary,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: const Center(
-                    child: Text(
-                      'No pending action items',
-                      style: TextStyle(
-                        color: EllaColors.textTertiary,
-                        fontSize: 14,
+                }, childCount: incompleteItems.length),
+              )
+            else
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                  child: Container(
+                    height: 52,
+                    decoration: BoxDecoration(color: EllaColors.bgSecondary, borderRadius: BorderRadius.circular(16)),
+                    child: const Center(
+                      child: Text(
+                        'No pending action items',
+                        style: TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
 
-          // Completed section header
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(8.0, 24.0, 8.0, 8.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          const Text(
-                            'Completed',
-                            style: TextStyle(
-                              color: EllaColors.textPrimary,
-                              fontSize: 20,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: EllaColors.bgTertiary,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '${completedItems.length}',
-                              style: const TextStyle(
-                                color: EllaColors.textTertiary,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
+            // Completed section header
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(8.0, 24.0, 8.0, 8.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      children: [
+                        Wrap(
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            const Text(
+                              'Completed',
+                              style: TextStyle(
+                                color: EllaColors.textPrimary,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w600,
                               ),
                             ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ],
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: EllaColors.bgTertiary,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                '${completedItems.length}',
+                                style: const TextStyle(
+                                  color: EllaColors.textTertiary,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
 
-          // Completed action items
-          if (completedItems.isNotEmpty)
-            SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (context, index) {
+            // Completed action items
+            if (completedItems.isNotEmpty)
+              SliverList(
+                delegate: SliverChildBuilderDelegate((context, index) {
                   final item = completedItems[index];
                   return Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    child: ActionItemDetailWidget(
-                      actionItem: item,
-                      conversationId: provider.conversation.id,
-                    ),
+                    child: ActionItemDetailWidget(actionItem: item, conversationId: provider.conversation.id),
                   );
-                },
-                childCount: completedItems.length,
-              ),
-            )
-          else
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8.0),
-                child: Container(
-                  height: 52,
-                  decoration: BoxDecoration(
-                    color: EllaColors.bgSecondary,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: const Center(
-                    child: Text(
-                      'No completed items yet',
-                      style: TextStyle(
-                        color: EllaColors.textTertiary,
-                        fontSize: 14,
+                }, childCount: completedItems.length),
+              )
+            else
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                  child: Container(
+                    height: 52,
+                    decoration: BoxDecoration(color: EllaColors.bgSecondary, borderRadius: BorderRadius.circular(16)),
+                    child: const Center(
+                      child: Text(
+                        'No completed items yet',
+                        style: TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
 
-          const SliverPadding(padding: EdgeInsets.only(bottom: 150)),
-        ],
-      );
-    });
+            const SliverPadding(padding: EdgeInsets.only(bottom: 150)),
+          ],
+        );
+      },
+    );
   }
 
   Widget _buildEmptyState(BuildContext context) {
@@ -1911,29 +1943,20 @@ class ActionItemsTab extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(
-              Icons.check_circle_outline,
-              size: 72,
-              color: EllaColors.textDisabled,
-            ),
+            const Icon(Icons.check_circle_outline, size: 72, color: EllaColors.textDisabled),
             const SizedBox(height: 24),
             Text(
               'No Action Items',
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    color: EllaColors.textPrimary,
-                    fontWeight: FontWeight.bold,
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.headlineSmall?.copyWith(color: EllaColors.textPrimary, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 12),
             const Text(
               'Tasks and to-dos from this conversation will appear here once they are created.',
               textAlign: TextAlign.center,
-              style: TextStyle(
-                color: EllaColors.textTertiary,
-                fontSize: 16,
-                height: 1.5,
-              ),
+              style: TextStyle(color: EllaColors.textTertiary, fontSize: 16, height: 1.5),
             ),
           ],
         ),

@@ -1,7 +1,16 @@
+import 'package:omi/providers/message_provider.dart';
+import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_chat_service.dart';
+import 'package:omi/ella/services/ella_service_result.dart';
+import 'package:omi/ella/capture_host/ella_capture_protocol_trace.dart';
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 
 import 'package:omi/ella/pages/ella_runtime_diagnostics_page.dart';
 import 'package:omi/ella/pages/ella_settings_page.dart';
@@ -32,11 +41,186 @@ void main() {
   });
 
   setUp(() {
+    PackageInfo.setMockInitialValues(
+        appName: 'Ella',
+        packageName: 'com.ellaaicare.ella',
+        version: '1.0.572',
+        buildNumber: '915',
+        buildSignature: '');
     SharedPreferences.setMockInitialValues(const {});
     EllaCaptureHost.resetForTesting();
     MemoryArtworkQueueDiagnostics.clear();
   });
   tearDown(EllaCaptureHost.resetForTesting);
+
+  testWidgets('labelled history admission surface is local read-only metadata', (tester) async {
+    await SharedPreferencesUtil.init();
+    SharedPreferencesUtil().uid = 'synthetic-metadata-owner';
+    final messages = MessageProvider(
+        historyPaginationEnabled: true,
+        activeAuthority: () => _HistoryAuthority(),
+        ellaChatKeysetFetcher: ({required cursor, required expectedAuthenticatedUid, required exactAuthority}) async =>
+            const EllaServiceResult.success(EllaChatHistoryPage(
+                messages: [], hasMore: false, isKeyset: true, paginationVersion: 1, rawRowCount: 0)));
+    await messages.refreshMessages();
+    final capture = _DiagnosticsCaptureProvider('disconnected');
+    final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
+    await tester.pumpWidget(MultiProvider(
+        providers: [
+          ChangeNotifierProvider<MessageProvider>.value(value: messages),
+          ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+          ChangeNotifierProvider<DeviceProvider>.value(value: device),
+        ],
+        child: MaterialApp(
+            theme: ellaDarkThemeData(),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: const EllaRuntimeDiagnosticsPage())));
+    await tester.pump();
+    await tester.scrollUntilVisible(find.byKey(const Key('history-admission-diagnostic')), 100,
+        scrollable: find.byType(Scrollable).first);
+    final row = find.byKey(const Key('history-admission-diagnostic'));
+    expect(find.descendant(of: row, matching: find.text('Chat history admission (local metadata)')), findsOneWidget);
+    final value = tester.widget<SelectableText>(find.descendant(of: row, matching: find.byType(SelectableText))).data!;
+    expect(value, contains('"version":1'));
+    expect(value, contains('"adopted":true'));
+    expect(value, contains('"raw_row_count":0'));
+    expect(value, contains('"has_more":false'));
+    expect(value, isNot(contains('synthetic-metadata-owner')));
+    expect(find.descendant(of: row, matching: find.byType(TextButton)), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    messages.dispose();
+    capture.dispose();
+    device.dispose();
+  });
+  for (final dark in [false, true]) {
+    testWidgets('support diagnostics truthful totals, safe padding and copy dark=$dark', (tester) async {
+      PackageInfo.setMockInitialValues(
+          appName: 'Ella',
+          packageName: 'com.ellaaicare.ella',
+          version: '1.0.572',
+          buildNumber: '915',
+          buildSignature: '');
+      DebugLogManager.deviceCandidatesSeen = 8;
+      DebugLogManager.deviceCandidatesAdmitted = 4;
+      DebugLogManager.deviceDiscoveryStage = 'cancelled';
+      DebugLogManager.deviceDiscoveryFailure = 'none';
+      addTearDown(DebugLogManager.resetDeviceDiagnostics);
+      final capture = _DiagnosticsCaptureProvider('disconnected');
+      final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
+      await tester.binding.setSurfaceSize(const Size(320, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(MultiProvider(
+          providers: [
+            ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+            ChangeNotifierProvider<DeviceProvider>.value(value: device),
+          ],
+          child: MaterialApp(
+              theme: dark ? ellaDarkThemeData() : ellaThemeData(),
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              builder: (context, child) => MediaQuery(
+                  data: MediaQuery.of(context)
+                      .copyWith(padding: const EdgeInsets.only(bottom: 34), textScaler: const TextScaler.linear(3)),
+                  child: child!),
+              home: const EllaRuntimeDiagnosticsPage())));
+      await tester.pump();
+      final list = tester.widget<ListView>(find.byKey(const Key('ella-runtime-diagnostics')));
+      expect(list.padding, const EdgeInsets.fromLTRB(16, 16, 16, 50));
+      await tester.scrollUntilVisible(find.byKey(const Key('runtime-diagnostics-app-build')), 200,
+          scrollable: find
+              .descendant(of: find.byKey(const Key('ella-runtime-diagnostics')), matching: find.byType(Scrollable))
+              .first);
+      expect(find.text('Ella app version · build'), findsOneWidget);
+      expect(find.text('1.0.572+915'), findsOneWidget);
+      await tester.scrollUntilVisible(find.byKey(const Key('runtime-diagnostics-device-counts')), 200,
+          scrollable: find
+              .descendant(of: find.byKey(const Key('ella-runtime-diagnostics')), matching: find.byType(Scrollable))
+              .first);
+      final row = find.byKey(const Key('runtime-diagnostics-device-counts'));
+      final value =
+          tester.widget<SelectableText>(find.descendant(of: row, matching: find.byType(SelectableText))).data!;
+      expect(value, contains('candidatesSeen=8\ncandidatesAdmitted=4'));
+      expect(value, isNot(contains(r'\n')));
+      final button = tester.widget<TextButton>(find.descendant(of: row, matching: find.byType(TextButton)));
+      final palette = EllaPalette(dark);
+      final a = button.style!.foregroundColor!.resolve({})!.computeLuminance();
+      final b = palette.bgSecondary.computeLuminance();
+      expect((a > b ? (a + .05) / (b + .05) : (b + .05) / (a + .05)), greaterThanOrEqualTo(4.5));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      capture.dispose();
+      device.dispose();
+    });
+  }
+
+  testWidgets('native scan diagnostics clear failed reads and discard retired-loader results', (tester) async {
+    final capture = _DiagnosticsCaptureProvider('disconnected');
+    final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
+    EllaCaptureHost.installForTesting(homeCaptureDockBuilder: (_) => const SizedBox.shrink());
+    var fail = false;
+    final delayed = Completer<EllaNativeDiscoveryDiagnostics>();
+    var delay = false;
+    const snapshot = EllaNativeDiscoveryDiagnostics(
+        lastStartScanCbState: 'poweredOn',
+        scansStartedImmediately: 1,
+        scansQueued: 0,
+        queuedScansFired: 0,
+        didDiscoverCount: 0,
+        flutterApiNilDropCount: 0);
+    EllaCaptureHost.installNativeDiscoveryDiagnosticsLoader(() async {
+      if (fail) throw PlatformException(code: 'private-device', message: 'private-token');
+      if (delay) return delayed.future;
+      return snapshot;
+    });
+    await tester.pumpWidget(MultiProvider(
+        providers: [
+          ChangeNotifierProvider<CaptureProvider>.value(value: capture),
+          ChangeNotifierProvider<DeviceProvider>.value(value: device),
+        ],
+        child: MaterialApp(
+            theme: ellaThemeData(),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: const EllaRuntimeDiagnosticsPage())));
+    await tester.pump();
+    String value() => tester
+        .widget<SelectableText>(find.descendant(
+            of: find.byKey(const Key('runtime-diagnostics-device-counts')), matching: find.byType(SelectableText)))
+        .data!;
+    await tester.scrollUntilVisible(find.byKey(const Key('runtime-diagnostics-device-counts')), 200,
+        scrollable: find
+            .descendant(of: find.byKey(const Key('ella-runtime-diagnostics')), matching: find.byType(Scrollable))
+            .first);
+    expect(value(), contains('nativeScanInvoked=true'));
+    final originalLoader = EllaCaptureHost.nativeDiscoveryDiagnosticsLoader!;
+    final retired = Completer<EllaNativeDiscoveryDiagnostics>();
+    EllaCaptureHost.installNativeDiscoveryDiagnosticsLoader(() => retired.future);
+    await tester.pump(const Duration(seconds: 1));
+    expect(value(), contains('nativeRead=retired'));
+    expect(value(), isNot(contains('nativeScanInvoked=true')));
+    EllaCaptureHost.installNativeDiscoveryDiagnosticsLoader(originalLoader);
+    retired.complete(snapshot);
+    await tester.pump();
+    fail = true;
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
+    expect(value(), contains('nativeRead=platform_error'));
+    expect(value(), isNot(contains('nativeScanInvoked=true')));
+    expect(value(), isNot(contains('private')));
+    fail = false;
+    delay = true;
+    await tester.pump(const Duration(seconds: 1));
+    EllaCaptureHost.installNativeDiscoveryDiagnosticsLoader(() async => snapshot);
+    delayed.complete(snapshot);
+    await tester.pump();
+    expect(value(), contains('nativeRead=platform_error'));
+    expect(value(), isNot(contains('nativeScanInvoked=true')));
+    await tester.pumpWidget(const SizedBox.shrink());
+    capture.dispose();
+    device.dispose();
+    expect(tester.takeException(), isNull);
+  });
 
   for (final width in [320.0, 390.0]) {
     testWidgets('ordinary artwork snapshot is read-only and scroll safe at 3x width=$width', (tester) async {
@@ -177,7 +361,7 @@ void main() {
     expect(find.textContaining('private-'), findsNothing);
     expect(find.textContaining('https://'), findsNothing);
     expect(find.textContaining('Connected · 17'), findsNothing);
-    expect(find.textContaining('Connected · Unknown'), findsOneWidget);
+    expect(find.textContaining('Reachable (HTTP Unknown)'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
     AiConsentActiveSessionLease.diagnostics.value = const AiConsentLeaseDiagnostics();
     ConnectivityService().applyHealthProbeForTest(statusCode: 200);
@@ -207,12 +391,16 @@ void main() {
       final capture = _DiagnosticsCaptureProvider('connected');
       final device = DeviceProvider(deviceService: _NoopDeviceService(), automaticallyReconnectOnReady: false);
       EllaCaptureHost.installForTesting(homeCaptureDockBuilder: (_) => const SizedBox.shrink());
+      final trace = EllaCaptureProtocolTrace(utcNow: () => DateTime.utc(2026));
+      final attempt = trace.begin();
+      trace.record(attempt, CaptureTraceEvent.closeCallback, closeCode: 1011, wasReady: false);
       var reads = 0;
       EllaCaptureHost.installCaptureDiagnosticsReader(() {
         reads++;
         return initialized
             ? EllaCaptureDiagnosticsSnapshot.upstream(
                 ready: false,
+                protocolTrace: trace.snapshot,
                 receivedBytes: 321,
                 sentBytes: 123,
                 lastFailure: EllaCaptureSocketFailure.fromReason(
@@ -249,6 +437,8 @@ void main() {
       expect(find.textContaining('1.25 kbps'), findsNothing);
       if (initialized) {
         expect(find.textContaining('123 B'), findsOneWidget);
+        expect(find.byKey(const Key('runtime-diagnostics-capture-trace')), findsOneWidget);
+        expect(find.textContaining('closeCallback'), findsOneWidget);
         expect(find.textContaining('closed_before_ready · failed · 1013'), findsOneWidget);
         expect(find.textContaining('2026-10-02T16:44:00.000Z'), findsOneWidget);
       } else {
@@ -359,4 +549,13 @@ class _NoopDeviceService implements IDeviceService {
 
   @override
   Future<void> disconnectDevice() async {}
+}
+
+class _HistoryAuthority implements AccountCommitAuthority {
+  @override
+  String get uid => 'synthetic-metadata-owner';
+  @override
+  bool isCurrent() => true;
+  @override
+  bool isExactCurrent() => true;
 }

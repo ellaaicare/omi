@@ -2,6 +2,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:omi/utils/display_text.dart';
 
 void main() {
+  test('Journal retains complete titles and meaningful words instead of cutting phrases', () {
+    for (final title in [
+      'Preparation for a family afternoon',
+      'Coffee and a walk',
+      'Doctor appointment and transport plans',
+      'Lunch, garden and conversation'
+    ]) {
+      expect(safeMemoryDisplayTitle(title, 'Untitled'), title);
+    }
+    expect(safeMemoryDisplayTitle('[Ella] Coffee and a walk', 'Untitled'), 'Coffee and a walk');
+    expect(safeMemoryDisplayTitle('  ', 'Untitled'), 'Untitled');
+    expect(safeMemoryDisplayTitle('[MED] Doctor appointment and Emergency monitoring', 'Untitled'), 'Untitled');
+  });
+
   test('strips Ella display prefixes without removing the wing', () {
     expect(stripEllaDisplayPrefix('[Ella] A good afternoon'), 'A good afternoon');
     expect(stripEllaDisplayPrefix('[ella]: Remember the appointment'), 'Remember the appointment');

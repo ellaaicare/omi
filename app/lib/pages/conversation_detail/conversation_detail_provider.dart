@@ -15,6 +15,7 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
+import 'package:omi/ella/services/summary_read_freshness.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -25,11 +26,12 @@ import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 typedef ConversationReprocessor = Future<ServerConversation?> Function(String conversationId, {String? appId});
-typedef ConversationDetailLoader = Future<ServerConversation?> Function(
-  String conversationId, {
-  String? expectedAuthenticatedUid,
-  ExactAccountAuthorityVerifier? exactAuthority,
-});
+typedef ConversationDetailLoader =
+    Future<ServerConversation?> Function(
+      String conversationId, {
+      String? expectedAuthenticatedUid,
+      ExactAccountAuthorityVerifier? exactAuthority,
+    });
 
 class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixin {
   ConversationDetailProvider({
@@ -37,10 +39,10 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     SharedPreferencesUtil? preferences,
     ActiveAccountAuthorityProvider? activeAuthority,
     ConversationDetailLoader? conversationLoader,
-  })  : _reprocessConversation = reprocessConversation ?? reProcessConversationServer,
-        _preferences = preferences ?? SharedPreferencesUtil(),
-        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount,
-        _conversationLoader = conversationLoader ?? getConversationById;
+  }) : _reprocessConversation = reprocessConversation ?? reProcessConversationServer,
+       _preferences = preferences ?? SharedPreferencesUtil(),
+       _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount,
+       _conversationLoader = conversationLoader ?? getConversationById;
 
   final ConversationReprocessor _reprocessConversation;
   final SharedPreferencesUtil _preferences;
@@ -49,6 +51,11 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   int _operationGeneration = 0;
   int _conversationGeneration = 0;
   int _refreshRequestGeneration = 0;
+  EllaAccountCommitLease? _summaryReadLease;
+  SummaryReadObservation _summaryRead = const SummaryReadObservation(SummaryReadPhase.unchecked);
+  SummaryReadObservation get summaryRead => _summaryReadLease?.isCurrent == true
+      ? _summaryRead.forConversation(conversation)
+      : const SummaryReadObservation(SummaryReadPhase.unchecked);
 
   AppProvider? appProvider;
   ConversationProvider? conversationProvider;
@@ -375,6 +382,9 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       !_isDisposed && generation == _operationGeneration && lease.isCurrent;
 
   void _invalidateAccountOperations() {
+    _summaryReadLease?.close();
+    _summaryReadLease = null;
+    _summaryRead = const SummaryReadObservation(SummaryReadPhase.unchecked);
     _operationGeneration++;
     _cachedConversation = null;
     _cachedConversationId = null;
@@ -453,8 +463,9 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       if (_isDisposed) return;
 
       // Preserve locally added apps that aren't in the API response yet
-      final locallyAddedApps =
-          _cachedEnabledConversationApps.where((app) => _locallyAddedAppIds.contains(app.id)).toList();
+      final locallyAddedApps = _cachedEnabledConversationApps
+          .where((app) => _locallyAddedAppIds.contains(app.id))
+          .toList();
 
       _cachedEnabledConversationApps.clear();
       _cachedEnabledConversationApps.addAll(apps);
@@ -560,6 +571,9 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   }
 
   void setCachedConversation(ServerConversation conversation) {
+    _summaryReadLease?.close();
+    _summaryReadLease = null;
+    _summaryRead = const SummaryReadObservation(SummaryReadPhase.unchecked);
     _conversationGeneration++;
     _cachedConversation = conversation;
     _cachedConversationId = conversation.id;
@@ -574,37 +588,50 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     final generation = _conversationGeneration;
     final accountGeneration = _operationGeneration;
     final requestGeneration = ++_refreshRequestGeneration;
+    _summaryReadLease?.close();
+    final lease = EllaAccountCommitBarrier.begin(
+      authorityProvider: _activeAuthority,
+      onInvalidated: _invalidateAccountOperations,
+    );
+    _summaryReadLease = lease;
     bool canCommit() =>
         !_isDisposed &&
+        lease != null &&
+        lease.isCurrent &&
+        identical(lease, _summaryReadLease) &&
         requestGeneration == _refreshRequestGeneration &&
         generation == _conversationGeneration &&
         accountGeneration == _operationGeneration &&
-        (exactAuthority == null || exactAuthority.isExactCurrent()) &&
+        (exactAuthority == null || (exactAuthority.uid == lease.uid && exactAuthority.isExactCurrent())) &&
         _cachedConversationId == conversationId;
     if (!canCommit()) return;
-    if (SharedPreferencesUtil().demoMode) {
-      final fixture = DemoFixtures.conversationById(conversationId);
-      if (fixture != null) {
-        _cachedConversation = fixture;
-        conversationProvider?.updateConversation(fixture);
-        notifyListeners();
-      }
-      return;
-    }
+    _summaryRead = SummaryReadObservation(SummaryReadPhase.checking, versionId: conversation.activeSummaryVersionId);
+    notifyListeners();
     try {
-      final updatedConversation = await _conversationLoader(
-        conversationId,
-        expectedAuthenticatedUid: exactAuthority?.uid,
-        exactAuthority: exactAuthority,
-      );
+      final updatedConversation = SharedPreferencesUtil().demoMode
+          ? DemoFixtures.conversationById(conversationId)
+          : await _conversationLoader(conversationId, expectedAuthenticatedUid: lease!.uid, exactAuthority: lease);
       if (!canCommit()) return;
-      if (updatedConversation != null && updatedConversation.id == conversationId) {
-        _cachedConversation = updatedConversation;
-        conversationProvider?.updateConversation(updatedConversation);
+      if (updatedConversation == null ||
+          updatedConversation.id != conversationId ||
+          !summaryResponseMatchesOwnerAndVersion(updatedConversation, lease!.uid, previous: conversation)) {
+        _summaryRead = SummaryReadObservation(SummaryReadPhase.stale, versionId: conversation.activeSummaryVersionId);
         notifyListeners();
+        return;
       }
-    } catch (e) {
-      Logger.debug('Error refreshing conversation: $e');
+      _cachedConversation = updatedConversation;
+      conversationProvider?.updateConversation(updatedConversation);
+      _summaryRead = SummaryReadObservation(
+        SummaryReadPhase.checked,
+        checkedAt: DateTime.now().toUtc(),
+        versionId: updatedConversation.activeSummaryVersionId,
+        bodyWitness: summaryReadBodyWitness(updatedConversation),
+      );
+      notifyListeners();
+    } catch (_) {
+      if (!canCommit()) return;
+      _summaryRead = SummaryReadObservation(SummaryReadPhase.stale, versionId: conversation.activeSummaryVersionId);
+      notifyListeners();
     }
   }
 
@@ -653,6 +680,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   @override
   void dispose() {
     _isDisposed = true;
+    _summaryReadLease?.close();
+    _summaryReadLease = null;
     _ratingTimer?.cancel();
     super.dispose();
   }

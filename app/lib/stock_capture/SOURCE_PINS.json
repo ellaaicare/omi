@@ -1,0 +1,65 @@
+{
+  "official_pin": "d9bdbbcb44f045f202f3aca90dabe5df757a10f0",
+  "imports_only": {
+    "pages/conversations/widgets/live_capture_card.dart": "stock_capture/pages/conversations/widgets/live_capture_card.dart",
+    "widgets/capture_sources.dart": "stock_capture/widgets/capture_sources.dart",
+    "ui/omi_tokens.dart": "stock_capture/ui/omi_tokens.dart",
+    "ui/components/omi_button.dart": "stock_capture/ui/components/omi_button.dart",
+    "ui/components/omi_sheet.dart": "stock_capture/ui/components/omi_sheet.dart",
+    "ui/components/omi_icon_button.dart": "stock_capture/ui/components/omi_icon_button.dart",
+    "ui/components/omi_nav_buttons.dart": "stock_capture/ui/components/omi_nav_buttons.dart",
+    "ui/components/omi_spinner.dart": "stock_capture/ui/components/omi_spinner.dart",
+    "ui/ui.dart": "ella/upstream_capture/stock_ui_exports.dart",
+    "backend/schema/bt_device/bt_device.dart": "upstream_capture/backend/schema/bt_device/bt_device.dart"
+  },
+  "files": [
+    {
+      "official_path": "app/lib/pages/conversations/widgets/live_capture_card.dart",
+      "local_path": "lib/stock_capture/pages/conversations/widgets/live_capture_card.dart",
+      "official_sha256": "757a51d7c24bc47eba3f75909ab240de1bfc3bb52d8d7692b404c37e6bd51333",
+      "local_sha256": "5996e4794976400af531c54e994522772c0833f5f0b7ac624f30d5feea2f6032"
+    },
+    {
+      "official_path": "app/lib/widgets/capture_sources.dart",
+      "local_path": "lib/stock_capture/widgets/capture_sources.dart",
+      "official_sha256": "e0d4c2ef3a656681c391109b0a2c2c851a31b2495bebab1eb3a28c6a1d36f754",
+      "local_sha256": "fca6c7d495231e184a875b0d4fb37fce56efaa65e97b10a786ccb17074e15a39"
+    },
+    {
+      "official_path": "app/lib/ui/omi_tokens.dart",
+      "local_path": "lib/stock_capture/ui/omi_tokens.dart",
+      "official_sha256": "a9c85baccd0aba0318ff1a1fdd7112fff95e7b07a915580b7c53b2d6666fe6a8",
+      "local_sha256": "a9c85baccd0aba0318ff1a1fdd7112fff95e7b07a915580b7c53b2d6666fe6a8"
+    },
+    {
+      "official_path": "app/lib/ui/components/omi_button.dart",
+      "local_path": "lib/stock_capture/ui/components/omi_button.dart",
+      "official_sha256": "91f468f34bd3bfd29d94fd4b4b2c0c52a885702ffa3a04e84a99c8c86ef457ac",
+      "local_sha256": "3ed9486c34771d2421f864afd52af908246bdbc4733e83c1f8ace9b0c87ca189"
+    },
+    {
+      "official_path": "app/lib/ui/components/omi_sheet.dart",
+      "local_path": "lib/stock_capture/ui/components/omi_sheet.dart",
+      "official_sha256": "6138f1664c69ef6715f2b43ef95895230c429a580ff7ad4ed665e22b34e906da",
+      "local_sha256": "228c797e935e4cb44c7cd1501a4a8d6780a053bfcbb1da8e718bc541866d8ef5"
+    },
+    {
+      "official_path": "app/lib/ui/components/omi_icon_button.dart",
+      "local_path": "lib/stock_capture/ui/components/omi_icon_button.dart",
+      "official_sha256": "b987aeb7b58f44fd9ebd81bcfc93130e9451beedfd9cc9fd8fa99e235cd6a027",
+      "local_sha256": "d4a58d27c39c157058e3e90e9e6fe88303fc4c302509ec069593d8274d886523"
+    },
+    {
+      "official_path": "app/lib/ui/components/omi_nav_buttons.dart",
+      "local_path": "lib/stock_capture/ui/components/omi_nav_buttons.dart",
+      "official_sha256": "6ef78a4caa4d6500f31734cef8d6ff4e849cc961d4d9de26a46e06f23e07a132",
+      "local_sha256": "7e3c280ba8961da790853dc06d2fa7d648e50d2511e8f050f635ef382178780d"
+    },
+    {
+      "official_path": "app/lib/ui/components/omi_spinner.dart",
+      "local_path": "lib/stock_capture/ui/components/omi_spinner.dart",
+      "official_sha256": "4c52efa90be2c230b8e91bee350d7a0f423dc5375ec3034dab43c8849c879a00",
+      "local_sha256": "6d16e3b9c08169b4e0c7ef9d9a06c84dff07425c951aac0ae05f51ec33727396"
+    }
+  ]
+}

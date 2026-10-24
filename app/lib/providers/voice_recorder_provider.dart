@@ -11,6 +11,8 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/main.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/mic/owned_legacy_mic.dart';
+import 'package:omi/services/mic/audio_capture_ownership.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/file.dart';
 import 'package:omi/utils/logger.dart';
@@ -51,10 +53,24 @@ class VoiceRecorderProvider extends ChangeNotifier {
   bool get isRecording => _state == VoiceRecorderState.recording;
   bool get isActive => _state != VoiceRecorderState.idle;
   bool get consentReviewRequired => _consentReviewRequired;
-  IMicRecorderService get _mic => _microphone ?? ServiceManager.instance().mic;
+  OwnedLegacyMic? _ownedMic;
+  OwnedLegacyMic get _mic => _ownedMic ??= OwnedLegacyMic(
+        inner: _microphone ?? ServiceManager.instance().mic,
+        source: 'chat-dictation',
+        hasAuthority: () => _activeConsentAuthority?.isCurrent() == true,
+        onOwnedTail: (bytes) {
+          if ((_state == VoiceRecorderState.recording || _state == VoiceRecorderState.transcribing) &&
+              _activeConsentAuthority?.isCurrent() == true) {
+            _audioChunks.add(bytes.toList());
+          }
+        },
+      );
 
   @visibleForTesting
   bool get hasActiveConsentLease => _aiConsentLease?.isActive == true;
+
+  @visibleForTesting
+  int get bufferedAudioBytesForTesting => _audioChunks.fold(0, (total, chunk) => total + chunk.length);
 
   @visibleForTesting
   bool get hasActiveWaveformTimer => _waveformTimer?.isActive == true;
@@ -79,10 +95,12 @@ class VoiceRecorderProvider extends ChangeNotifier {
       _markConsentReviewRequired();
       return;
     }
-    if (_state == VoiceRecorderState.recording) return;
+    if (_state == VoiceRecorderState.recording || _ownedMic?.hasReservation == true) return;
 
     final lifecycleGeneration = ++_lifecycleGeneration;
     _activeConsentAuthority = authority;
+    if (!_mic.reserveBeforePermission()) return;
+    final reservation = _mic.reservation!;
     _consentReviewRequired = false;
     _state = VoiceRecorderState.recording;
     _audioChunks = [];
@@ -94,117 +112,140 @@ class VoiceRecorderProvider extends ChangeNotifier {
     }
     notifyListeners();
 
-    final requestMicrophonePermission = _requestMicrophonePermission;
-    if (requestMicrophonePermission != null) {
-      await requestMicrophonePermission();
-    } else {
-      await Permission.microphone.request();
-    }
-
-    if (_lifecycleGeneration != lifecycleGeneration || _state != VoiceRecorderState.recording) return;
-    final refreshedAuthority = AiConsentActiveSessionLease.authorityForSessionStart(
-      preferences: preferences,
-      expectedUid: authority.uid,
-    );
-    if (!authority.isCurrent(preferences: preferences) || refreshedAuthority == null) {
-      _markConsentReviewRequired();
-      return;
-    }
-    _activeConsentAuthority = refreshedAuthority;
-
-    // Setup timer to update the wave visualization every second
-    _waveformTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_state == VoiceRecorderState.recording) {
-        notifyListeners();
-      }
-    });
-
-    _aiConsentLease?.stop();
-    _aiConsentLease = AiConsentActiveSessionLease(
-      uid: refreshedAuthority.uid,
-      authority: refreshedAuthority,
-      onAuthorityLost: _handleConsentAuthorityLost,
-    )..start();
-
     try {
-      await _mic.start(
-        onByteReceived: (bytes) {
-          if (_state == VoiceRecorderState.recording && _aiConsentLease?.hasCurrentAuthority == true) {
-            _audioChunks.add(bytes.toList());
+      final requestMicrophonePermission = _requestMicrophonePermission;
+      if (requestMicrophonePermission != null) {
+        await requestMicrophonePermission();
+      } else {
+        final permission = await Permission.microphone.request();
+        if (!permission.isGranted) {
+          await stopRecording(expectedReservation: reservation);
+          if (_lifecycleGeneration == lifecycleGeneration) {
+            _state = VoiceRecorderState.transcribeFailed;
+            notifyListeners();
+          }
+          return;
+        }
+      }
 
-            // Update audio visualization based on actual audio levels
-            if (bytes.isNotEmpty) {
-              // Calculate RMS (Root Mean Square) for PCM16 audio data
-              double rms = 0;
+      if (_lifecycleGeneration != lifecycleGeneration || _state != VoiceRecorderState.recording) {
+        await stopRecording(expectedReservation: reservation);
+        return;
+      }
+      final refreshedAuthority = AiConsentActiveSessionLease.authorityForSessionStart(
+        preferences: preferences,
+        expectedUid: authority.uid,
+      );
+      if (!authority.isCurrent(preferences: preferences) || refreshedAuthority == null || !_mic.isCurrent) {
+        await stopRecording(expectedReservation: reservation);
+        _markConsentReviewRequired();
+        return;
+      }
+      _activeConsentAuthority = refreshedAuthority;
 
-              // Process bytes as 16-bit samples (2 bytes per sample)
-              for (int i = 0; i < bytes.length - 1; i += 2) {
-                // Convert two bytes to a 16-bit signed integer
-                // PCM16 is little-endian: LSB first, then MSB
-                int sample = bytes[i] | (bytes[i + 1] << 8);
+      // Setup timer to update the wave visualization every second
+      _waveformTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (_state == VoiceRecorderState.recording) {
+          notifyListeners();
+        }
+      });
 
-                // Convert to signed value (if high bit is set)
-                if (sample > 32767) {
-                  sample = sample - 65536;
+      _aiConsentLease?.stop();
+      _aiConsentLease = AiConsentActiveSessionLease(
+        uid: refreshedAuthority.uid,
+        authority: refreshedAuthority,
+        onAuthorityLost: () async {
+          if (_lifecycleGeneration == lifecycleGeneration && identical(_ownedMic?.reservation, reservation)) {
+            await _handleConsentAuthorityLost();
+          }
+        },
+      )..start();
+
+      try {
+        await _mic.start(
+          onByteReceived: (bytes) {
+            if (_state == VoiceRecorderState.recording && _aiConsentLease?.hasCurrentAuthority == true) {
+              _audioChunks.add(bytes.toList());
+
+              // Update audio visualization based on actual audio levels
+              if (bytes.isNotEmpty) {
+                // Calculate RMS (Root Mean Square) for PCM16 audio data
+                double rms = 0;
+
+                // Process bytes as 16-bit samples (2 bytes per sample)
+                for (int i = 0; i < bytes.length - 1; i += 2) {
+                  // Convert two bytes to a 16-bit signed integer
+                  // PCM16 is little-endian: LSB first, then MSB
+                  int sample = bytes[i] | (bytes[i + 1] << 8);
+
+                  // Convert to signed value (if high bit is set)
+                  if (sample > 32767) {
+                    sample = sample - 65536;
+                  }
+
+                  // Square the sample and add to sum
+                  rms += sample * sample;
                 }
 
-                // Square the sample and add to sum
-                rms += sample * sample;
+                // Calculate RMS and normalize to 0.0-1.0 range
+                // 32768 is max absolute value for 16-bit audio
+                int sampleCount = bytes.length ~/ 2;
+                if (sampleCount > 0) {
+                  rms = math.sqrt(rms / sampleCount) / 32768.0;
+                } else {
+                  rms = 0;
+                }
+
+                // Apply non-linear scaling to make quiet sounds more visible
+                // and loud sounds more dramatic
+                final level = math.pow(rms, 0.4).toDouble().clamp(0.1, 1.0);
+
+                // Shift all values left
+                for (int i = 0; i < _audioLevels.length - 1; i++) {
+                  _audioLevels[i] = _audioLevels[i + 1];
+                }
+
+                // Add new level at the end
+                _audioLevels[_audioLevels.length - 1] = level;
               }
-
-              // Calculate RMS and normalize to 0.0-1.0 range
-              // 32768 is max absolute value for 16-bit audio
-              int sampleCount = bytes.length ~/ 2;
-              if (sampleCount > 0) {
-                rms = math.sqrt(rms / sampleCount) / 32768.0;
-              } else {
-                rms = 0;
-              }
-
-              // Apply non-linear scaling to make quiet sounds more visible
-              // and loud sounds more dramatic
-              final level = math.pow(rms, 0.4).toDouble().clamp(0.1, 1.0);
-
-              // Shift all values left
-              for (int i = 0; i < _audioLevels.length - 1; i++) {
-                _audioLevels[i] = _audioLevels[i + 1];
-              }
-
-              // Add new level at the end
-              _audioLevels[_audioLevels.length - 1] = level;
             }
-          }
-        },
-        onRecording: () {
-          Logger.debug('VoiceRecorderProvider: Recording started');
-          _state = VoiceRecorderState.recording;
-          _audioChunks = [];
-          // Reset audio levels
-          for (int i = 0; i < _audioLevels.length; i++) {
-            _audioLevels[i] = 0.1;
-          }
-          notifyListeners();
-        },
-        onStop: () {
-          Logger.debug('VoiceRecorderProvider: Recording stopped');
-        },
-        onInitializing: () {
-          Logger.debug('VoiceRecorderProvider: Initializing');
-        },
-      );
+          },
+          onRecording: () {
+            if (_lifecycleGeneration != lifecycleGeneration || !_mic.isCurrent) return;
+            Logger.debug('VoiceRecorderProvider: Recording started');
+            _state = VoiceRecorderState.recording;
+            _audioChunks = [];
+            // Reset audio levels
+            for (int i = 0; i < _audioLevels.length; i++) {
+              _audioLevels[i] = 0.1;
+            }
+            notifyListeners();
+          },
+          onStop: () {
+            Logger.debug('VoiceRecorderProvider: Recording stopped');
+          },
+          onInitializing: () {
+            Logger.debug('VoiceRecorderProvider: Initializing');
+          },
+        );
+      } catch (_) {
+        _aiConsentLease?.stop();
+        _aiConsentLease = null;
+        rethrow;
+      }
     } catch (_) {
-      _aiConsentLease?.stop();
-      _aiConsentLease = null;
+      await stopRecording(expectedReservation: reservation);
       rethrow;
     }
   }
 
-  Future<void> stopRecording() async {
+  Future<void> stopRecording({AudioCaptureLease? expectedReservation}) async {
+    if (expectedReservation != null && !identical(_ownedMic?.reservation, expectedReservation)) return;
     _aiConsentLease?.stop();
     _aiConsentLease = null;
     _waveformTimer?.cancel();
     _waveformTimer = null;
-    await _mic.stop();
+    await _ownedMic?.stop();
   }
 
   Future<void> _handleConsentAuthorityLost() async {
@@ -237,6 +278,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
       return;
     }
     if (_isProcessing) return;
+    final processingGeneration = _lifecycleGeneration;
 
     if (_audioChunks.isEmpty) {
       close();
@@ -248,6 +290,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     notifyListeners();
 
     await stopRecording();
+    if (_lifecycleGeneration != processingGeneration || !authority.isCurrent()) return;
 
     // Flatten audio chunks into a single list
     List<int> flattenedBytes = [];
@@ -272,6 +315,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
 
     try {
       final transcript = await transcribeVoiceMessage(audioFile);
+      if (_lifecycleGeneration != processingGeneration || !authority.isCurrent()) return;
       _transcript = transcript;
       _state = VoiceRecorderState.transcribeSuccess;
       _isProcessing = false;
@@ -339,7 +383,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
     _aiConsentLease = null;
     _waveformTimer?.cancel();
     if (_state == VoiceRecorderState.recording) {
-      unawaited(_mic.stop());
+      unawaited(_ownedMic?.stop());
     }
     super.dispose();
   }

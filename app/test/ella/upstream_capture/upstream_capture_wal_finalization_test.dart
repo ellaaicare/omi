@@ -75,9 +75,11 @@ void main() {
     );
   });
 
-  test('upstream recovery drain uploads the finalized WAL once while authority is current', () async {
+  test('upstream recovery uploads matching claimed finalized WAL once while authority is current', () async {
     expect(await h.bind(), isTrue);
     final wal = await captureOfflineAndStop();
+    // A matching backend finalization receipt attributes this exact window.
+    await h.wal.syncs.phone.stampConversationId(0, 'conv_test', captureWindowId: wal.captureWindowId);
     h.setConnected(true);
     await h.settle();
     await h.coordinator.wake(WakeTrigger.userRetry);
@@ -85,16 +87,45 @@ void main() {
     expect(h.uploads.attempts, hasLength(1));
     final walPath = (await Wal.getFilePath(wal.filePath))!;
     expect(h.uploads.attempts.single.totalBytes, File(walPath).lengthSync());
-    expect((await h.walCounts())[WalStatus.synced], 1);
+    expect((await h.walCounts())[WalStatus.uploaded], 1);
+    expect(File(walPath).existsSync(), isTrue);
 
     await h.coordinator.wake(WakeTrigger.userRetry);
     await h.settle();
-    expect(h.uploads.attempts, hasLength(1), reason: 'a synced WAL is never re-uploaded');
+    expect(h.uploads.attempts, hasLength(1), reason: 'unproven legacy completion is held without replay');
+  });
+
+  test('offline phone PCM survives a null processing result and new provenance requires exact recovery target',
+      () async {
+    expect(await h.bind(), isTrue);
+    final session = await h.startPhone();
+    h.setConnected(false);
+    h.socket!.emitClose();
+    await h.settle();
+    await captureSeconds(6, sessionId: session, frameCursor: 0);
+    await h.runtime.finishConversation();
+    await h.settle();
+    expect(h.processCalls, 1);
+    final missing = await h.wal.syncs.phone.getMissingWals();
+    expect(missing, hasLength(1));
+    final wal = missing.single;
+    expect(wal.conversationId, isNull, reason: 'null finalization never fabricates a persistence receipt');
+    expect(await storedFrames(wal), List.generate(600, (i) => NativeEventVector.synthesizePcmFrame(i)));
+    expect(File('${directory.path}/wals.json').existsSync(), isTrue);
+    h.setConnected(true);
+    await h.settle();
+    await h.coordinator.wake(WakeTrigger.userRetry);
+    await h.settle();
+    expect(h.uploads.attempts, isEmpty);
+    await h.coordinator.wake(WakeTrigger.userRetry);
+    await h.settle();
+    expect(h.uploads.attempts, isEmpty, reason: 'no target is invented for a new source revision');
   });
 
   test('auto-upload of recorded audio is withheld after the consent session is revoked', () async {
     expect(await h.bind(), isTrue);
-    await captureOfflineAndStop();
+    final wal = await captureOfflineAndStop();
+    await h.wal.syncs.phone.stampConversationId(0, 'conv_test', captureWindowId: wal.captureWindowId);
     h.authority.release();
     await h.settle();
     h.setConnected(true);

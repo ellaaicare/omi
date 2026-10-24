@@ -1,3 +1,4 @@
+import 'package:omi/ella/services/app_output_admission.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -89,6 +90,7 @@ class ElevenLabsTts {
   ElevenLabsTts._();
 
   static OnDeviceTtsAdapter? _onDeviceTts;
+  static AppOutputPermit? _onDeviceOutputPermit;
   static String? _cachedTempDir;
 
   @visibleForTesting
@@ -228,6 +230,7 @@ class ElevenLabsTts {
   }) async {
     if (text.trim().isEmpty) return;
     _requireCurrent(exactAuthority, 'before on-device TTS');
+    _onDeviceOutputPermit ??= AppOutputAdmission.shared.reserveOutput('elevenlabs-on-device-tts');
     final tts = adapter ?? (_onDeviceTts ??= FlutterOnDeviceTtsAdapter(FlutterTts()));
     final usesIosAudioSession = isIos ?? Platform.isIOS;
 

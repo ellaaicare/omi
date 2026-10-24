@@ -203,6 +203,20 @@ class Wal {
   /// Null on records written before this field existed (pre-upgrade data).
   String? ownerUid;
 
+  /// Exact local capture window. Legacy records remain null and untouched.
+  String? captureWindowId;
+  int? captureChunkSequence;
+
+  /// Transport attempts are overlap risk, never a durable acknowledgment.
+  /// Null on legacy inventory whose attempt coverage is unknown.
+  bool? hasTransportAttempts;
+
+  /// New-capture admitted-order provenance. Never retrofilled for legacy audio.
+  Map<String, dynamic>? sourceProvenance;
+
+  /// Immutable persisted request/operation identity for whole-source recovery.
+  Map<String, dynamic>? sourceRevisionRequest;
+
   /// Canonical start-time location snapshot for delayed/offline finalization.
   Geolocation? geolocation;
 
@@ -220,7 +234,8 @@ class Wal {
   /// Unix timestamp (seconds) when the audio was uploaded (202 received).
   int uploadedAt;
 
-  String get id => '${device}_$timerStart';
+  String get id =>
+      '${device}_${captureWindowId == null ? '' : '${captureWindowId}c${captureChunkSequence ?? 0}_'}$timerStart';
 
   /// Single source of truth for how this recording's sync state is shown to the
   /// user. The sync page renders an explicit label + icon for every value so a
@@ -321,6 +336,11 @@ class Wal {
     this.originalStorage,
     this.conversationId,
     this.ownerUid,
+    this.captureWindowId,
+    this.captureChunkSequence,
+    this.hasTransportAttempts,
+    this.sourceProvenance,
+    this.sourceRevisionRequest,
     this.geolocation,
     this.retryCount = 0,
     this.lastRetryAt = 0,
@@ -351,6 +371,12 @@ class Wal {
           json['original_storage'] != null ? WalStorage.values.asNameMap()[json['original_storage']] : null,
       conversationId: json['conversation_id'],
       ownerUid: json['owner_uid'],
+      captureWindowId: json['capture_window_id'],
+      captureChunkSequence: json['capture_chunk_sequence'],
+      hasTransportAttempts: json['has_transport_attempts'],
+      sourceProvenance: json['source_provenance'] is Map ? Map<String, dynamic>.from(json['source_provenance']) : null,
+      sourceRevisionRequest:
+          json['source_revision_request'] is Map ? Map<String, dynamic>.from(json['source_revision_request']) : null,
       geolocation: json['geolocation'] is Map<String, dynamic>
           ? Geolocation.fromJson(json['geolocation'] as Map<String, dynamic>)
           : null,
@@ -381,6 +407,11 @@ class Wal {
       'original_storage': originalStorage?.name,
       'conversation_id': conversationId,
       'owner_uid': ownerUid,
+      'capture_window_id': captureWindowId,
+      'capture_chunk_sequence': captureChunkSequence,
+      'has_transport_attempts': hasTransportAttempts,
+      if (sourceProvenance != null) 'source_provenance': sourceProvenance,
+      if (sourceRevisionRequest != null) 'source_revision_request': sourceRevisionRequest,
       'geolocation': geolocation?.toJson(),
       'retry_count': retryCount,
       'last_retry_at': lastRetryAt,
@@ -392,7 +423,10 @@ class Wal {
   static List<Wal> fromJsonList(List<dynamic> jsonList) => jsonList.map((e) => Wal.fromJson(e)).toList();
 
   getFileName() {
-    return "audio_${device.replaceAll(RegExp(r'[^a-zA-Z0-9]'), "").toLowerCase()}_${codec}_${sampleRate}_${channel}_fs${frameSize}_${timerStart}.bin";
+    final prefix = captureWindowId == null ? '' : 'capture-windows/$captureWindowId/';
+    final deviceTag =
+        '${device.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toLowerCase()}${captureWindowId == null ? '' : 'w${captureWindowId!.replaceAll('-', '')}c${captureChunkSequence ?? 0}'}';
+    return "${prefix}audio_${deviceTag}_${codec}_${sampleRate}_${channel}_fs${frameSize}_${timerStart}.bin";
   }
 
   getFileNameByTimeStarts(int timestarts) {
@@ -405,6 +439,9 @@ class Wal {
     }
 
     final directory = await getApplicationDocumentsDirectory();
+    if (RegExp(r'^capture-windows/[a-f0-9-]{36}/audio_[^/]+\.bin$').hasMatch(pathOrName)) {
+      return '${directory.path}/$pathOrName';
+    }
     if (pathOrName.contains('/')) {
       final filename = pathOrName.split('/').last;
       return '${directory.path}/$filename';

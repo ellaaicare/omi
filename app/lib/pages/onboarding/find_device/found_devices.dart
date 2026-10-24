@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 import 'package:collection/collection.dart';
 import 'package:flutter_provider_utilities/flutter_provider_utilities.dart';
@@ -230,18 +231,18 @@ class _FoundDevicesState extends State<FoundDevices> {
                             ? context.l10n.upstreamCaptureNoNecklaceFound
                             : context.l10n.searchingForDevices
                         : context.l10n.devicesFoundNearby(provider.deviceList.length),
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontWeight: FontWeight.w400,
                       fontSize: 14,
-                      color: Color(0x99453B30),
+                      color: EllaPalette.of(context).textSecondary,
                     ),
                   )
                 : Text(
                     context.l10n.pairingSuccessful,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontWeight: FontWeight.w400,
                       fontSize: 12,
-                      color: Color(0x99453B30),
+                      color: EllaPalette.of(context).textSecondary,
                     ),
                   ),
             if (provider.deviceList.isNotEmpty) const SizedBox(height: 16),

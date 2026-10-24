@@ -33,6 +33,7 @@ class BleDeviceSource implements AudioSource {
     return [
       WalFrame(
         payload: rawBytes.sublist(headerSize),
+        validPcmByteLength: codec == BleAudioCodec.pcm16 ? rawBytes.length - headerSize : null,
         syncKey: FrameSyncKey.fromBleHeader(rawBytes),
       ),
     ];

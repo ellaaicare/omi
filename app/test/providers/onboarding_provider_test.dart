@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
@@ -18,6 +20,7 @@ class _NoopDeviceService implements IDeviceService {
   final List<String>? calls;
   final Map<Object, IDeviceServiceSubsciption> _subscriptions = {};
   int ensureConnectionCalls = 0;
+  Object? discoveryError;
 
   @override
   void start() {}
@@ -28,6 +31,7 @@ class _NoopDeviceService implements IDeviceService {
   @override
   Future<void> discover({String? desirableDeviceId, int timeout = 5}) async {
     calls?.add('discover');
+    if (discoveryError != null) throw discoveryError!;
     for (final subscriber in _subscriptions.values.toList()) {
       subscriber.onDevices(discoveredDevices);
     }
@@ -74,10 +78,12 @@ class _OrderedScanDeviceProvider extends DeviceProvider {
       : super(deviceService: deviceService, automaticallyReconnectOnReady: false);
 
   final List<String> calls;
+  Object? preparationError;
 
   @override
   Future<void> prepareForExplicitDeviceSelection() async {
     calls.add('prepare');
+    if (preparationError != null) throw preparationError!;
   }
 }
 
@@ -86,6 +92,49 @@ void main() {
 
   setUp(() {
     SharedPreferences.setMockInitialValues(const {});
+  });
+
+  test('picker classifies preparation failure without scan or auto-connect', () async {
+    await SharedPreferencesUtil.init();
+    DebugLogManager.resetDeviceDiagnostics();
+    final calls = <String>[];
+    final service = _NoopDeviceService(calls: calls);
+    final device = _OrderedScanDeviceProvider(service, calls)..preparationError = MissingPluginException('private');
+    final provider = OnboardingProvider(deviceService: service)
+      ..setDeviceProvider(device)
+      ..hasBluetoothPermission = true;
+    await provider.scanDevices(onShowDialog: () {});
+    expect(provider.discoveryFailed, isTrue);
+    expect(DebugLogManager.deviceDiscoveryStage, 'prepare_selection');
+    expect(DebugLogManager.deviceDiscoveryFailure, 'missing_plugin');
+    expect(calls, ['prepare']);
+    expect(service.ensureConnectionCalls, 0);
+    provider.dispose();
+    device.dispose();
+  });
+
+  test('picker safe error diagnostics recover on explicit retry without auto-connect', () async {
+    await SharedPreferencesUtil.init();
+    DebugLogManager.resetDeviceDiagnostics();
+    final service = _NoopDeviceService()
+      ..discoveryError = PlatformException(code: 'private-address', message: 'private-token');
+    final device = _OrderedScanDeviceProvider(service, []);
+    final provider = OnboardingProvider(deviceService: service)
+      ..setDeviceProvider(device)
+      ..hasBluetoothPermission = true;
+    await provider.scanDevices(onShowDialog: () {});
+    expect(provider.discoveryFailed, isTrue);
+    expect(DebugLogManager.deviceDiscoveryStage, 'discover');
+    expect(DebugLogManager.deviceDiscoveryFailure, 'platform_error');
+    expect(DebugLogManager.deviceDiagnosticsBuffer.join(), isNot(contains('private')));
+    service.discoveryError = null;
+    await provider.scanDevices(onShowDialog: () {});
+    expect(provider.discoveryFailed, isFalse);
+    expect(DebugLogManager.deviceDiscoveryStage, 'discovery_complete');
+    expect(DebugLogManager.deviceDiscoveryFailure, 'none');
+    expect(service.ensureConnectionCalls, 0);
+    provider.dispose();
+    device.dispose();
   });
 
   test('failed target pairing preserves another live device', () async {

@@ -16,6 +16,8 @@ import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/voice_recorder_provider.dart';
+import 'package:omi/services/mic/audio_capture_ownership.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/services/services.dart';
@@ -655,6 +657,121 @@ void main() {
     expect(staleService.captureAuthority?.conversationId, 'capture-a');
   });
 
+  test('device reservation precedes held socket setup and excludes a second provider microphone', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final socketGate = Completer<TranscriptSegmentSocketService?>();
+    final socketEntered = Completer<void>();
+    final socket = _FakeTranscriptSocket();
+    var starts = 0;
+    late CaptureProvider deviceOwner;
+    deviceOwner = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      deviceTranscriptionSocketPreparer: (_, {required force}) {
+        socketEntered.complete();
+        return socketGate.future;
+      },
+      deviceCaptureStarter: () async {
+        starts++;
+        deviceOwner.updateRecordingState(RecordingState.deviceRecord);
+        return true;
+      },
+    );
+    final other = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneCaptureStarter: () async => PhoneCaptureStartResult.started,
+    );
+    addTearDown(deviceOwner.dispose);
+    addTearDown(other.dispose);
+    final starting = deviceOwner.streamDeviceRecording(
+        device: BtDevice(name: 'Ella', id: 'necklace-held', type: DeviceType.omi, rssi: -30));
+    await socketEntered.future;
+    expect(await other.streamRecording(), PhoneCaptureStartResult.cancelled);
+    expect(starts, 0);
+    final stopping = deviceOwner.stopStreamDeviceRecording(cleanDevice: true);
+    socketGate.complete(socket.service);
+    await starting;
+    await stopping;
+    expect(starts, 0);
+    expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+  });
+
+  test('phone prepermission reservation blocks actual dictation provider and releases without unowned stop', () async {
+    await _grantCaptureEgressAuthority('uid-a');
+    SharedPreferencesUtil().verifiedPersonaId = 'persona-a';
+    final authority = _CaptureAuthority('uid-a');
+    final permissionEntered = Completer<void>();
+    final permission = Completer<bool>();
+    final mic = _FakeMicRecorder();
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () {
+        permissionEntered.complete();
+        return permission.future;
+      },
+      phoneMicRecorder: mic,
+    );
+    var dictationPermissions = 0;
+    final dictation = VoiceRecorderProvider(
+        microphone: mic,
+        requestMicrophonePermission: () async {
+          dictationPermissions++;
+        });
+    addTearDown(provider.dispose);
+    addTearDown(dictation.dispose);
+    final start = provider.streamRecording();
+    await permissionEntered.future;
+    await dictation.startRecording();
+    expect(dictationPermissions, 0);
+    expect(mic.starts, 0);
+    final stopping = provider.stopStreamRecording();
+    await pumpEventQueue();
+    permission.complete(true);
+    expect(await start, PhoneCaptureStartResult.cancelled);
+    await stopping;
+    expect(mic.stops, 0);
+    expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+    await dictation.startRecording();
+    expect(dictationPermissions, 1);
+    expect(mic.starts, 1);
+    await dictation.stopRecording();
+    dictation.close();
+  });
+
+  test('account invalidation holds actual phone owner through native stop and suppresses late frames', () async {
+    final authority = _CaptureAuthority('uid-a');
+    final stopEntered = Completer<void>();
+    final stopGate = Completer<void>();
+    final mic = _FakeMicRecorder(stopEntered: stopEntered, stopGate: stopGate);
+    final provider = CaptureProvider(
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+    );
+    addTearDown(provider.dispose);
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    mic.confirmRecording();
+    mic.emit([1, 2, 3, 4]);
+    expect(await start, PhoneCaptureStartResult.started);
+    final bytes = provider.captureDiagnostics.physicalBytes;
+    final transition = AudioCaptureOwnership.shared.quiesceForAccountTransition();
+    await stopEntered.future;
+    mic.emit([9, 9, 9, 9]);
+    expect(provider.captureDiagnostics.physicalBytes, bytes);
+    expect(AudioCaptureOwnership.shared.reserve(source: 'replacement-call', hasAuthority: () => true), isNull);
+    stopGate.complete();
+    await transition;
+    expect(AudioCaptureOwnership.shared.isReserved, isFalse);
+    await provider.stopStreamRecording();
+    expect(mic.stops, 1);
+  });
+
   test('production phone path waits for native capture and a physical frame, not websocket delivery', () async {
     final authority = _CaptureAuthority('uid-a');
     final mic = _FakeMicRecorder();
@@ -771,6 +888,24 @@ void main() {
     expect(authorityReads, 0);
     expect(geolocationSends, 0);
     expect(provider.recordingState, RecordingState.stop);
+  });
+
+  test('diagnostic quiet admission rejects delayed necklace start while status remains stopped', () async {
+    final consent = Completer<bool>();
+    final provider =
+        CaptureProvider(captureConsentAuthorityEnsurer: () => consent.future, activeWalAuthority: () => null);
+    addTearDown(provider.dispose);
+    expect(provider.isCaptureQuiescentForDiagnostic, isTrue);
+    final start = provider.streamDeviceRecording(
+        device: BtDevice(name: 'Synthetic', id: 'synthetic-necklace', type: DeviceType.omi, rssi: -30));
+    await pumpEventQueue();
+    expect(provider.recordingState, RecordingState.stop);
+    expect(provider.recordingDeviceServiceReady, isFalse);
+    expect(provider.hasPendingDeviceCaptureStartForTesting, isTrue);
+    expect(provider.isCaptureQuiescentForDiagnostic, isFalse);
+    consent.complete(false);
+    await start;
+    expect(provider.isCaptureQuiescentForDiagnostic, isFalse); // Error remains explicit, never quiet.
   });
 
   test('delayed phone consent cannot start after capture generation changes', () async {
@@ -1952,9 +2087,21 @@ void main() {
     final stopEntered = Completer<void>();
     final stopGate = Completer<void>();
     final mic = _FakeMicRecorder(stopEntered: stopEntered, stopGate: stopGate);
-    final provider = CaptureProvider(activeAccountAuthority: () => authority, phoneMicRecorder: mic)
-      ..updateRecordingState(RecordingState.record);
+    final provider = CaptureProvider(
+      activeAccountAuthority: () => authority,
+      activeWalAuthority: () => _activeCaptureAuthority(authority),
+      captureConsentAuthorityEnsurer: () async => true,
+      phoneMicrophonePermissionChecker: () async => true,
+      phoneTranscriptionPreparer: () async => true,
+      phoneMicRecorder: mic,
+      phoneAudioSender: (_) => true,
+    );
     addTearDown(provider.dispose);
+    final start = provider.streamRecording();
+    await pumpEventQueue();
+    mic.confirmRecording();
+    mic.emit([1, 2, 3, 4]);
+    expect(await start, PhoneCaptureStartResult.started);
 
     final stopping = provider.stopPhoneCaptureForVoiceTakeover();
     await stopEntered.future;
@@ -1996,7 +2143,7 @@ void main() {
     expect(await takeover, PhoneCaptureStopResult.empty);
     expect(takeoverCompleted, isTrue);
     expect(provider.recordingState, RecordingState.stop);
-    expect(mic.stops, 2);
+    expect(mic.stops, 0, reason: 'the injected capture seam never attempted this microphone');
     expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.noTranscript);
   });
 
@@ -2070,7 +2217,7 @@ void main() {
     await stop;
     expect(stopCompleted, isTrue);
     expect(provider.recordingState, RecordingState.stop);
-    expect(mic.stops, 2);
+    expect(mic.stops, 0, reason: 'the injected capture seam never attempted this microphone');
   });
 
   setUpAll(() async {
@@ -2126,7 +2273,7 @@ void main() {
 
     expect(provider.recordingState, RecordingState.error);
     await pumpEventQueue();
-    expect(mic.stops, 1);
+    expect(mic.stops, 0, reason: 'a seeded UI state does not grant native microphone ownership');
     expect(provider.captureDiagnostics.failure, CaptureDiagnosticFailure.socketClosed);
   });
 
@@ -3760,6 +3907,9 @@ void main() {
     );
     addTearDown(phoneOwner.dispose);
 
+    expect(await phoneOwner.streamRecording(), PhoneCaptureStartResult.cancelled,
+        reason: 'a different provider cannot bypass the shared necklace reservation');
+    await necklaceOwner.stopStreamDeviceRecording();
     expect(await phoneOwner.streamRecording(), PhoneCaptureStartResult.started);
     await phoneOwner.streamDeviceRecording(device: device);
     expect(necklaceStarts, 1);

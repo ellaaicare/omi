@@ -10,6 +10,8 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
+import 'package:omi/ella/services/summary_read_freshness.dart';
+import 'package:omi/ella/services/summary_read_retry.dart';
 import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/services/app_review_service.dart';
 import 'package:omi/services/notifications/merge_notification_handler.dart';
@@ -27,9 +29,7 @@ typedef ConversationsFetchCall = Future<ConversationsFetchResult> Function();
 typedef ConversationsPageFetchCall = Future<ConversationsFetchResult> Function(
     {required int limit, required int offset});
 typedef ConversationDeleteCall = Future<bool> Function(
-  String conversationId,
-  ExactAccountAuthorityVerifier exactAuthority,
-);
+    String conversationId, ExactAccountAuthorityVerifier exactAuthority);
 
 class _ProcessingRetryPoll {
   final String requestId;
@@ -59,6 +59,49 @@ class ConversationProvider extends ChangeNotifier {
   int _paginationRequestGeneration = 0;
   bool hasLoadedConversations = false;
   bool hasFreshConversations = false;
+  ConversationsReadFailure? summaryReadFailure;
+  final Map<String, SummaryReadObservation> _summaryReads = {};
+  SummaryReadObservation _summaryListRead = const SummaryReadObservation(SummaryReadPhase.unchecked);
+  SummaryReadObservation get summaryListRead {
+    final lease = _cachedProjectionLease;
+    return lease != null && _cachedOwnerIsCurrent(lease)
+        ? _summaryListRead
+        : const SummaryReadObservation(SummaryReadPhase.unchecked);
+  }
+
+  SummaryReadObservation summaryReadFor(ServerConversation row) {
+    final lease = _cachedProjectionLease;
+    if (lease == null || !_cachedOwnerIsCurrent(lease)) {
+      return const SummaryReadObservation(SummaryReadPhase.unchecked);
+    }
+    return (_summaryReads[row.id] ?? const SummaryReadObservation(SummaryReadPhase.unchecked)).forConversation(row);
+  }
+
+  void _markSummaryReads(SummaryReadPhase phase, Iterable<ServerConversation> rows) {
+    final now = phase == SummaryReadPhase.checked ? DateTime.now().toUtc() : null;
+    _summaryListRead = SummaryReadObservation(phase, checkedAt: now);
+    for (final row in rows) {
+      _summaryReads[row.id] = SummaryReadObservation(
+        phase,
+        checkedAt: now,
+        versionId: row.activeSummaryVersionId,
+        bodyWitness: summaryReadBodyWitness(row),
+      );
+    }
+  }
+
+  // A newest-page read does not check older retained pages. Restore their prior
+  // read evidence instead of leaving an in-flight promise after the request ends.
+  void _settleUnreturnedSummaryReads(Map<String, SummaryReadObservation> before) {
+    for (final id in _summaryReads.keys.toList()) {
+      if (_summaryReads[id]?.phase != SummaryReadPhase.checking) continue;
+      final prior = before[id];
+      _summaryReads[id] = prior != null && prior.phase != SummaryReadPhase.checking
+          ? prior
+          : const SummaryReadObservation(SummaryReadPhase.unchecked);
+    }
+  }
+
   bool isShowingCachedConversations = false;
   bool showDiscardedConversations = false;
   bool showShortConversations = false;
@@ -79,8 +122,6 @@ class ConversationProvider extends ChangeNotifier {
 
   // Add debounce mechanism for refresh
   Timer? _refreshDebounceTimer;
-  DateTime? _lastRefreshTime;
-  static const Duration _refreshCooldown = Duration(seconds: 60); // Minimum time between refreshes
 
   List<ServerConversation> processingConversations = [];
   List<ServerConversation> failedConversations = [];
@@ -110,6 +151,17 @@ class ConversationProvider extends ChangeNotifier {
   bool canProjectCaptureConversation(String id) => !_captureDeletedConversationIds.contains(id);
 
   bool isFetchingConversations = false;
+  late final SummaryReadRetry _summaryReadRetry = SummaryReadRetry(
+    current: () => _cachedProjectionLease != null && _cachedOwnerIsCurrent(_cachedProjectionLease!),
+    pending: () =>
+        summaryListRead.phase == SummaryReadPhase.stale ||
+        conversations.any((row) => summaryReadFor(row).phase != SummaryReadPhase.checked || summaryNeedsLaterRead(row)),
+    externallyBusy: () => isLoadingConversations,
+    refresh: () async {
+      await forceRefreshConversations();
+    },
+  );
+  void setSummaryPresentationActive(bool active) => _summaryReadRetry.setActive(active);
 
   ConversationProvider({
     RetryConversationProcessingCall retryConversationProcessingCall = retryConversationProcessing,
@@ -147,10 +199,14 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   void reset() {
+    _summaryReadRetry.cancel();
     _operationGeneration++;
     _cachedProjectionLease?.close();
     _cachedProjectionLease = null;
     _captureDeletedConversationIds.clear();
+    _summaryReads.clear();
+    summaryReadFailure = null;
+    _summaryListRead = const SummaryReadObservation(SummaryReadPhase.unchecked);
     conversations = [];
     searchedConversations = [];
     groupedConversations = {};
@@ -183,7 +239,6 @@ class ConversationProvider extends ChangeNotifier {
     selectedConversationIds = {};
     _processingConversationWatchTimer?.cancel();
     _refreshDebounceTimer?.cancel();
-    _lastRefreshTime = null;
     notifyListeners();
   }
 
@@ -427,21 +482,10 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   Future refreshConversations() async {
-    // Debounce mechanism: only refresh if enough time has passed since last refresh
-    final now = DateTime.now();
-    if (_lastRefreshTime != null && now.difference(_lastRefreshTime!) < _refreshCooldown) {
-      Logger.debug(
-        'Skipping conversations refresh - too soon since last refresh (${now.difference(_lastRefreshTime!).inSeconds}s ago)',
-      );
-      return;
-    }
-
-    // Cancel any pending refresh
+    // Coalesce event bursts, but do not suppress a known changed summary for a
+    // minute. Automatic failed/stock readback has a separate bounded backoff.
     _refreshDebounceTimer?.cancel();
-
-    // Set debounce timer
     _refreshDebounceTimer = Timer(const Duration(milliseconds: 500), () {
-      _lastRefreshTime = DateTime.now();
       _fetchNewConversations();
     });
   }
@@ -449,7 +493,6 @@ class ConversationProvider extends ChangeNotifier {
   // Force refresh bypassing debounce (for manual refresh, connection restored, etc.)
   Future forceRefreshConversations() async {
     _refreshDebounceTimer?.cancel();
-    _lastRefreshTime = DateTime.now();
     await _fetchNewConversations();
   }
 
@@ -459,23 +502,43 @@ class ConversationProvider extends ChangeNotifier {
       return;
     }
     if (isLoadingConversations) return;
+    _acquireCacheProjectionLease();
+    final lease = _cachedProjectionLease;
+    if (lease == null || !_cachedOwnerIsCurrent(lease)) return;
+    final generation = _operationGeneration;
+    final requestId = ++_fetchRequestId;
+    bool current() =>
+        generation == _operationGeneration && requestId == _fetchRequestId && _cachedOwnerIsCurrent(lease);
+    summaryReadFailure = null;
+    final previousSummaryReads = Map<String, SummaryReadObservation>.of(_summaryReads);
+    _markSummaryReads(SummaryReadPhase.checking, conversations);
     setLoadingConversations(true);
-    final requestId = _fetchRequestId;
     try {
       final conversationsFuture = _getConversationsFromServer();
       final failuresFuture = _getFailedConversationsFromServer();
-      unawaited(_applyFailedConversations(requestId, failuresFuture));
+      unawaited(_applyFailedConversations(requestId, failuresFuture, isCurrent: current));
       final result = await _waitForConversations(conversationsFuture);
-      if (requestId != _fetchRequestId) return;
-      if (!result.succeeded) return;
-
-      final newConversations = result.conversations.where((item) => canProjectCaptureConversation(item.id)).toList();
+      if (!current()) return;
+      if (!result.succeeded) {
+        summaryReadFailure = result.failure;
+        _markSummaryReads(SummaryReadPhase.stale, conversations);
+        hasFreshConversations = false;
+        isShowingCachedConversations = conversations.isNotEmpty;
+        return;
+      }
+      final known = [...conversations, ...processingConversations];
+      final batch = validateSummaryResponseBatch(result.conversations, lease.uid, previous: known);
+      final newConversations = batch.accepted.where((item) => canProjectCaptureConversation(item.id)).toList();
       failedConversations = _mergeRetryableFailures(failedConversations, [
         ...conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
         ...newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
       ]);
-      hasFreshConversations = true;
-      isShowingCachedConversations = false;
+      _markSummaryReads(SummaryReadPhase.checked, newConversations);
+      if (batch.hasRejected) {
+        _markSummaryReads(SummaryReadPhase.stale, known.where((row) => batch.rejectedIds.contains(row.id)));
+      }
+      hasFreshConversations = !batch.hasRejected;
+      isShowingCachedConversations = known.any((row) => batch.rejectedIds.contains(row.id));
 
       List<ServerConversation> upsertConvos = [];
 
@@ -521,9 +584,17 @@ class ConversationProvider extends ChangeNotifier {
       _groupConversationsByDateWithoutNotify();
       if (selectedFolderId == null) SharedPreferencesUtil().cachedConversations = conversations;
       notifyListeners();
+    } catch (_) {
+      if (current()) {
+        _markSummaryReads(SummaryReadPhase.stale, conversations);
+        hasFreshConversations = false;
+        isShowingCachedConversations = conversations.isNotEmpty;
+      }
     } finally {
-      if (requestId == _fetchRequestId) {
+      if (current()) {
+        _settleUnreturnedSummaryReads(previousSummaryReads);
         setLoadingConversations(false);
+        _summaryReadRetry.reconsider();
       }
     }
   }
@@ -612,13 +683,20 @@ class ConversationProvider extends ChangeNotifier {
     _acquireCacheProjectionLease();
     _hydrateOwnedInitialCache();
     final cacheLease = _cachedProjectionLease;
+    final demoMode = SharedPreferencesUtil().demoMode;
+    if (!demoMode && (cacheLease == null || !_cachedOwnerIsCurrent(cacheLease))) return;
     bool requestIsCurrent() =>
         operationGeneration == _operationGeneration &&
         requestId == _fetchRequestId &&
-        (cacheLease == null || _cachedOwnerIsCurrent(cacheLease));
+        (demoMode || (cacheLease != null && _cachedOwnerIsCurrent(cacheLease)));
+    summaryReadFailure = null;
+    final previousSummaryReads = Map<String, SummaryReadObservation>.of(_summaryReads);
+    _markSummaryReads(SummaryReadPhase.checking, conversations);
     setLoadingConversations(true);
     try {
       late final List<ServerConversation> fetchedConversations;
+      SummaryResponseBatch? summaryBatch;
+      List<ServerConversation> retainedRejected = [];
       if (SharedPreferencesUtil().demoMode) {
         fetchedConversations = DemoFixtures.conversations();
         failedConversations = [];
@@ -634,16 +712,25 @@ class ConversationProvider extends ChangeNotifier {
           return;
         }
         if (!result.succeeded) {
+          summaryReadFailure = result.failure;
           if (conversations.isEmpty && selectedFolderId == null) {
             conversations = _readOwnedCurrentCache(cacheLease);
           }
+          _markSummaryReads(SummaryReadPhase.stale, conversations);
+          hasFreshConversations = false;
           isShowingCachedConversations =
               cacheLease != null && _cachedOwnerIsCurrent(cacheLease) && conversations.isNotEmpty;
           if (searchedConversations.isEmpty) searchedConversations = conversations;
           _groupConversationsByDateWithoutNotify();
           return;
         }
-        fetchedConversations = result.conversations.where((item) => canProjectCaptureConversation(item.id)).toList();
+        final known = [...conversations, ...processingConversations];
+        summaryBatch = validateSummaryResponseBatch(result.conversations, cacheLease!.uid, previous: known);
+        retainedRejected = known.where((row) => summaryBatch!.rejectedIds.contains(row.id)).toList();
+        fetchedConversations = [
+          ...summaryBatch.accepted,
+          ...retainedRejected,
+        ].where((item) => canProjectCaptureConversation(item.id)).toList();
         hasMoreConversations = result.conversations.length >= _conversationPageSize;
         loadMoreConversationsFailed = false;
         _conversationPageOffset = result.conversations.length;
@@ -651,12 +738,14 @@ class ConversationProvider extends ChangeNotifier {
 
       if (!requestIsCurrent()) return;
       conversations = fetchedConversations;
+      _markSummaryReads(SummaryReadPhase.checked, summaryBatch?.accepted ?? fetchedConversations);
+      if (summaryBatch?.hasRejected == true) _markSummaryReads(SummaryReadPhase.stale, retainedRejected);
       failedConversations = _mergeRetryableFailures(
         failedConversations,
         conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
       );
-      hasFreshConversations = true;
-      isShowingCachedConversations = false;
+      hasFreshConversations = summaryBatch?.hasRejected != true;
+      isShowingCachedConversations = retainedRejected.isNotEmpty;
 
       // processing convos
       processingConversations = conversations.where((m) => m.status == ConversationStatus.processing).toList();
@@ -672,10 +761,18 @@ class ConversationProvider extends ChangeNotifier {
         searchedConversations = conversations;
       }
       _groupConversationsByDateWithoutNotify();
+    } catch (_) {
+      if (requestIsCurrent()) {
+        _markSummaryReads(SummaryReadPhase.stale, conversations);
+        hasFreshConversations = false;
+        isShowingCachedConversations = conversations.isNotEmpty;
+      }
     } finally {
       if (requestIsCurrent()) {
         hasLoadedConversations = true;
+        _settleUnreturnedSummaryReads(previousSummaryReads);
         setLoadingConversations(false);
+        _summaryReadRetry.reconsider();
       }
     }
   }
@@ -810,8 +907,14 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   Future<void> ensureFreshConversations() {
-    if (hasFreshConversations) return Future<void>.value();
-    return getInitialConversations();
+    final checkedAt = summaryListRead.checkedAt;
+    if (hasFreshConversations &&
+        summaryListRead.phase == SummaryReadPhase.checked &&
+        checkedAt != null &&
+        DateTime.now().toUtc().difference(checkedAt) < const Duration(seconds: 60)) {
+      return Future<void>.value();
+    }
+    return conversations.isEmpty ? getInitialConversations() : forceRefreshConversations();
   }
 
   List<ServerConversation> get visibleConversations => _filterOutConvos(conversations);
@@ -1103,13 +1206,28 @@ class ConversationProvider extends ChangeNotifier {
         loadMoreConversationsFailed = true;
         return;
       }
-      final newConversations = result.conversations.where((item) => canProjectCaptureConversation(item.id)).toList();
+      final known = [...conversations, ...processingConversations];
+      final batch = validateSummaryResponseBatch(result.conversations, lease.uid, previous: known);
+      final newConversations = batch.accepted.where((item) => canProjectCaptureConversation(item.id)).toList();
+      final previousListRead = _summaryListRead;
+      _markSummaryReads(SummaryReadPhase.checked, newConversations);
+      _summaryListRead = previousListRead;
+      if (batch.hasRejected) {
+        _markSummaryReads(SummaryReadPhase.stale, known.where((row) => batch.rejectedIds.contains(row.id)));
+        loadMoreConversationsFailed = true;
+        hasFreshConversations = false;
+      }
       _conversationPageOffset += result.conversations.length;
       hasMoreConversations = result.conversations.length >= _conversationPageSize;
       failedConversations = _mergeRetryableFailures(
         failedConversations,
         newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
       );
+      // Promotion to completed retires the old processing projection. Keeping
+      // both would let stale duplicate state compete with canonical authority.
+      final completedIds =
+          newConversations.where((item) => item.status == ConversationStatus.completed).map((item) => item.id).toSet();
+      processingConversations.removeWhere((item) => completedIds.contains(item.id));
       final processingById = <String, ServerConversation>{
         for (final conversation in processingConversations) conversation.id: conversation,
       };
@@ -1373,6 +1491,7 @@ class ConversationProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _summaryReadRetry.dispose();
     _operationGeneration++;
     _cachedProjectionLease?.close();
     _cachedProjectionLease = null;

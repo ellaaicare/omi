@@ -379,9 +379,8 @@ class AppProvider extends BaseProvider {
     final newAppId = appId ?? "";
     if (selectedChatAppId != newAppId) {
       selectedChatAppId = newAppId;
-      // Only notify if there are listeners specifically for chat app selection
-      // Apps page doesn't need to rebuild for this change
-      // notifyListeners(); // Commented out to prevent apps page rebuilds
+      // Retire the previous conversation's local editor before rendering the next.
+      notifyListeners();
     }
   }
 

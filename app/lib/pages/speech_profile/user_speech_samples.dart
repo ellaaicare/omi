@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'package:just_audio/just_audio.dart';
+import 'package:omi/ella/services/admitted_audio_player.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/http/api/speech_profile.dart';
@@ -106,10 +106,12 @@ class _UserSpeechSamplesState extends State<UserSpeechSamplesView> {
                             ),
                             onPressed: () => provider.playPause(index),
                           ),
-                          title: Text(index == 0 ? context.l10n.speechProfile : context.l10n.additionalSampleIndex(index.toString())),
+                          title: Text(index == 0
+                              ? context.l10n.speechProfile
+                              : context.l10n.additionalSampleIndex(index.toString())),
                           // _getFileNameFromUrl(samplesUrl[index])
                           subtitle: FutureBuilder<Duration?>(
-                            future: AudioPlayer().setUrl(provider.samplesUrl[index]),
+                            future: _sampleDuration(provider.samplesUrl[index]),
                             builder: (context, snapshot) {
                               if (snapshot.hasData) {
                                 return Text(context.l10n.durationSeconds(snapshot.data!.inSeconds.toString()));
@@ -150,5 +152,14 @@ class _UserSpeechSamplesState extends State<UserSpeechSamplesView> {
         );
       },
     );
+  }
+}
+
+Future<Duration?> _sampleDuration(String url) async {
+  final player = AudioPlayer();
+  try {
+    return await player.setUrl(url);
+  } finally {
+    await player.dispose();
   }
 }

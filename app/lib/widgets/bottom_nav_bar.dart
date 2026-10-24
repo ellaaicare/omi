@@ -1,183 +1,191 @@
+import 'package:omi/ella/widgets/ella_v7_surfaces.dart';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
-
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/home_provider.dart';
-import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
-/// Ella 4-tab bottom navigation: Home, Chat, Talk, Settings.
-///
-/// - Text labels always visible (elder-friendly)
-/// - Teal active color, no center record button
-/// - At least 80dp high, with additional space for scaled labels and safe area
-class BottomNavBar extends StatelessWidget {
-  const BottomNavBar({
-    super.key,
-    required this.onTabTap,
-  });
+/// Existing page indices preserve routing, drafts and capture lifecycles.
+class IrisDestination {
+  const IrisDestination(this.index, this.label, this.icon);
+  final int index;
+  final String label;
+  final IconData icon;
+}
 
+List<IrisDestination> irisDestinations(BuildContext context) => [
+      IrisDestination(1, context.l10n.bottomNavChat, Icons.chat_bubble_outline_rounded),
+      IrisDestination(0, context.l10n.irisJournal, Icons.article_outlined),
+      IrisDestination(3, context.l10n.irisMore, Icons.more_horiz_rounded),
+    ];
+
+class BottomNavBar extends StatelessWidget {
+  const BottomNavBar({super.key, required this.onTabTap});
   final void Function(int index, bool isRepeat) onTabTap;
 
-  static TextStyle _labelStyle(BuildContext context, {required bool isSelected}) {
-    final textScale = MediaQuery.textScalerOf(context).scale(14) / 14;
-    return Theme.of(context).textTheme.bodyMedium!.copyWith(
-          color: isSelected ? EllaColors.primary : EllaColors.textTertiary,
-          fontSize: textScale >= 1.8 ? 10 : 14,
-          fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
-        );
-  }
+  static bool compact(BuildContext context) => MediaQuery.textScalerOf(context).scale(1) >= 2;
 
-  /// Shared with page clearances so larger labels never cover page controls.
   static double navigationHeight(BuildContext context) {
-    final media = MediaQuery.of(context);
-    final tabWidth = (media.size.width - media.padding.horizontal) / 4;
-    final labels = [
-      context.l10n.bottomNavHome,
-      context.l10n.bottomNavChat,
-      context.l10n.bottomNavTalk,
-      context.l10n.bottomNavSettings,
-    ];
-    var height = EllaSizes.navBarHeight;
-    for (final label in labels) {
+    if (EllaRailScope.active(context) || EllaBottomNavigationPlacementScope.active(context)) return 0;
+    // At accessibility text sizes, a narrow three-column label fragments into
+    // individual letters. Keep the destinations in the semantics tree instead.
+    if (compact(context)) return 64;
+    final safe = MediaQuery.paddingOf(context);
+    final width = math.min(350, MediaQuery.sizeOf(context).width - safe.left - safe.right - 24) / 3 - 24;
+    double labelHeight = 0;
+    for (final destination in irisDestinations(context)) {
       final painter = TextPainter(
-        text: TextSpan(text: label, style: _labelStyle(context, isSelected: true)),
-        textDirection: Directionality.of(context),
-        textScaler: media.textScaler,
-        locale: Localizations.localeOf(context),
-        textAlign: TextAlign.center,
-      )..layout(maxWidth: tabWidth);
-      final requiredHeight = EllaSizes.iconMedium + 4 + painter.height + 16;
-      if (requiredHeight > height) height = requiredHeight.ceilToDouble();
+          text: TextSpan(
+              text: destination.label,
+              style:
+                  TextStyle(fontFamily: EllaTextStyles.uiFont, fontSize: 16, height: 1.2, fontWeight: FontWeight.w700)),
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context))
+        ..layout(maxWidth: math.max(1, width));
+      labelHeight = math.max(labelHeight, painter.height);
       painter.dispose();
     }
-    return height;
+    return math.max(MediaQuery.textScalerOf(context).scale(1) >= 1.2 ? 76 : 72, labelHeight + 50);
   }
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<HomeProvider>(
-      builder: (context, home, child) {
-        final height = navigationHeight(context);
-        return Align(
-          alignment: Alignment.bottomCenter,
-          child: Container(
-            width: double.infinity,
-            decoration: const BoxDecoration(
-              color: EllaColors.bgSecondary,
-              border: Border(
-                top: BorderSide(color: EllaColors.bgTertiary, width: 0.5),
-              ),
-            ),
-            child: SafeArea(
-              top: false,
-              child: SizedBox(
-                height: height,
-                child: Row(
-                  children: [
-                    _NavTab(
-                      icon: FontAwesomeIcons.house,
-                      label: context.l10n.bottomNavHome,
-                      height: height,
-                      isSelected: home.selectedIndex == 0,
-                      onTap: () {
-                        HapticFeedback.mediumImpact();
-                        MixpanelManager().bottomNavigationTabClicked('Home');
-                        primaryFocus?.unfocus();
-                        onTabTap(0, home.selectedIndex == 0);
-                      },
-                    ),
-                    _NavTab(
-                      icon: FontAwesomeIcons.solidComment,
-                      label: context.l10n.bottomNavChat,
-                      height: height,
-                      isSelected: home.selectedIndex == 1,
-                      onTap: () {
-                        HapticFeedback.mediumImpact();
-                        MixpanelManager().bottomNavigationTabClicked('Chat');
-                        primaryFocus?.unfocus();
-                        onTabTap(1, home.selectedIndex == 1);
-                      },
-                    ),
-                    _NavTab(
-                      icon: FontAwesomeIcons.waveSquare,
-                      label: context.l10n.bottomNavTalk,
-                      height: height,
-                      isSelected: home.selectedIndex == 2,
-                      onTap: () {
-                        HapticFeedback.mediumImpact();
-                        MixpanelManager().bottomNavigationTabClicked('Talk');
-                        primaryFocus?.unfocus();
-                        onTabTap(2, home.selectedIndex == 2);
-                      },
-                    ),
-                    _NavTab(
-                      icon: FontAwesomeIcons.gear,
-                      label: context.l10n.bottomNavSettings,
-                      height: height,
-                      isSelected: home.selectedIndex == 3,
-                      onTap: () {
-                        HapticFeedback.mediumImpact();
-                        MixpanelManager().bottomNavigationTabClicked('Settings');
-                        primaryFocus?.unfocus();
-                        onTabTap(3, home.selectedIndex == 3);
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
+    final selected = context.watch<HomeProvider>().selectedIndex;
+    final palette = EllaPalette.of(context);
+    final compactNavigation = compact(context);
+    return Align(
+        alignment: Alignment.bottomCenter,
+        child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 350),
+                child: EllaV7Glass(
+                    radius: 33,
+                    child: Material(
+                      color: Colors.transparent,
+                      child: SafeArea(
+                          top: false,
+                          child: SizedBox(
+                            height: navigationHeight(context),
+                            child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 12),
+                                child: Row(children: [
+                                  for (final destination in irisDestinations(context))
+                                    Expanded(
+                                        child: Semantics(
+                                      label: destination.label,
+                                      excludeSemantics: true,
+                                      onTap: () {
+                                        primaryFocus?.unfocus();
+                                        onTabTap(destination.index, selected == destination.index);
+                                      },
+                                      selected:
+                                          selected == destination.index || (selected == 2 && destination.index == 1),
+                                      button: true,
+                                      child: InkWell(
+                                        key: Key('iris-navigation-${destination.index}'),
+                                        onTap: () {
+                                          primaryFocus?.unfocus();
+                                          onTabTap(destination.index, selected == destination.index);
+                                        },
+                                        child: Padding(
+                                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                                            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                              Container(
+                                                  key: Key('iris-navigation-pill-${destination.index}'),
+                                                  width: 56,
+                                                  height: 30,
+                                                  decoration: BoxDecoration(
+                                                      color: selected == destination.index ||
+                                                              (selected == 2 && destination.index == 1)
+                                                          ? palette.ink
+                                                          : Colors.transparent,
+                                                      borderRadius: BorderRadius.circular(15)),
+                                                  child: Icon(destination.icon,
+                                                      size: 24,
+                                                      color: selected == destination.index ||
+                                                              (selected == 2 && destination.index == 1)
+                                                          ? palette.paper
+                                                          : palette.ink)),
+                                              if (!compactNavigation) ...[
+                                                const SizedBox(height: 4),
+                                                Text(destination.label,
+                                                    textAlign: TextAlign.center,
+                                                    softWrap: true,
+                                                    style: TextStyle(
+                                                        fontFamily: EllaTextStyles.uiFont,
+                                                        fontSize: 16,
+                                                        height: 1.2,
+                                                        fontWeight: selected == destination.index
+                                                            ? FontWeight.w700
+                                                            : FontWeight.w500,
+                                                        color: palette.ink)),
+                                              ],
+                                            ])),
+                                      ),
+                                    )),
+                                ])),
+                          )),
+                    )))));
   }
 }
 
-class _NavTab extends StatelessWidget {
-  const _NavTab({
-    required this.icon,
-    required this.label,
-    required this.height,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final double height;
-  final bool isSelected;
-  final VoidCallback onTap;
-
+class EllaNavigationRail extends StatelessWidget {
+  const EllaNavigationRail({super.key, required this.onTabTap});
+  final void Function(int index, bool isRepeat) onTabTap;
+  static bool fits(BuildContext context) =>
+      MediaQuery.sizeOf(context).width >= 900 && MediaQuery.textScalerOf(context).scale(1) < 2;
   @override
   Widget build(BuildContext context) {
-    final color = isSelected ? EllaColors.primary : EllaColors.textTertiary;
-    return Expanded(
-      child: Semantics(
-        button: true,
-        selected: isSelected,
-        child: InkWell(
-          onTap: onTap,
-          child: SizedBox(
-            height: height,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, color: color, size: EllaSizes.iconMedium),
-                const SizedBox(height: 4),
-                Text(
-                  label,
-                  textAlign: TextAlign.center,
-                  style: BottomNavBar._labelStyle(context, isSelected: isSelected),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+    final palette = EllaPalette.of(context);
+    final selected = context.watch<HomeProvider>().selectedIndex;
+    return SafeArea(
+        right: false,
+        child: SizedBox(
+          key: const Key('iris-navigation-rail'),
+          width: 130,
+          child: ListView(children: [
+            for (final destination in irisDestinations(context))
+              ListTile(
+                selected: selected == destination.index,
+                textColor: palette.ink,
+                selectedColor: palette.ink,
+                leading: Icon(destination.icon),
+                title: Text(destination.label),
+                onTap: () {
+                  primaryFocus?.unfocus();
+                  onTabTap(destination.index, selected == destination.index);
+                },
+              )
+          ]),
+        ));
   }
+}
+
+class EllaRailScope extends InheritedWidget {
+  const EllaRailScope({super.key, this.enabled = true, required super.child});
+  final bool enabled;
+  static bool active(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<EllaRailScope>()?.enabled ?? false;
+  @override
+  bool updateShouldNotify(EllaRailScope oldWidget) => enabled != oldWidget.enabled;
+}
+
+/// The shell owns one live dock; child memory pages must not mount another.
+class EllaCaptureDockPlacementScope extends InheritedWidget {
+  const EllaCaptureDockPlacementScope({super.key, required super.child});
+  static bool active(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<EllaCaptureDockPlacementScope>() != null;
+  @override
+  bool updateShouldNotify(EllaCaptureDockPlacementScope oldWidget) => false;
+}
+
+/// Pages receive a viewport already ending above the shell navigation.
+class EllaBottomNavigationPlacementScope extends InheritedWidget {
+  const EllaBottomNavigationPlacementScope({super.key, required super.child});
+  static bool active(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<EllaBottomNavigationPlacementScope>() != null;
+  @override
+  bool updateShouldNotify(EllaBottomNavigationPlacementScope oldWidget) => false;
 }

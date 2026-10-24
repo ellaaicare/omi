@@ -19,6 +19,33 @@ void main() {
     SharedPreferencesUtil().uid = 'uid-a';
   });
 
+  for (final timedOut in [false, true]) {
+    testWidgets('enrichment readiness has accurate bounded-retry explanation timeout=$timedOut', (tester) async {
+      final provider = EllaProvisioningProvider()
+        ..state = EllaProvisioningState.degraded
+        ..errorCode = timedOut ? 'provisioning_timeout' : 'account_enrichment_worker_unavailable'
+        ..receipt = const EllaProvisioningReceipt(
+            state: EllaProvisioningState.degraded,
+            retryable: true,
+            errorCode: 'account_enrichment_worker_unavailable',
+            supportCode: 'ELLA-FICTIONAL');
+      addTearDown(provider.dispose);
+      await tester.pumpWidget(ChangeNotifierProvider.value(
+          value: provider,
+          child: const MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: EllaProvisioningGatePage(readyChild: SizedBox(key: Key('blocked-home')), startOnMount: false))));
+      await tester.pumpAndSettle();
+      expect(find.text('Setup is waiting for Ella'), findsOneWidget);
+      expect(find.textContaining(timedOut ? 'Automatic checks have stopped' : 'check again for a limited time'),
+          findsOneWidget);
+      expect(find.text('Setup is paused'), findsNothing);
+      expect(find.byKey(const Key('blocked-home')), findsNothing);
+      expect(find.text('ELLA-FICTIONAL'), findsOneWidget);
+    });
+  }
+
   testWidgets('setup failure remains fail closed and exposes its support code', (tester) async {
     final provider = EllaProvisioningProvider()
       ..state = EllaProvisioningState.blocked
@@ -258,7 +285,7 @@ void main() {
     expect(find.text('Setup is waiting for a connection'), findsNothing);
   });
 
-  testWidgets('replacement consent receipt closes Home until provisioning recaptures authority', (tester) async {
+  testWidgets('same-owner replacement receipt retains Home presentation while recapturing authority', (tester) async {
     final transport = _DelayedResumeTransport();
     final provider = EllaProvisioningProvider(transport: transport);
     addTearDown(provider.dispose);
@@ -286,9 +313,10 @@ void main() {
     provider.setConsentReceiptId('receipt-b');
     await tester.pump();
 
-    expect(provider.isRevalidatingOperational, isFalse);
-    expect(find.byKey(const Key('ready-child')), findsNothing);
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(provider.isOperational, isFalse);
+    expect(provider.isRevalidatingOperational, isTrue);
+    expect(find.byKey(const Key('ready-child')), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
 
     transport.revalidation.complete(_readyResponse());
     await tester.pumpAndSettle();

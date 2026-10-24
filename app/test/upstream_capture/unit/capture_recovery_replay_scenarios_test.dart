@@ -315,7 +315,8 @@ void main() {
     await captureSeconds(105, sessionId: sessionId, frameCursor: 500);
 
     expect(File('${tempDir.path}/wals.json').existsSync(), isTrue, reason: 'WAL index must be on disk');
-    final walIndexFiles = tempDir.listSync().whereType<File>().map((f) => f.path.split('/').last).toList();
+    final walIndexFiles =
+        tempDir.listSync(recursive: true).whereType<File>().map((f) => f.path.split('/').last).toList();
     expect(walIndexFiles.any((n) => n.startsWith('audio_')), isTrue, reason: 'audio .bin must be on disk');
 
     world.killProcess();

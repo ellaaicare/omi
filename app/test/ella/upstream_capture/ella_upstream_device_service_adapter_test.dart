@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart' as legacy_preferences;
@@ -394,6 +395,7 @@ void main() {
 
     expect(service.stopCalls, 1);
     expect(service.startCalls, 0);
+    expect(DebugLogManager.deviceAdapterState, 'stopped');
   });
 
   test('consent denial leaves discovery available without connecting capture', () async {

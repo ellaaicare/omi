@@ -5,7 +5,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:collection/collection.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:just_audio/just_audio.dart';
+import 'package:omi/ella/services/admitted_audio_player.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/http/api/audio.dart';
@@ -13,14 +13,15 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/gen/assets.gen.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
-import 'package:omi/pages/conversation_detail/widgets/summarized_apps_sheet.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 enum ConversationBottomBarMode {
   recording, // During active recording (no summary icon)
-  detail // For viewing completed conversations
+  detail, // For viewing completed conversations
+  memorySource // Labeled source/summary controls inside the memory content hierarchy
 }
 
 enum ConversationTab { transcript, summary, actionItems }
@@ -313,7 +314,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.hasSegments) {
+    if (!widget.hasSegments && widget.mode != ConversationBottomBarMode.memorySource) {
       return const SizedBox();
     }
 
@@ -323,10 +324,53 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
   }
 
   Widget _buildBottomBar(BuildContext context) {
+    if (widget.mode == ConversationBottomBarMode.memorySource) return _buildMemorySourceBar(context);
     if (widget.mode == ConversationBottomBarMode.recording) {
       return _buildRecordingBar();
     }
     return _buildDetailBar(context);
+  }
+
+  Widget _buildMemorySourceBar(BuildContext context) {
+    final palette = EllaPalette.of(context);
+    final choices = <ConversationTab, String>{
+      ConversationTab.summary: context.l10n.irisMemorySummaryLabel,
+      if (widget.hasSegments || widget.selectedTab == ConversationTab.transcript)
+        ConversationTab.transcript: (widget.conversation?.transcriptSegments.isNotEmpty ?? false)
+            ? context.l10n.irisOriginalWords
+            : context.l10n.irisMemorySourceLabel,
+      if (widget.hasActionItems || widget.selectedTab == ConversationTab.actionItems)
+        ConversationTab.actionItems: context.l10n.actionItems,
+    };
+    final selectedLabel = choices[widget.selectedTab] ?? context.l10n.irisMemorySummaryLabel;
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      PopupMenuButton<ConversationTab>(
+        key: const Key('iris-memory-section-menu'),
+        color: palette.elevatedCard,
+        surfaceTintColor: Colors.transparent,
+        tooltip: context.l10n.irisMemorySourceAction,
+        onSelected: widget.onTabSelected,
+        itemBuilder: (_) => [
+          for (final choice in choices.entries)
+            PopupMenuItem(
+              value: choice.key,
+              child: Text(choice.value, style: EllaTypography.of(context).body),
+            )
+        ],
+        child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(children: [
+                  Expanded(
+                      child: Text(selectedLabel,
+                          style: TextStyle(color: palette.ink, fontSize: 16, fontWeight: FontWeight.w600))),
+                  Icon(Icons.expand_more, color: palette.ink)
+                ]))),
+      ),
+      if (widget.selectedTab == ConversationTab.transcript && (widget.conversation?.hasAudio() ?? false))
+        _buildTranscriptPillContent(),
+    ]);
   }
 
   Widget _buildRecordingBar() {
@@ -678,8 +722,8 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
     const double progressBarWidth = 90.0;
 
     if (_audioPlayer == null) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
+      return Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           Container(
             width: progressBarWidth,
@@ -716,8 +760,8 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
                 ? (combinedPosition.inMilliseconds / _totalDuration.inMilliseconds).clamp(0.0, 1.0)
                 : 0.0;
 
-            return Row(
-              mainAxisSize: MainAxisSize.min,
+            return Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 // Progress bar with tap-to-seek
                 GestureDetector(

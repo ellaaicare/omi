@@ -32,6 +32,7 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
 
   @override
   Future<DeviceDiscoveryResult> discover({int timeout = 5}) async {
+    final diagnosticPass = DebugLogManager.discoveryProvenance.current;
     if (!await _bluetoothReadiness.ensureReady(BluetoothUse.discovery)) {
       return const DeviceDiscoveryResult(devices: [], isBlocked: true);
     }
@@ -47,6 +48,10 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
 
     void handleCandidate(BlePeripheral peripheral) {
       seenCount++;
+      final ledger = DebugLogManager.discoveryProvenance;
+      ledger.candidate(diagnosticPass, peripheral.uuid, ledger.candidateSource(
+        source: peripheral.source, advertisedName: peripheral.hasAdvertisedLocalName,
+        cachedName: peripheral.hasPeripheralName));
       DebugLogManager.deviceCandidatesSeen++;
       DebugLogManager.recordDeviceDiagnostic(
         'NativeBluetoothDiscoverer: candidate hasAdvName=${peripheral.hasAdvertisedLocalName} '
@@ -88,7 +93,9 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
         // never surface it. Ask natively for those two additional sources up front — they
         // return immediately, no active scan involved.
         try {
-          final retrieved = await _hostApi.retrieveConnectedAndKnownPeripherals([omiServiceUuid], _knownDeviceIds());
+          final knownIds = _knownDeviceIds();
+          DebugLogManager.discoveryProvenance.knownInput(diagnosticPass, knownIds.length);
+          final retrieved = await _hostApi.retrieveConnectedAndKnownPeripherals([omiServiceUuid], knownIds);
           for (final peripheral in retrieved) {
             handleCandidate(peripheral);
           }
@@ -128,6 +135,12 @@ class NativeBluetoothDiscoverer extends DeviceDiscoverer {
       BleBridge.instance.peripheralDiscoveredCallback = previousCallback;
     }
 
+    for (final peripheral in results.where(_isSupportedPeripheral)) {
+      final ledger = DebugLogManager.discoveryProvenance;
+      ledger.admitted(diagnosticPass, peripheral.uuid, ledger.candidateSource(
+        source: peripheral.source, advertisedName: peripheral.hasAdvertisedLocalName,
+        cachedName: peripheral.hasPeripheralName));
+    }
     final devices = results.where(_isSupportedPeripheral).map(_peripheralToDevice).toList()
       ..sort((a, b) => b.rssi.compareTo(a.rssi));
 

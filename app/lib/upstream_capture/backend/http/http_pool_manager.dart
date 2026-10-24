@@ -11,7 +11,7 @@ import 'package:omi/upstream_capture/services/dev_controls/journey_faults.dart';
 class HttpPoolManager {
   static final HttpPoolManager instance = HttpPoolManager._();
 
-  late final IOClient _client;
+  late final http.Client _client;
   late final Pool _pool;
 
   // GET deduplication: URL -> pending future
@@ -36,6 +36,13 @@ class HttpPoolManager {
     request.headers['X-Request-Start-Time'] = (DateTime.now().millisecondsSinceEpoch / 1000).toString();
   }
 
+  /// Creates an isolated pool with a fake transport for regression tests.
+  @visibleForTesting
+  HttpPoolManager.forTesting(http.Client client) {
+    _client = client;
+    _pool = Pool(10, timeout: const Duration(seconds: 60));
+  }
+
   Future<http.Response> send(
     http.Request Function() requestBuilder, {
     Duration timeout = const Duration(seconds: 30),
@@ -55,8 +62,13 @@ class HttpPoolManager {
     });
 
     if (isGet) {
-      _pendingGets[url] = future;
-      future.whenComplete(() => _pendingGets.remove(url));
+      // Return the cleanup future too: an ignored whenComplete branch would
+      // report a second unhandled error when the request fails.
+      final tracked = future.whenComplete(() {
+        _pendingGets.remove(url);
+      });
+      _pendingGets[url] = tracked;
+      return tracked;
     }
     return future;
   }

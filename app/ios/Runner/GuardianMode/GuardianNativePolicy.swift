@@ -34,8 +34,16 @@ final class GuardianModeAvailability {
     }
 
     func captureLease() -> GuardianWorkLease? {
-        leaseGate.captureLease()
+        guard let uid = currentUID, GuardianOutputStopBarrier.shared.operation(for: uid) == nil else { return nil }
+        return leaseGate.captureLease()
     }
+
+    func retireOutput(_ lease: GuardianWorkLease) -> GuardianWorkLease? {
+        leaseGate.retireOutput(lease)
+    }
+
+    func captureOwnerLease() -> GuardianWorkLease? { leaseGate.captureOwnerLease() }
+    func isExactOwnerLease(_ lease: GuardianWorkLease) -> Bool { leaseGate.isExactOwnerLease(lease) }
 
     func isCurrent(_ lease: GuardianWorkLease) -> Bool {
         leaseGate.isCurrent(lease)
@@ -114,6 +122,7 @@ final class GuardianFirebaseTokenBridge: @unchecked Sendable {
 final class GuardianWorkLeaseGate {
     private let lock = NSLock()
     private var enabled = false
+    private var outputSuspended = false
     private var generation: UInt64 = 0
     private var uid: String?
 
@@ -140,6 +149,7 @@ final class GuardianWorkLeaseGate {
         }
         generation &+= 1
         self.enabled = shouldEnable
+        if self.uid != normalizedUID { outputSuspended = false }
         self.uid = normalizedUID
         return generation
     }
@@ -162,28 +172,49 @@ final class GuardianWorkLeaseGate {
         guard self.uid != normalizedUID else { return false }
         generation &+= 1
         enabled = false
+        outputSuspended = false
         self.uid = normalizedUID
         return true
+    }
+
+    /// Invalidates every outstanding output callback without changing mode or owner.
+    func retireOutput(_ lease: GuardianWorkLease) -> GuardianWorkLease? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard enabled, uid == lease.uid, generation == lease.generation else { return nil }
+        generation &+= 1
+        outputSuspended = true
+        return GuardianWorkLease(generation: generation, uid: lease.uid)
+    }
+
+    func captureOwnerLease() -> GuardianWorkLease? {
+        lock.lock(); defer { lock.unlock() }
+        guard enabled, let uid else { return nil }
+        return GuardianWorkLease(generation: generation, uid: uid)
+    }
+    func isExactOwnerLease(_ lease: GuardianWorkLease) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return enabled && generation == lease.generation && uid == lease.uid
     }
 
     func captureLease() -> GuardianWorkLease? {
         lock.lock()
         defer { lock.unlock() }
-        guard enabled, let uid else { return nil }
+        guard enabled, !outputSuspended, let uid else { return nil }
         return GuardianWorkLease(generation: generation, uid: uid)
     }
 
     func isCurrent(_ lease: GuardianWorkLease) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return enabled && generation == lease.generation && uid == lease.uid
+        return enabled && !outputSuspended && generation == lease.generation && uid == lease.uid
     }
 
     @discardableResult
     func performIfCurrent(_ lease: GuardianWorkLease, _ sideEffect: () -> Bool) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard enabled && generation == lease.generation && uid == lease.uid else { return false }
+        guard enabled && !outputSuspended && generation == lease.generation && uid == lease.uid else { return false }
         return sideEffect()
     }
 
@@ -548,5 +579,135 @@ enum GuardianNotificationPolicy {
 
     private static func boolValue(_ value: Any?) -> Bool {
         value as? Bool == true || normalized(value) == "true"
+    }
+}
+
+/// Durable owner-scoped Stop barrier. Only the server discard integration may
+/// clear it after matching the operation receipt; no start/configure path clears it.
+final class GuardianOutputStopBarrier {
+    static let shared = GuardianOutputStopBarrier(defaults: .standard)
+    private let defaults: UserDefaults
+    private let lock = NSLock()
+    private let key = "guardianOutputDiscardBarriers"
+    init(defaults: UserDefaults) { self.defaults = defaults }
+    func operation(for uid: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return (defaults.dictionary(forKey: key) as? [String: String])?[uid]
+    }
+    func record(uid: String, operation: String) {
+        lock.lock(); defer { lock.unlock() }
+        var barriers = defaults.dictionary(forKey: key) as? [String: String] ?? [:]
+        barriers[uid] = operation
+        defaults.set(barriers, forKey: key)
+    }
+}
+
+/// Strict delivery media ticket, independent of legacy polling/health recovery.
+struct GuardianStrictMediaTicket: Equatable {
+    let uid: String
+    let epoch: String
+    let session: String
+    let generation: Int
+    let presentation: String
+}
+
+final class GuardianStrictMediaGate {
+    private let lock = NSLock()
+    private var ticket: GuardianStrictMediaTicket?
+    private var closed = true
+    private var floor = 0
+    private var retiredEpochs = Set<String>()
+    func activate(_ next: GuardianStrictMediaTicket) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard next.generation >= floor, !retiredEpochs.contains(next.epoch),
+              ["audio", "text_only"].contains(next.presentation),
+              UUID(uuidString: next.epoch)?.uuidString.lowercased() == next.epoch,
+              UUID(uuidString: next.session)?.uuidString.lowercased() == next.session else { return false }
+        if !closed { return ticket == next }
+        ticket = next; floor = next.generation; closed = false
+        return true
+    }
+    @discardableResult
+    func close(uid: String, epoch: String?, generation: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if let ticket {
+            guard ticket.uid == uid, (ticket.epoch == epoch || (closed && epoch == nil)), generation >= floor else { return false }
+        }
+        floor = max(floor, generation); closed = true
+        return true
+    }
+    func retire() {
+        lock.lock(); defer { lock.unlock() }
+        if let ticket { retiredEpochs.insert(ticket.epoch) }
+        ticket = nil; floor = 0; closed = true
+    }
+    func perform(_ expected: GuardianStrictMediaTicket, _ effect: () -> Void) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed, ticket == expected else { return false }
+        effect(); return true
+    }
+}
+
+/// Process-local exclusion for application-owned Guardian media. It neither
+/// changes account preferences nor stops an existing producer. Every producer
+/// reserves before its first effect and keeps its permit through pending work.
+/// OS notifications and other applications are outside this media contract.
+final class GuardianDictationOutputGate: @unchecked Sendable {
+    struct Permit: Hashable, Sendable { fileprivate let id: UUID }
+    static let shared = GuardianDictationOutputGate()
+    private let lock = NSLock()
+    private var outputs = Set<Permit>()
+    private var requestID: String?
+    private var seenRequests = Set<String>()
+    private var closedRequests = Set<String>()
+
+    func beginOutput() -> Permit? {
+        lock.lock(); defer { lock.unlock() }
+        guard requestID == nil else { return nil }
+        let permit = Permit(id: UUID())
+        outputs.insert(permit)
+        return permit
+    }
+
+    /// The caller supplies exact producer-terminal/disposal confirmation.
+    /// A Stop request or an idle observation cannot release a pending permit.
+    func completeOutput(_ permit: Permit) {
+        lock.lock(); defer { lock.unlock() }
+        outputs.remove(permit)
+    }
+
+    func acquire(request: String) -> Bool {
+        guard UUID(uuidString: request)?.uuidString.lowercased() == request else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard !closedRequests.contains(request) else { return false }
+        if requestID == request { return true }
+        // Never evict old cancellation tombstones while late native messages
+        // can still arrive. Exhaustion refuses a new window until process exit.
+        guard seenRequests.contains(request) || seenRequests.count < 1024 else { return false }
+        seenRequests.insert(request)
+        guard requestID == nil, outputs.isEmpty else {
+            closedRequests.insert(request)
+            return false
+        }
+        requestID = request
+        return true
+    }
+
+    func held(request: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return requestID == request
+    }
+
+    func release(request: String) -> Bool {
+        guard UUID(uuidString: request)?.uuidString.lowercased() == request else { return false }
+        lock.lock(); defer { lock.unlock() }
+        if closedRequests.contains(request) { return true }
+        guard seenRequests.contains(request) || seenRequests.count < 1024 else { return false }
+        seenRequests.insert(request)
+        closedRequests.insert(request)
+        // Cancellation of a not-yet-arrived request cannot close another
+        // window, and permanently fences that exact delayed acquisition.
+        if requestID == request { requestID = nil }
+        return true
     }
 }

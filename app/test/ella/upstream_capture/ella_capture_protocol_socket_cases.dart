@@ -12,6 +12,7 @@ import 'package:omi/ella/upstream_capture/ella_upstream_capture_runtime.dart';
 import 'package:omi/backend/schema/conversation.dart' as ella_schema;
 import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/upstream_capture/env/env.dart' as upstream_env;
 import 'package:omi/upstream_capture/services/sockets/pure_socket.dart';
 import 'package:omi/upstream_capture/services/sockets/transcription_service.dart';
 
@@ -449,8 +450,8 @@ void registerEllaCaptureProtocolSocketCases() {
         sampleRate: 16000,
         clientConversationId: null,
       ),
-      same(socket),
-      reason: 'reuse does not authorize or retag a retired transport',
+      isNull,
+      reason: 'a retired account binding must obtain a fresh transport',
     );
     expect(harness.runtime.captureDiagnostics.ready, isFalse);
     expect(harness.runtime.captureDiagnostics.lastAttempt, isNull);
@@ -552,6 +553,8 @@ void registerEllaCaptureProtocolSocketCases() {
   });
 
   test('handshake failure and origin retirement remain distinct without changing capture admission', () async {
+    upstream_env.Env.overrideApiBaseUrl('https://example.invalid/');
+    addTearDown(upstream_env.Env.clearApiBaseUrlOverrideForTesting);
     final unavailable = _Transport()..connectResult = false;
     final failed = EllaCaptureProtocolSocket.withTransport(16000, BleAudioCodec.pcm16, 'multi', unavailable);
     await failed.start();

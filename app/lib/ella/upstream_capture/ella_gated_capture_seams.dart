@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:omi/services/mic/mic_capture_preflight.dart';
 import 'dart:typed_data';
 
 import 'package:omi/ella/upstream_capture/ella_capture_authority.dart';
@@ -7,6 +8,7 @@ import 'package:omi/upstream_capture/backend/schema/geolocation.dart';
 import 'package:omi/upstream_capture/models/custom_stt_config.dart';
 import 'package:omi/upstream_capture/services/capture/capture_seams.dart';
 import 'package:omi/upstream_capture/services/services.dart';
+import 'package:omi/services/mic/confirmed_mic_stop.dart';
 import 'package:omi/upstream_capture/services/sockets/pure_socket.dart';
 import 'package:omi/upstream_capture/services/sockets/transcription_service.dart';
 
@@ -206,7 +208,7 @@ class EllaGatedTranscriptSocket implements TranscriptSegmentSocketService {
 /// * Batch mode writes files natively (no Dart frames); it is only admitted at
 ///   start, and the runtime mutes upstream's CapturePolicy on revocation so the
 ///   native writer's own admission latch drops subsequent packets.
-class EllaGatedMicRecorderService implements IMicRecorderService {
+class EllaGatedMicRecorderService implements IMicRecorderService, ConfirmedMicStop, PreflightMicCapture {
   EllaGatedMicRecorderService(this.inner, this._authority);
 
   final IMicRecorderService inner;
@@ -214,6 +216,18 @@ class EllaGatedMicRecorderService implements IMicRecorderService {
   int _droppedFrames = 0;
 
   int get droppedFrames => _droppedFrames;
+
+  @override
+  MicCapturePreflight? reserveCapturePreflight({required bool Function() hasAuthority}) {
+    final recorder = inner;
+    if (!_authority.hasCurrentAuthority || recorder is! PreflightMicCapture) return null;
+    final uid = _authority.boundUid;
+    final epoch = _authority.bindingEpoch;
+    final generation = _authority.expectedGeneration;
+    return (recorder as PreflightMicCapture).reserveCapturePreflight(
+        hasAuthority: () =>
+            _authority.revalidateReservation(uid: uid, epoch: epoch, generation: generation) && hasAuthority());
+  }
 
   @override
   Future<void> start({
@@ -263,6 +277,13 @@ class EllaGatedMicRecorderService implements IMicRecorderService {
 
   @override
   void stop() => inner.stop();
+
+  @override
+  Future<void> stopAndConfirm() async {
+    final recorder = inner;
+    if (recorder is! ConfirmedMicStop) throw StateError('microphone stop acknowledgement unavailable');
+    await (recorder as ConfirmedMicStop).stopAndConfirm();
+  }
 
   @override
   void probeStallAfterForeground() => inner.probeStallAfterForeground();

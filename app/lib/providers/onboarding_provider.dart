@@ -22,6 +22,7 @@ import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/bluetooth/bluetooth_adapter.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
 enum DeviceSelectionOutcome { connected, consentRequired, unavailable, cancelled }
@@ -656,6 +657,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
     deviceList = [];
     enableInstructions = false;
     discoveryFailed = false;
+    DebugLogManager.deviceBluetoothPermission = 'unknown';
     notifyListeners();
     return _initialScan = _startPickerDiscovery(epoch, cleanup, onShowDialog);
   }
@@ -669,14 +671,21 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       (_canScan?.call() ?? true);
 
   Future<void> _startPickerDiscovery(int epoch, Future<void> cleanup, VoidCallback onShowDialog) async {
+    var stage = 'cleanup';
     try {
+      DebugLogManager.recordPickerStage(stage);
       await cleanup;
       await _scanInFlight;
       if (!_isScanCurrent(epoch)) return;
+      stage = 'prepare_selection';
+      DebugLogManager.recordPickerStage(stage);
       await deviceProvider?.prepareForExplicitDeviceSelection();
       if (!_isScanCurrent(epoch)) return;
       if (SharedPreferencesUtil().btDevice.id.isEmpty) deviceAlreadyUnpaired();
+      DebugLogManager.deviceBluetoothPermission = hasBluetoothPermission ? 'granted_cached' : 'request_pending';
       if (!hasBluetoothPermission) {
+        stage = 'bluetooth_permission';
+        DebugLogManager.recordPickerStage(stage);
         final request = _permissionRequest ??= askForBluetoothPermissions().then<void>((_) {});
         try {
           await request;
@@ -684,7 +693,9 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
           if (identical(_permissionRequest, request)) _permissionRequest = null;
         }
         if (!_isScanCurrent(epoch)) return;
+        DebugLogManager.deviceBluetoothPermission = hasBluetoothPermission ? 'granted' : 'not_granted';
         if (!hasBluetoothPermission) {
+          DebugLogManager.recordPickerStage(stage, failure: 'not_granted');
           unawaited(pauseDeviceDiscovery());
           discoveryFailed = true;
           enableInstructions = true;
@@ -694,6 +705,8 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
         }
       }
       if (!_isScanCurrent(epoch)) return;
+      stage = 'subscribe_service';
+      DebugLogManager.recordPickerStage(stage);
       _didNotMakeItTimer = Timer(const Duration(seconds: 10), () {
         if (!_isScanCurrent(epoch)) return;
         enableInstructions = true;
@@ -715,6 +728,8 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
       await _runDiscoveryPass(epoch);
     } catch (error) {
       if (!_isScanCurrent(epoch)) return;
+      if (stage == 'bluetooth_permission') DebugLogManager.deviceBluetoothPermission = 'request_failed';
+      DebugLogManager.recordPickerStage(stage, failure: DebugLogManager.safeDeviceFailure(error));
       unawaited(pauseDeviceDiscovery());
       discoveryFailed = true;
       enableInstructions = true;
@@ -727,16 +742,23 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
     if (!_isScanCurrent(epoch) || _scanServiceStatus != DeviceServiceStatus.ready) return;
     if (_scanInFlight != null) return _scanInFlight;
     discoveryFailed = false;
+    final diagnosticPass = DebugLogManager.discoveryProvenance.begin(
+      owner: (uid: _scanUid, generation: _scanAuthorityGeneration));
     final passDevices = _passDevices = <String, BtDevice>{};
     final service = _scanService!;
     final completion = Completer<void>();
     _scanInFlight = completion.future;
     try {
+      DebugLogManager.recordPickerStage('discover');
       await service.discover();
       if (!_isScanCurrent(epoch)) return;
+      DebugLogManager.recordPickerStage('discovery_complete');
+      DebugLogManager.discoveryProvenance.publish(diagnosticPass,
+        passDevices.values.map((d) => (id: d.id, friend: d.name.trim().toLowerCase() == 'friend')));
       _publishPickerDevices(passDevices);
     } catch (error) {
       if (_isScanCurrent(epoch)) {
+        DebugLogManager.recordPickerStage('discover', failure: DebugLogManager.safeDeviceFailure(error));
         Logger.debug('Picker discovery failed: ${error.runtimeType}');
         unawaited(pauseDeviceDiscovery());
         discoveryFailed = true;
@@ -744,6 +766,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
         notifyListeners();
       }
     } finally {
+      DebugLogManager.discoveryProvenance.finish(diagnosticPass, failed: discoveryFailed);
       if (identical(_passDevices, passDevices)) _passDevices = null;
       if (identical(_scanInFlight, completion.future)) _scanInFlight = null;
       completion.complete();
@@ -762,8 +785,10 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   Future<void> _stopPickerDiscovery({required bool releaseOwner}) {
+    DebugLogManager.discoveryProvenance.cancel();
     _scanEpoch++;
     _discoveryActive = false;
+    if (releaseOwner) DebugLogManager.recordPickerStage('cancelled');
     _discoveryTimer?.cancel();
     _discoveryTimer = null;
     _didNotMakeItTimer?.cancel();
@@ -789,6 +814,7 @@ class OnboardingProvider extends BaseProvider with MessageNotifierMixin implemen
   }
 
   void _cancelDiscoveryForAuthorityChange() {
+    DebugLogManager.discoveryProvenance.retire();
     if (_disposed || _pickerOwner == null) return;
     unawaited(cancelDeviceDiscovery());
     foundDevicesMap.clear();

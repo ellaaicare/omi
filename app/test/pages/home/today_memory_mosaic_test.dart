@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
+import 'package:flutter/rendering.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -28,6 +30,7 @@ import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/services/memory_artwork_api.dart';
 import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
 import 'package:omi/ella/services/today_card_repository.dart';
+import 'package:omi/ella/services/journal_preview_refresh.dart';
 import 'package:omi/ella/widgets/memory_artwork_image.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -54,14 +57,15 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUpAll(() async {
-    await (FontLoader('Manrope')
+    // Portable widget geometry surrogate; actual SF is qualified on Simulator.
+    await (FontLoader('.SF UI Text')
           ..addFont(rootBundle.load('assets/fonts/Manrope-400.ttf'))
           ..addFont(rootBundle.load('assets/fonts/Manrope-600.ttf'))
           ..addFont(rootBundle.load('assets/fonts/Manrope-700.ttf')))
         .load();
-    await (FontLoader('Fraunces')
-          ..addFont(rootBundle.load('assets/fonts/Fraunces-Latin-Regular.ttf'))
-          ..addFont(rootBundle.load('assets/fonts/Fraunces-Latin-Medium.ttf')))
+    await (FontLoader('InstrumentSerif')
+          ..addFont(rootBundle.load('assets/fonts/instrument-serif/InstrumentSerif-Regular.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/instrument-serif/InstrumentSerif-Italic.ttf')))
         .load();
     await (FontLoader(
       'packages/font_awesome_flutter/FontAwesomeSolid',
@@ -88,6 +92,182 @@ void main() {
     SharedPreferences.setMockInitialValues({'givenName': 'Margaret'});
     await SharedPreferencesUtil.init();
   });
+
+  for (final dark in [false, true]) {
+    for (final scale in [1.0, 1.28, 1.35, 3.0]) {
+      testWidgets('922 regression Journal control contrast and selection dark=$dark scale=$scale', (tester) async {
+        EllaCaptureHost.installForTesting(homeCaptureDockBuilder: (_) => const SizedBox.shrink());
+        addTearDown(EllaCaptureHost.resetForTesting);
+        final boundary = GlobalKey();
+        final harness = await _pumpHome(tester,
+            repaintKey: boundary,
+            conversations: [
+              ServerConversation(
+                  id: 'contrast-memory',
+                  createdAt: DateTime(2026, 8, 9),
+                  structured: Structured('Retained fixture', 'Retained body'))
+            ],
+            dark: dark,
+            textScaler: TextScaler.linear(scale),
+            disableAnimations: true,
+            memoryArtworkApi: _FakeMemoryArtworkApi());
+        addTearDown(harness.dispose);
+        await tester.pump();
+        await tester.runAsync(() async {
+          final image = await (boundary.currentContext!.findRenderObject()! as RenderRepaintBoundary).toImage();
+          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+          final dir = Directory('/Users/ellaai/Documents/Codex/2026-10-10/task-6/claude-v7-widget-renders')
+            ..createSync(recursive: true);
+          File('${dir.path}/journal-${dark ? 'dark' : 'light'}-$scale-test-render.png')
+              .writeAsBytesSync(bytes!.buffer.asUint8List());
+          image.dispose();
+        });
+        for (final key in ['iris-memory-layout-journal', 'iris-memory-layout-days']) {
+          final control = find.byKey(Key(key));
+          await tester.ensureVisible(control);
+          await tester.pump();
+          expect(control.hitTestable(), findsOneWidget);
+          final button = tester.widget<TextButton>(control);
+          expect(button.style!.textStyle!.resolve({})!.fontFamily, '.SF UI Text');
+          final palette = EllaPalette(dark);
+          final fg = button.style!.foregroundColor!.resolve({})!;
+          final bg = button.style!.backgroundColor?.resolve({}) ?? palette.bgPrimary;
+          final lum = [fg.computeLuminance(), bg.computeLuminance()]..sort();
+          expect((lum.last + .05) / (lum.first + .05), greaterThanOrEqualTo(4.5), reason: key);
+          expect(tester.getSize(control).height, greaterThanOrEqualTo(44));
+          await tester.tap(control);
+          await tester.pump();
+          expect(tester.takeException(), isNull);
+        }
+        final chips = find.byKey(const Key('iris-journal-filter-chips'));
+        await tester.scrollUntilVisible(chips, -120, scrollable: find.byType(Scrollable).last);
+        await tester.ensureVisible(chips);
+        await tester.pump();
+        expect(find.text('All · 1'), findsOneWidget);
+        expect(find.text('Memories · 1'), findsOneWidget);
+        expect(find.text('Reminders · 0'), findsOneWidget);
+        expect(find.text('Notes · —'), findsNothing);
+        for (final filter in ['all', 'memories', 'reminders']) {
+          final chip = find.byKey(Key('iris-journal-filter-$filter'));
+          await tester.ensureVisible(chip);
+          await tester.pump();
+          expect(tester.getSize(chip).height, greaterThanOrEqualTo(44));
+          expect(chip.hitTestable(), findsOneWidget);
+        }
+        final memories = find.byKey(const Key('iris-journal-filter-memories'));
+        await tester.ensureVisible(memories);
+        await tester.pump();
+        expect(memories.hitTestable(), findsOneWidget);
+        await tester.tap(memories);
+        await tester.pumpAndSettle();
+        expect(tester.widget<ChoiceChip>(memories).selected, isTrue);
+        final reminders = find.byKey(const Key('iris-journal-filter-reminders'));
+        await tester.ensureVisible(reminders);
+        await tester.pump();
+        expect(reminders.hitTestable(), findsOneWidget);
+        await tester.tap(reminders);
+        await tester.pumpAndSettle();
+        expect(tester.widget<ChoiceChip>(reminders).selected, isTrue);
+        expect(find.byKey(const Key('iris-memory-row-contrast-memory')), findsNothing);
+        final all = find.byKey(const Key('iris-journal-filter-all'));
+        await tester.ensureVisible(all);
+        await tester.pump();
+        expect(all.hitTestable(), findsOneWidget);
+        await tester.tap(all);
+        await tester.pumpAndSettle();
+        expect(tester.widget<ChoiceChip>(all).selected, isTrue);
+        expect(tester.takeException(), isNull);
+      });
+    }
+  }
+
+  testWidgets('Journal row open replaces cached title and overview from one exact owned detail read', (tester) async {
+    final owner = _MutableExactAuthority('test-user');
+    final response = Completer<ServerConversation?>();
+    final requests = <String>[];
+    final baseline = ServerConversation(
+        id: 'fresh-preview',
+        createdAt: DateTime(2026, 8, 9),
+        structured: Structured('Cached baseline title', 'Cached baseline overview'));
+    final refreshed = ServerConversation(
+        id: 'fresh-preview',
+        createdAt: DateTime(2026, 8, 9),
+        structured: Structured('Fresh paired title', 'Fresh paired overview'));
+    final harness = await _pumpHome(tester,
+        conversations: [baseline],
+        memoryPresentationAuthorityProvider: () => owner,
+        journalPreviewLoader: (id, {expectedAuthenticatedUid, exactAuthority}) {
+          requests.add(id);
+          expect(expectedAuthenticatedUid, 'test-user');
+          expect(exactAuthority!.isExactCurrent(), isTrue);
+          return response.future;
+        });
+    addTearDown(harness.dispose);
+    await tester.pumpAndSettle();
+    final row = find.byKey(const Key('iris-memory-row-fresh-preview'));
+    await tester.ensureVisible(row);
+    await tester.ensureVisible(row);
+    await tester.pump();
+    await tester.tap(row);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(requests, ['fresh-preview']);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('Cached baseline overview'), findsNothing);
+    response.complete(refreshed);
+    await tester.pumpAndSettle();
+    expect(find.text('Fresh paired title'), findsWidgets);
+    expect(find.text('Fresh paired overview'), findsOneWidget);
+    expect(find.text('Cached baseline title'), findsNothing);
+    expect(harness.conversations.conversations.single.structured.title, 'Fresh paired title');
+    expect(harness.conversations.conversations.single.structured.overview, 'Fresh paired overview');
+    owner.current = false;
+    harness.authorityChanges.value += 1;
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Fresh paired overview'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final scenario in ['concurrent refresh', 'older detail', 'missing version']) {
+    testWidgets('Journal row open rejects $scenario without downgrading paired provider fields', (tester) async {
+      final owner = _MutableExactAuthority('test-user');
+      ServerConversation row(String version, String title, String overview) => ServerConversation.fromJson({
+            'id': 'race-preview',
+            'created_at': '2026-08-09T00:00:00Z',
+            'structured': {'title': title, 'overview': overview, 'emoji': '', 'category': 'other'},
+            if (version.isNotEmpty) 'active_summary_version_id': version,
+            if (version.isNotEmpty)
+              'summary_versions': [
+                {'id': version, 'title': title, 'overview': overview, 'is_active': true}
+              ],
+          });
+      final baseline = row('old', 'Baseline title', 'Baseline overview');
+      final canonical = row('new', 'Canonical new title', 'Canonical new overview');
+      final response = Completer<ServerConversation?>();
+      final harness = await _pumpHome(tester,
+          conversations: [scenario == 'concurrent refresh' ? baseline : canonical],
+          memoryPresentationAuthorityProvider: () => owner,
+          journalPreviewLoader: (id, {expectedAuthenticatedUid, exactAuthority}) => response.future);
+      addTearDown(harness.dispose);
+      await tester.pumpAndSettle();
+      final memoryRow = find.byKey(const Key('iris-memory-row-race-preview'));
+      await tester.ensureVisible(memoryRow);
+      await tester.tap(memoryRow);
+      await tester.pump(const Duration(milliseconds: 500));
+      if (scenario == 'concurrent refresh') harness.conversations.updateConversation(canonical);
+      response.complete(row(scenario == 'missing version' ? '' : 'old', 'Delayed old title', 'Delayed old overview'));
+      await tester.pumpAndSettle();
+      expect(harness.conversations.conversations.single.structured.title, 'Canonical new title');
+      expect(harness.conversations.conversations.single.structured.overview, 'Canonical new overview');
+      expect(find.text('Delayed old overview'), findsNothing);
+      expect(find.text('Delayed old title'), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('mounted Home shows owned cached memory before the initial canonical GET completes', (tester) async {
     SharedPreferencesUtil().uid = 'cache-owner';
@@ -444,8 +624,8 @@ void main() {
   }
 
   test('Today clearances retain defaults and grow with the shared navigation height', () {
-    expect(todayDockScrollClearance(textScale: 1, safeBottom: 34), 328);
-    expect(todayBackToRecentBottomOffset(textScale: 1, safeBottom: 34), 280);
+    expect(todayDockScrollClearance(textScale: 1, safeBottom: 34), 312);
+    expect(todayBackToRecentBottomOffset(textScale: 1, safeBottom: 34), 264);
     expect(todayDockScrollClearance(textScale: 1, safeBottom: 34, navHeight: 140), 388);
     expect(todayBackToRecentBottomOffset(textScale: 1, safeBottom: 34, navHeight: 140), 340);
   });
@@ -547,8 +727,8 @@ void main() {
     expect(find.text('Record'), findsOneWidget);
     expect(find.text('iPhone · Ready'), findsOneWidget);
     expect(find.text('Recent memories'), findsNothing);
-    expect(find.byKey(const Key('memory-source-photo')), findsOneWidget);
-    expect(find.byKey(const Key('memory-artwork-placeholder-memory-2')), findsOneWidget);
+    expect(find.byKey(const Key('memory-source-photo')), findsNothing);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-2')), findsNothing);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.text('Reminders'), findsNothing);
     expect(find.byIcon(Icons.tune_rounded), findsNothing);
@@ -558,7 +738,7 @@ void main() {
     expect(find.textContaining('Ella will speak from'), findsNothing);
     expect(find.textContaining('Phone only'), findsNothing);
 
-    await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_memory_mosaic.png'));
+    await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_iris_home_memory_mosaic.png'));
   });
 
   for (final art in ['none', 'mixed', 'all']) {
@@ -614,11 +794,12 @@ void main() {
       ));
       await tester.pumpAndSettle();
       expect(find.text('Coffee by the window'), findsOneWidget);
-      expect(tester.getSize(find.byType(MemoryArtworkImage).first), const Size(64, 64));
-      expect(find.byKey(const Key('memory-source-photo')), art == 'none' ? findsNothing : findsWidgets);
+      expect(tester.getSize(find.byType(MemoryArtworkImage).first), Size.zero);
+      expect(find.byKey(const Key('memory-source-photo')), findsNothing);
       expect(find.byType(CircularProgressIndicator), findsNothing);
       expect(tester.takeException(), isNull);
-      await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_memory_rows_${art}_320_300.png'));
+      await expectLater(
+          find.byType(MaterialApp), matchesGoldenFile('goldens/ella_iris_memory_rows_${art}_320_300.png'));
       await tester.tap(find.text('Coffee by the window'));
       expect(opens, 1);
       final deleteAction = tester
@@ -653,10 +834,10 @@ void main() {
       if (find.byKey(const Key('memory-card-memory-2')).evaluate().isNotEmpty) break;
     }
     expect(find.byKey(const Key('memory-card-memory-2')), findsOneWidget);
-    expect(tester.getSize(find.byType(MemoryArtworkImage).first), const Size(64, 64));
+    expect(tester.getSize(find.byType(MemoryArtworkImage).first), Size.zero);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(tester.takeException(), isNull);
-    await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_memory_rows_320_300.png'));
+    await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ella_iris_home_memory_rows_320_300.png'));
   });
 
   for (final scale in [1.0, 3.0]) {
@@ -679,7 +860,7 @@ void main() {
       expect(action.hitTestable(), findsOneWidget);
       expect(tester.getSize(action).height, greaterThanOrEqualTo(48));
       await expectLater(find.byType(MaterialApp),
-          matchesGoldenFile('goldens/ella_home_daily_note_clearance_320_${scale.toInt()}00.png'));
+          matchesGoldenFile('goldens/ella_iris_home_daily_note_clearance_320_${scale.toInt()}00.png'));
       await tester.tap(action);
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('today-card-detail-scroll')), findsOneWidget);
@@ -2410,7 +2591,7 @@ void main() {
     expect(artwork.recentRecoveryRequests, 0);
     expect(artwork.automaticDisplayRequests, isEmpty);
     expect(artwork.displayRequests.where((request) => request.enqueueIfMissing), isEmpty);
-    expect(find.byKey(const Key('memory-artwork-placeholder-memory-1')), findsOneWidget);
+    expect(find.byKey(const Key('memory-artwork-placeholder-memory-1')), findsNothing);
     expect(find.text('Illustration unavailable'), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -2511,12 +2692,14 @@ void main() {
     expect(find.text('Try artwork again'), findsNothing);
     expect(find.byKey(const Key('memory-artwork-placeholder-today-0')), findsOneWidget);
 
-    final requestsBeforeRetry = artwork.displayRequests.length;
+    final requestsBeforeRetry = artwork.displayRequests.where((request) => request.memoryId == 'today-0').length;
     await tester.tap(find.byKey(const Key('memory-artwork-placeholder-today-0')));
     await tester.pump();
 
-    expect(artwork.displayRequests.length, requestsBeforeRetry + 1);
-    expect(artwork.displayRequests.last, (memoryId: 'today-0', enqueueIfMissing: true));
+    expect(artwork.displayRequests.where((request) => request.memoryId == 'today-0').length, requestsBeforeRetry + 1);
+    expect(artwork.displayRequests.where((request) => request.enqueueIfMissing), isEmpty);
+    expect(artwork.displayRequests.where((request) => request.memoryId == 'today-0').last,
+        (memoryId: 'today-0', enqueueIfMissing: false));
 
     final yesterdayCard = find.byWidgetPredicate(
       (widget) => widget is MemoryDayGalleryCard && widget.memories.any((memory) => memory.id == 'yesterday-0'),
@@ -3826,7 +4009,7 @@ void main() {
     await tester.pump();
     await expectLater(
       find.byType(MaterialApp),
-      matchesGoldenFile('goldens/ella_home_memory_mosaic_320_200_full_shell.png'),
+      matchesGoldenFile('goldens/ella_iris_home_memory_mosaic_320_200_full_shell.png'),
     );
 
     final recordTarget = find.byKey(const Key('today-record-moment'));
@@ -3906,162 +4089,179 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('real Home, upstream dock and nav keep phone and necklace controls reachable', (tester) async {
-    await upstream.SharedPreferencesUtil.init();
-    final connectivity = StreamController<bool>.broadcast();
-    final capture = upstream_capture.CaptureProvider(
-      connectivity: upstream_capture.CaptureConnectivityBoundary(
-        initiallyConnected: true,
-        changes: connectivity.stream,
-        isConnected: () => true,
-      ),
-      bleListeners: const _IntegratedHomeDockBleListeners(),
-      preferences: upstream.SharedPreferencesUtil(),
-    );
-    final authority = EllaCaptureAuthority(authenticatedUid: () => 'test-user', sessionStartAllowed: (_) => false);
-    final runtime = _IntegratedHomeDockRuntime(authority: authority, capture: capture);
-    EllaCaptureHost.installForTesting(
-      homeCaptureDockBuilder: (_) => EllaUpstreamCaptureDock(
-        runtime: runtime,
-        authenticatedUid: () => 'test-user',
-        guardianAvailability: () => true,
-        guardianAuthorityProvider: () => _MutableExactAuthority('test-user'),
-        guardianModeLoader: () async => const GuardianModeInfo(
-          currentMode: GuardianModeKey.custom,
-          twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+  for (final dark in [false, true]) {
+    testWidgets(
+        'real Home, upstream dock and nav keep phone and necklace controls reachable ${dark ? 'dark' : 'light'}',
+        (tester) async {
+      await upstream.SharedPreferencesUtil.init();
+      final connectivity = StreamController<bool>.broadcast();
+      final capture = upstream_capture.CaptureProvider(
+        connectivity: upstream_capture.CaptureConnectivityBoundary(
+          initiallyConnected: true,
+          changes: connectivity.stream,
+          isConnected: () => true,
         ),
-        guardianNativeStart: () async => throw StateError('HTTP 503 provider detail'),
-        guardianNativeStop: () async {},
-        guardianNativeState: () => guardian_native.GuardianModeState.idle,
-      ),
-    );
-    addTearDown(() async {
-      EllaCaptureHost.resetForTesting();
-      await tester.pumpWidget(const SizedBox.shrink());
-      capture.dispose();
-      authority.dispose();
-      await connectivity.close();
+        bleListeners: const _IntegratedHomeDockBleListeners(),
+        preferences: upstream.SharedPreferencesUtil(),
+      );
+      final authority = EllaCaptureAuthority(authenticatedUid: () => 'test-user', sessionStartAllowed: (_) => false);
+      final runtime = _IntegratedHomeDockRuntime(authority: authority, capture: capture);
+      EllaCaptureHost.installForTesting(
+        homeCaptureDockBuilder: (_) => EllaUpstreamCaptureDock(
+          runtime: runtime,
+          authenticatedUid: () => 'test-user',
+          guardianAvailability: () => true,
+          guardianAuthorityProvider: () => _MutableExactAuthority('test-user'),
+          guardianModeLoader: () async => const GuardianModeInfo(
+            currentMode: GuardianModeKey.custom,
+            twoTierState: GuardianModeState(features: ['MEMORY_SUPPORT']),
+          ),
+          guardianNativeStart: () async => throw StateError('HTTP 503 provider detail'),
+          guardianNativeStop: () async {},
+          guardianNativeState: () => guardian_native.GuardianModeState.idle,
+        ),
+      );
+      addTearDown(() async {
+        EllaCaptureHost.resetForTesting();
+        await tester.pumpWidget(const SizedBox.shrink());
+        capture.dispose();
+        authority.dispose();
+        await connectivity.close();
+      });
+      final harness = await _pumpHome(
+        tester,
+        conversations: _ConversationFixtures.withMemories(photoBase64: ''),
+        viewport: const Size(390, 844),
+        textScaler: const TextScaler.linear(1),
+        includeBottomNav: true,
+        useIrisRail: true,
+        dark: dark,
+      );
+      addTearDown(harness.dispose);
+
+      capture.updateRecordingState(upstream_capture.RecordingState.record);
+      capture.onConnected();
+      await tester.pump();
+      for (final key in [
+        'upstream-capture-stop-phone',
+        'upstream-capture-view-transcript',
+        'upstream-capture-whispers-switch',
+      ]) {
+        final control = find.byKey(Key(key));
+        expect(control.hitTestable(), findsOneWidget, reason: '$key must be visible without scrolling the dock');
+        expect(tester.getSize(control).height, greaterThanOrEqualTo(48));
+      }
+      final transcriptButton = tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-view-transcript')));
+      expect(transcriptButton.style!.foregroundColor!.resolve({}), EllaPalette(dark).tealDeep);
+      expect(transcriptButton.style!.backgroundColor!.resolve({}), EllaPalette(dark).elevatedCard);
+      expect(transcriptButton.style!.foregroundColor!.resolve({WidgetState.disabled}), EllaPalette(dark).inkSoft);
+      expect(transcriptButton.style!.backgroundColor!.resolve({WidgetState.focused}), EllaPalette(dark).cardDeep);
+      expect(find.byKey(const Key('home-capture-dock-scroll')), findsNothing);
+      expect(
+        tester.getBottomLeft(find.byKey(const Key('upstream-capture-dock'))).dy,
+        lessThan(tester.getTopLeft(find.byType(MemoryGalleryCard).first).dy),
+      );
+      await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text("Whispers are on, but Ella couldn't start spoken help."), findsOneWidget);
+      expect(find.textContaining('HTTP'), findsNothing);
+      await expectLater(
+        find.byType(MaterialApp),
+        matchesGoldenFile('goldens/ella_iris_home_capture_live_390_100_${dark ? 'dark' : 'light'}_full_shell.png'),
+      );
+
+      capture.updateRecordingDevice(
+        upstream_device.BtDevice(id: 'test-pendant', name: 'Compass', type: upstream_device.DeviceType.omi, rssi: -40),
+      );
+      capture.updateRecordingState(upstream_capture.RecordingState.deviceRecord);
+      capture.onConnected();
+      await tester.pump();
+      for (final key in ['upstream-capture-disconnect-necklace', 'upstream-capture-finish']) {
+        expect(find.byKey(Key(key)).hitTestable(), findsOneWidget, reason: '$key must be visible at ordinary scale');
+      }
+      final disconnectButton =
+          tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-disconnect-necklace')));
+      expect(disconnectButton.style!.foregroundColor!.resolve({}), EllaPalette(dark).tealDeep);
+      expect(disconnectButton.style!.backgroundColor!.resolve({}), EllaPalette(dark).elevatedCard);
+      expect(find.byType(EllaNavigationRail), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      final largeHarness = await _pumpHome(
+        tester,
+        conversations: _ConversationFixtures.withMemories(photoBase64: ''),
+        viewport: const Size(320, 844),
+        textScaler: const TextScaler.linear(3),
+        includeBottomNav: true,
+        useIrisRail: true,
+        dark: dark,
+        disableAnimations: true,
+      );
+      addTearDown(largeHarness.dispose);
+      final scrollable = tester.state<ScrollableState>(
+        find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
+      );
+      final whisperControl = find.byKey(const Key('upstream-capture-whispers-switch'));
+      for (var offset = 0.0; offset <= scrollable.position.maxScrollExtent; offset += 100) {
+        scrollable.position.jumpTo(offset);
+        await tester.pump();
+        if (whisperControl.hitTestable().evaluate().isNotEmpty && tester.getTopLeft(whisperControl).dy < 150) break;
+      }
+      expect(whisperControl.hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await expectLater(
+          find.byType(MaterialApp),
+          matchesGoldenFile(
+              'goldens/ella_iris_home_upstream_whispers_320_300_${dark ? 'dark' : 'light'}_full_shell.png'));
+      final dailyNoteAction = find.byKey(const Key('today-card-read-more'));
+      for (var offset = scrollable.position.pixels; offset <= scrollable.position.maxScrollExtent; offset += 100) {
+        scrollable.position.jumpTo(offset);
+        await tester.pump();
+        if (dailyNoteAction.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(dailyNoteAction).dy < 600) {
+          break;
+        }
+      }
+      expect(dailyNoteAction.hitTestable(), findsOneWidget);
+      await expectLater(
+          find.byType(MaterialApp),
+          matchesGoldenFile(
+              'goldens/ella_iris_home_upstream_daily_note_320_300_${dark ? 'dark' : 'light'}_full_shell.png'));
+      final backToRecent = find.byKey(const Key('home-back-to-recent'));
+      for (var offset = scrollable.position.pixels; offset <= scrollable.position.maxScrollExtent; offset += 100) {
+        scrollable.position.jumpTo(offset);
+        await tester.pump();
+        if (backToRecent.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(backToRecent).dy < 650) break;
+      }
+      scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+      await tester.pump();
+      expect(tester.widget(backToRecent), isA<TextButton>());
+      expect(backToRecent.hitTestable(), findsOneWidget);
+      expect(tester.getSize(backToRecent).height, greaterThanOrEqualTo(48));
+      expect(tester.getBottomLeft(backToRecent).dy,
+          lessThan(844 - BottomNavBar.navigationHeight(tester.element(find.byType(BottomNavBar))) - 34));
+      expect(find.byType(FloatingActionButton), findsNothing);
+      await expectLater(
+          find.byType(MaterialApp),
+          matchesGoldenFile(
+              'goldens/ella_iris_home_upstream_inline_back_320_300_${dark ? 'dark' : 'light'}_full_shell.png'));
+      await tester.tap(backToRecent);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(scrollable.position.pixels, 0);
+      for (var offset = 0.0; offset <= scrollable.position.maxScrollExtent; offset += 100) {
+        scrollable.position.jumpTo(offset);
+        await tester.pump();
+        if (dailyNoteAction.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(dailyNoteAction).dy < 600) {
+          break;
+        }
+      }
+      await tester.tap(dailyNoteAction);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byKey(const Key('today-card-detail-scroll')), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
-    final harness = await _pumpHome(
-      tester,
-      conversations: _ConversationFixtures.withMemories(photoBase64: ''),
-      viewport: const Size(390, 844),
-      textScaler: const TextScaler.linear(1),
-      includeBottomNav: true,
-    );
-    addTearDown(harness.dispose);
-
-    capture.updateRecordingState(upstream_capture.RecordingState.record);
-    capture.onConnected();
-    await tester.pump();
-    for (final key in [
-      'upstream-capture-stop-phone',
-      'upstream-capture-view-transcript',
-      'upstream-capture-whispers-switch',
-    ]) {
-      final control = find.byKey(Key(key));
-      expect(control.hitTestable(), findsOneWidget, reason: '$key must be visible without scrolling the dock');
-      expect(tester.getSize(control).height, greaterThanOrEqualTo(48));
-    }
-    final transcriptButton = tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-view-transcript')));
-    expect(transcriptButton.style!.foregroundColor!.resolve({}), EllaColors.tealDeep);
-    expect(transcriptButton.style!.backgroundColor!.resolve({}), EllaColors.elevatedCard);
-    expect(transcriptButton.style!.foregroundColor!.resolve({WidgetState.disabled}), EllaColors.inkSoft);
-    expect(transcriptButton.style!.backgroundColor!.resolve({WidgetState.focused}), EllaColors.cardDeep);
-    expect(find.byKey(const Key('home-capture-dock-scroll')), findsNothing);
-    expect(
-      tester.getBottomLeft(find.byKey(const Key('upstream-capture-dock'))).dy,
-      lessThan(tester.getTopLeft(find.byType(MemoryGalleryCard).first).dy),
-    );
-    await tester.tap(find.byKey(const Key('upstream-capture-whispers-retry')));
-    await tester.pump();
-    await tester.pump();
-    expect(find.text("Whispers are on, but Ella couldn't start spoken help."), findsOneWidget);
-    expect(find.textContaining('HTTP'), findsNothing);
-    await expectLater(
-      find.byType(MaterialApp),
-      matchesGoldenFile('goldens/ella_home_upstream_capture_live_390_100_full_shell.png'),
-    );
-
-    capture.updateRecordingDevice(
-      upstream_device.BtDevice(id: 'test-pendant', name: 'Compass', type: upstream_device.DeviceType.omi, rssi: -40),
-    );
-    capture.updateRecordingState(upstream_capture.RecordingState.deviceRecord);
-    capture.onConnected();
-    await tester.pump();
-    for (final key in ['upstream-capture-disconnect-necklace', 'upstream-capture-finish']) {
-      expect(find.byKey(Key(key)).hitTestable(), findsOneWidget, reason: '$key must be visible at ordinary scale');
-    }
-    final disconnectButton =
-        tester.widget<OutlinedButton>(find.byKey(const Key('upstream-capture-disconnect-necklace')));
-    expect(disconnectButton.style!.foregroundColor!.resolve({}), EllaColors.tealDeep);
-    expect(disconnectButton.style!.backgroundColor!.resolve({}), EllaColors.elevatedCard);
-    expect(find.byType(BottomNavBar), findsOneWidget);
-    expect(tester.takeException(), isNull);
-
-    final largeHarness = await _pumpHome(
-      tester,
-      conversations: _ConversationFixtures.withMemories(photoBase64: ''),
-      viewport: const Size(320, 844),
-      textScaler: const TextScaler.linear(3),
-      includeBottomNav: true,
-      disableAnimations: true,
-    );
-    addTearDown(largeHarness.dispose);
-    final scrollable = tester.state<ScrollableState>(
-      find.descendant(of: find.byKey(const Key('today-scroll')), matching: find.byType(Scrollable)),
-    );
-    final whisperControl = find.byKey(const Key('upstream-capture-whispers-switch'));
-    for (var offset = 0.0; offset <= scrollable.position.maxScrollExtent; offset += 100) {
-      scrollable.position.jumpTo(offset);
-      await tester.pump();
-      if (whisperControl.hitTestable().evaluate().isNotEmpty && tester.getTopLeft(whisperControl).dy < 150) break;
-    }
-    expect(whisperControl.hitTestable(), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await expectLater(
-        find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_upstream_whispers_320_300_full_shell.png'));
-    final dailyNoteAction = find.byKey(const Key('today-card-read-more'));
-    for (var offset = scrollable.position.pixels; offset <= scrollable.position.maxScrollExtent; offset += 100) {
-      scrollable.position.jumpTo(offset);
-      await tester.pump();
-      if (dailyNoteAction.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(dailyNoteAction).dy < 600) break;
-    }
-    expect(dailyNoteAction.hitTestable(), findsOneWidget);
-    await expectLater(
-        find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_upstream_daily_note_320_300_full_shell.png'));
-    final backToRecent = find.byKey(const Key('home-back-to-recent'));
-    for (var offset = scrollable.position.pixels; offset <= scrollable.position.maxScrollExtent; offset += 100) {
-      scrollable.position.jumpTo(offset);
-      await tester.pump();
-      if (backToRecent.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(backToRecent).dy < 650) break;
-    }
-    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
-    await tester.pump();
-    expect(tester.widget(backToRecent), isA<TextButton>());
-    expect(backToRecent.hitTestable(), findsOneWidget);
-    expect(tester.getSize(backToRecent).height, greaterThanOrEqualTo(48));
-    expect(tester.getBottomLeft(backToRecent).dy,
-        lessThan(844 - BottomNavBar.navigationHeight(tester.element(find.byType(BottomNavBar))) - 34));
-    expect(find.byType(FloatingActionButton), findsNothing);
-    await expectLater(
-        find.byType(MaterialApp), matchesGoldenFile('goldens/ella_home_upstream_inline_back_320_300_full_shell.png'));
-    await tester.tap(backToRecent);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(scrollable.position.pixels, 0);
-    for (var offset = 0.0; offset <= scrollable.position.maxScrollExtent; offset += 100) {
-      scrollable.position.jumpTo(offset);
-      await tester.pump();
-      if (dailyNoteAction.hitTestable().evaluate().isNotEmpty && tester.getBottomLeft(dailyNoteAction).dy < 600) break;
-    }
-    await tester.tap(dailyNoteAction);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(find.byKey(const Key('today-card-detail-scroll')), findsOneWidget);
-    expect(tester.takeException(), isNull);
-  });
-
+  }
   for (final replacement in ['account', 'same_uid_profile', 'same_uid_profile_aba']) {
     for (final trigger in ['authority_notification', 'lifecycle_resume']) {
       testWidgets('mounted Today admits $replacement after shutdown through $trigger without another surface',
@@ -5636,9 +5836,12 @@ MemoryArtworkQueueStatus _copyArtworkQueueStatus(
 Future<_HomeHarness> _pumpHome(
   WidgetTester tester, {
   required List<ServerConversation> conversations,
+  GlobalKey? repaintKey,
   DeviceProvider? device,
   TodayCardResponse? todayResponse,
   bool includeBottomNav = false,
+  bool useIrisRail = false,
+  bool dark = false,
   bool disableAnimations = false,
   Size viewport = const Size(390, 844),
   TextScaler textScaler = TextScaler.noScaling,
@@ -5659,6 +5862,7 @@ Future<_HomeHarness> _pumpHome(
   MemoryArtworkApi? memoryArtworkApi,
   MemoryArtworkAuthorityProvider? memoryArtworkAuthorityProvider,
   MemoryPresentationAuthorityProvider? memoryPresentationAuthorityProvider,
+  JournalPreviewLoader? journalPreviewLoader,
   TodayNowProvider? nowProvider,
   GuardianAvailability? guardianAvailability,
   GuardianModeLoader? guardianModeLoader,
@@ -5709,6 +5913,7 @@ Future<_HomeHarness> _pumpHome(
         ),
       );
 
+  final irisRailActive = useIrisRail && viewport.width >= 360 && textScaler.scale(1) < 1.5;
   await tester.pumpWidget(
     MultiProvider(
       providers: [
@@ -5720,7 +5925,8 @@ Future<_HomeHarness> _pumpHome(
       ],
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
-        theme: ellaThemeData(),
+        builder: (_, child) => RepaintBoundary(key: repaintKey, child: child!),
+        theme: dark ? ellaDarkThemeData() : ellaThemeData(),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         home: MediaQuery(
@@ -5731,29 +5937,41 @@ Future<_HomeHarness> _pumpHome(
             textScaler: textScaler,
           ),
           child: Scaffold(
-            body: Stack(
-              children: [
-                TodayPage(
-                  nowProvider: nowProvider ?? () => DateTime(2026, 8, 9, 9, 12),
-                  todayCardRepository: _FixedTodayCardRepository(response),
-                  todayCardCache: _MemoryTodayCardCache(),
-                  todayCardAuthoritySnapshotProvider: () =>
-                      (uid: 'test-user', authorityKey: 'test-authority', isProvisioningReady: true),
-                  todayCardAuthorityChanges: authorityChanges,
-                  todayCardTalkRouteOpener: todayCardTalkRouteOpener,
-                  guardianAvailability: guardianAvailability ?? () => false,
-                  guardianAuthorityProvider: guardianAuthorityProvider ?? () => _MutableExactAuthority('test-user'),
-                  guardianModeLoader: guardianModeLoader,
-                  guardianModeSetter: guardianModeSetter,
-                  guardianNativeStart: guardianNativeStart,
-                  guardianNativeStop: guardianNativeStop,
-                  memoryArtworkApi: memoryArtworkApi,
-                  memoryArtworkAuthorityProvider: memoryArtworkAuthorityProvider,
-                  memoryPresentationAuthorityProvider: memoryPresentationAuthorityProvider,
-                ),
-                if (includeBottomNav) BottomNavBar(onTabTap: (_, __) {}),
-              ],
-            ),
+            body: Row(children: [
+              if (irisRailActive) EllaNavigationRail(onTabTap: (_, __) {}),
+              Expanded(child: Builder(builder: (context) {
+                final view = Stack(children: [
+                  TodayPage(
+                    nowProvider: nowProvider ?? () => DateTime(2026, 8, 9, 9, 12),
+                    todayCardRepository: _FixedTodayCardRepository(response),
+                    todayCardCache: _MemoryTodayCardCache(),
+                    todayCardAuthoritySnapshotProvider: () =>
+                        (uid: 'test-user', authorityKey: 'test-authority', isProvisioningReady: true),
+                    todayCardAuthorityChanges: authorityChanges,
+                    todayCardTalkRouteOpener: todayCardTalkRouteOpener,
+                    guardianAvailability: guardianAvailability ?? () => false,
+                    guardianAuthorityProvider: guardianAuthorityProvider ?? () => _MutableExactAuthority('test-user'),
+                    guardianModeLoader: guardianModeLoader,
+                    guardianModeSetter: guardianModeSetter,
+                    guardianNativeStart: guardianNativeStart,
+                    guardianNativeStop: guardianNativeStop,
+                    memoryArtworkApi: memoryArtworkApi,
+                    memoryArtworkAuthorityProvider: memoryArtworkAuthorityProvider,
+                    memoryPresentationAuthorityProvider: memoryPresentationAuthorityProvider,
+                    journalPreviewLoader: journalPreviewLoader,
+                  ),
+                  if (includeBottomNav && !irisRailActive) BottomNavBar(onTabTap: (_, __) {}),
+                ]);
+                return irisRailActive
+                    ? LayoutBuilder(
+                        builder: (context, constraints) => EllaRailScope(
+                            child: MediaQuery(
+                                data: MediaQuery.of(context)
+                                    .copyWith(size: Size(constraints.maxWidth, constraints.maxHeight)),
+                                child: view)))
+                    : view;
+              })),
+            ]),
           ),
         ),
       ),

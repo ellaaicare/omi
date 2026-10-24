@@ -36,6 +36,7 @@ class PhoneMicSource implements AudioSource {
 
       frames.add(WalFrame(
         payload: payload,
+        validPcmByteLength: payload.length,
         syncKey: FrameSyncKey.fromIndex(_frameIndex),
       ));
       // 1-byte index wraps at 256. This mirrors BLE firmware behavior where
@@ -61,10 +62,12 @@ class PhoneMicSource implements AudioSource {
     for (int i = 0; i < _buffer.length; i++) {
       padded[i] = _buffer[i];
     }
+    final validBytes = _buffer.length;
     _buffer.clear();
 
     final frame = WalFrame(
       payload: padded,
+      validPcmByteLength: validBytes,
       syncKey: FrameSyncKey.fromIndex(_frameIndex),
     );
     _frameIndex = (_frameIndex + 1) & 0xFF;

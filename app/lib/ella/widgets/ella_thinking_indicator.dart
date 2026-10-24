@@ -1,12 +1,11 @@
 import 'dart:async';
-import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 /// Animated thinking indicator for Ella chat.
-/// Shows a pulsing glow with "Ella is thinking..." text and elapsed time.
-/// Designed for long response times (8-15 seconds) — never goes static.
+/// Shows pending state and local elapsed time without inferring server progress.
 class EllaThinkingIndicator extends StatefulWidget {
   const EllaThinkingIndicator({super.key});
 
@@ -27,7 +26,7 @@ class _EllaThinkingIndicatorState extends State<EllaThinkingIndicator> with Sing
     _controller = AnimationController(
       duration: const Duration(milliseconds: 1800),
       vsync: this,
-    )..repeat();
+    );
 
     _pulseAnimation = Tween<double>(begin: 0.4, end: 1.0).animate(
       CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
@@ -51,19 +50,24 @@ class _EllaThinkingIndicatorState extends State<EllaThinkingIndicator> with Sing
     super.dispose();
   }
 
-  String _getThinkingText() {
-    if (_elapsedSeconds < 3) return 'Ella is thinking';
-    if (_elapsedSeconds < 8) return 'Ella is thinking';
-    if (_elapsedSeconds < 15) return 'Still working on it';
-    return 'Almost there';
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context) || MediaQuery.accessibleNavigationOf(context)) {
+      _controller.stop();
+    } else if (!_controller.isAnimating) {
+      _controller.repeat();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 10,
+        runSpacing: 4,
         children: [
           // Pulsing teal dot
           AnimatedBuilder(
@@ -86,16 +90,15 @@ class _EllaThinkingIndicatorState extends State<EllaThinkingIndicator> with Sing
               );
             },
           ),
-          const SizedBox(width: 10),
           // Thinking text with animated dots
           AnimatedBuilder(
             animation: _dotAnimation,
             builder: (context, child) {
               var dots = '.' * (1 + (_dotAnimation.value * 3).floor() % 3);
               return Text(
-                '${_getThinkingText()}$dots',
+                '${context.l10n.ellaChatWaitingResponse}$dots',
                 style: TextStyle(
-                  color: EllaColors.textSecondary,
+                  color: EllaPalette.of(context).textSecondary,
                   fontSize: 14,
                   fontStyle: FontStyle.italic,
                 ),
@@ -103,11 +106,10 @@ class _EllaThinkingIndicatorState extends State<EllaThinkingIndicator> with Sing
             },
           ),
           if (_elapsedSeconds >= 5) ...[
-            const SizedBox(width: 8),
             Text(
-              '${_elapsedSeconds}s',
+              context.l10n.ellaChatElapsedSeconds(_elapsedSeconds),
               style: TextStyle(
-                color: EllaColors.textDisabled,
+                color: EllaPalette.of(context).textDisabled,
                 fontSize: 12,
               ),
             ),

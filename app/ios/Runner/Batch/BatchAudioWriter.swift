@@ -80,6 +80,7 @@ final class OmiBatchAudioWriter: BaseBatchAudioWriter {
             NSLog("[BatchWriter] matched audio characteristic — batch capture active (device=\(peripheralUuid), dir=\(config.dir))")
         }
 
+        guard let authorization = EllaNativeCaptureAuthorization.snapshot() else { return true }
         let admission = CaptureAdmissionPolicy.load(from: defaults)
         // Muted: drop the packet but keep the open file's gap timer alive so unmute
         // resumes the same recording instead of starting a new one. This check is
@@ -98,7 +99,7 @@ final class OmiBatchAudioWriter: BaseBatchAudioWriter {
         let frames = transformFrames(deviceType: config.deviceType, value: value)
         if !frames.isEmpty {
             let admittedRevision = admission.revision
-            queue.async { self.writeFrames(frames, config: config, admittedRevision: admittedRevision) }
+            queue.async { self.writeFrames(frames, config: config, admittedRevision: admittedRevision, authorization: authorization) }
         }
         // Audio packet on the configured characteristic: consume it (do not forward
         // to Dart) even if it carried no payload, to keep the engine idle.
@@ -114,7 +115,8 @@ final class OmiBatchAudioWriter: BaseBatchAudioWriter {
         }
     }
 
-    private func writeFrames(_ frames: [Data], config: Config, admittedRevision: Int64) {
+    private func writeFrames(_ frames: [Data], config: Config, admittedRevision: Int64, authorization: Int64) {
+        guard EllaNativeCaptureAuthorization.permits(authorization) else { return }
         // The callback may have queued work before a mute, unmute, or mode
         // transition. Retire that work before it can rotate/open a file.
         let admission = CaptureAdmissionPolicy.load(from: defaults)
@@ -154,7 +156,7 @@ final class OmiBatchAudioWriter: BaseBatchAudioWriter {
             if writeAdmission.muted { touchKeepAlive() }
             return
         }
-        guard writeFramesLocked(frames) else { return }
+        guard EllaNativeCaptureAuthorization.withAdmission(authorization, write: { writeFramesLocked(frames) }) else { return }
 
         lastFrameMs = nowMs
         maybeFsyncLocked(nowMs: nowMs)

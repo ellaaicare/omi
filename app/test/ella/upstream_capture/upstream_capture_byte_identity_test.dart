@@ -117,7 +117,14 @@ void main() {
     expect(
       patchedByPath.keys.toSet(),
       {
+        'app/lib/upstream_capture/backend/preferences.dart',
+        'app/lib/upstream_capture/services/devices/transports/native_ble_transport.dart',
+        'app/lib/upstream_capture/services/voice_playback/omi_voice_playback_service.dart',
         'app/lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart',
+        'app/lib/upstream_capture/services/sockets/pure_socket.dart',
+        'app/ios/Runner/Batch/BaseBatchAudioWriter.swift',
+        'app/ios/Runner/Batch/BatchAudioWriter.swift',
+        'app/ios/Runner/PhoneMic/PhoneMicBatchAudioWriter.swift',
         'app/ios/Runner/Ble/BleHostApiImpl.swift',
         'app/ios/Runner/Ble/OmiBleDiscoveryNaming.swift',
         'app/ios/Runner/Ble/OmiBleManager.swift',
@@ -125,6 +132,21 @@ void main() {
         'app/lib/upstream_capture/gen/pigeon_communicator.g.dart',
         'app/lib/upstream_capture/services/capture/capture_coordinator.dart',
         'app/lib/upstream_capture/services/capture/capture_controller.dart',
+        'app/lib/upstream_capture/services/wals/local_wal_sync.dart',
+        'app/lib/upstream_capture/services/wals/wal.dart',
+        'app/lib/upstream_capture/backend/schema/conversation.dart',
+        'app/lib/upstream_capture/services/audio_sources/audio_source.dart',
+        'app/lib/upstream_capture/services/audio_sources/ble_device_source.dart',
+        'app/lib/upstream_capture/services/audio_sources/phone_mic_source.dart',
+        'app/test/upstream_capture/unit/capture_recovery_replay_scenarios_test.dart',
+        'app/lib/upstream_capture/backend/http/api/conversations.dart',
+        'app/lib/upstream_capture/backend/http/shared.dart',
+        'app/lib/upstream_capture/services/wals/sync_upload_gate.dart',
+        'app/lib/upstream_capture/services/mic/mic_arbiter.dart',
+        'app/lib/upstream_capture/services/mic/native_mic_recorder_service.dart',
+        'app/test/upstream_capture/support/capture/capture_replay_world.dart',
+        'app/test/upstream_capture/unit/native_mic_recorder_service_test.dart',
+        'app/ios/Runner/PhoneMic/PhoneMicController.swift',
       },
     );
     expect(
@@ -153,20 +175,54 @@ void main() {
     expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.blob, '415903a72829adfc83ca4c1321158db3b1ee059c');
     expect(patchedByPath['app/ios/Runner/Ble/BleHostApiImpl.swift']!.localBlob,
         '0965ab69aadaa375b6be7dd03bb62f28801907cb');
+    expect(patchedByPath['app/lib/upstream_capture/backend/http/api/conversations.dart']!.blob,
+        'f23bfdca3b0ac80ed765676e126133e3d230e11c');
+    expect(patchedByPath['app/lib/upstream_capture/backend/http/api/conversations.dart']!.localBlob,
+        '0d2ca613f28c5c5dfbe3c34a49c1680c0aeec5d6');
+    expect(patchedByPath['app/lib/upstream_capture/backend/http/shared.dart']!.blob,
+        'ca60d60ea9bb2344b12d501f75e9429fcb23a295');
+    expect(patchedByPath['app/lib/upstream_capture/backend/http/shared.dart']!.localBlob,
+        '4208fd6872fac8508db7bbcd92bf19c1144abc0a');
+    expect(patchedByPath['app/lib/upstream_capture/services/wals/sync_upload_gate.dart']!.blob,
+        'fd19e943b3b6a2f62b807e502d957b35ce279b65');
+    expect(patchedByPath['app/lib/upstream_capture/services/wals/sync_upload_gate.dart']!.localBlob,
+        '75d8bda5e391e717df7bd4a2ead61a83a332f878');
     expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_coordinator.dart']!.blob,
         '17c33870dd18366a03cd599bcec9befb512f0b39');
     expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_coordinator.dart']!.localBlob,
-        'b0b79a5bd6acd748329bddb093ffe60c55b66765');
+        'eff479fd9729921d2acc8c4931b89c78f39e31a6');
     expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_controller.dart']!.blob,
         'dee714b169e4f4e45777399f72db4672599fed3a');
     expect(patchedByPath['app/lib/upstream_capture/services/capture/capture_controller.dart']!.localBlob,
-        '139ddbe23bbaa0a7d40f2fd43ae032423688d5ee');
+        '978c52f9fec7f0f0d5f2acb8857125d67e006f0f');
   });
 
   test('scripts/verify_upstream_capture_identity.py passes on this checkout', () async {
     final result = await Process.run('python3', ['$_repoRoot/scripts/verify_upstream_capture_identity.py']);
     expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
     expect(result.stdout as String, contains('UPSTREAM CAPTURE IDENTITY: OK'));
+  });
+
+  test('reviewed output admission patch is exactly the declared SDK guard delta', () {
+    final entry = _entries().singleWhere(
+      (e) => e.localPath == 'app/lib/upstream_capture/services/voice_playback/omi_voice_playback_service.dart',
+    );
+    expect(entry.kind, 'patched');
+    expect(entry.blob, '81842b3a7f9ea4ce53b1fbb2c0ee5f34df0404d4');
+    expect(entry.localBlob, '1380c5b3af56d562d11181fd0be08e28c6ba190a');
+    var restored = File('$_repoRoot/${entry.localPath}').readAsStringSync();
+    const changes = {
+      "import 'package:omi/ella/services/app_output_admission.dart';\n": '',
+      "import 'package:omi/ella/services/admitted_audio_player.dart';": "import 'package:just_audio/just_audio.dart';",
+      '  AppOutputPermit? _outputPermit;\n\n': '',
+      "    _outputPermit ??= AppOutputAdmission.shared.reserveOutput('upstream-voice-output');\n": '',
+    };
+    for (final change in changes.entries) {
+      expect(restored.contains(change.key), isTrue);
+      restored = restored.replaceAll(change.key, change.value);
+    }
+    expect(sha256.convert(utf8.encode(restored)).toString(),
+        'ca4a1c4edb3ef13f125a730523c92bda69652e2d2cea0ef463e5fd5aa5f87431');
   });
 
   test('Dart re-check: every non-patched upstream-owned file is the pin blob modulo the import relocation', () {

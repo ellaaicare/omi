@@ -7,6 +7,7 @@ import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/ella/services/memory_artwork_cache.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/mic/audio_capture_ownership.dart';
 import 'package:omi/services/notifications/ella_notification_handler.dart';
 import 'package:omi/utils/wal_file_manager.dart';
 import 'package:omi/ella/capture_host/ella_capture_host.dart';
@@ -58,6 +59,8 @@ class EllaAccountIsolationService {
   Future<void> stopForAccountTransition({bool preserveOwnerScopedArtworkCache = false}) async {
     SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
     EllaAccountCommitBarrier.quiesceForAccountTransition();
+    final audioStop = AudioCaptureOwnership.shared.quiesceForAccountTransition();
+    await audioStop;
     if (stopGuardian != null) {
       await stopGuardian!.call();
     } else {

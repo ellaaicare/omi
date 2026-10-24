@@ -1,3 +1,4 @@
+import 'package:omi/ella/widgets/ella_v7_appearance.dart';
 import 'dart:async';
 import 'dart:ui';
 
@@ -416,7 +417,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               ErrorWidget.builder = (errorDetails) {
                 return CustomErrorWidget(errorMessage: errorDetails.exceptionAsString());
               };
-              return child!;
+              return EllaV7ThemeScope(child: child!);
             },
             home: TalkerWrapper(
               talker: Logger.instance.talker,

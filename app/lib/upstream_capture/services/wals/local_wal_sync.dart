@@ -1,7 +1,12 @@
+import 'package:omi/ella/upstream_capture/source_revision_contract.dart';
+import 'package:omi/ella/upstream_capture/captured_source_provenance.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:uuid/uuid.dart';
+import 'package:collection/collection.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 import 'package:flutter/foundation.dart';
 
@@ -34,6 +39,16 @@ const _liveCaptureMaxAgeSeconds = 6 * 60 * 60;
 /// newer audio; the loss is surfaced through [WalRetentionRisk] and
 /// capture-recovery telemetry/UI.
 const int maxRetainedCaptureWalCount = 720;
+
+class _WalUploadAuthority implements ExactAccountAuthorityVerifier {
+  _WalUploadAuthority(this.origin, this.sameSource);
+  final ExactAccountAuthorityVerifier origin;
+  final bool Function() sameSource;
+  @override
+  String get uid => origin.uid;
+  @override
+  bool isExactCurrent() => origin.isExactCurrent() && sameSource();
+}
 
 class WalRetentionRisk {
   const WalRetentionRisk({required this.engagedAt, required this.evictedCount, required this.retainedCount});
@@ -124,6 +139,20 @@ bool isDefinitiveUploadRefusal(Object error) =>
 List<Wal> nextSyncUploadBatch(List<Wal> pending, int nowSeconds) {
   final ordered = List<Wal>.from(pending)..sort((a, b) => b.timerStart.compareTo(a.timerStart));
   if (ordered.isEmpty) return const [];
+  final priority = ordered.first;
+  if (priority.sourceProvenance != null) {
+    final operation = priority.sourceRevisionRequest?['operation_id'];
+    final group = ordered
+        .where((w) =>
+            w.ownerUid == priority.ownerUid &&
+            w.conversationId == priority.conversationId &&
+            w.captureWindowId == priority.captureWindowId &&
+            w.sourceProvenance?['source_session_id'] == priority.sourceProvenance?['source_session_id'] &&
+            w.sourceRevisionRequest?['operation_id'] == operation)
+        .toList()
+      ..sort((a, b) => (a.captureChunkSequence ?? -1).compareTo(b.captureChunkSequence ?? -1));
+    return group.take(_syncUploadBatchLimit).toList();
+  }
   final conversationId = ordered.first.conversationId;
   final locationKey = _walLocationBatchKey(ordered.first);
   return ordered
@@ -137,6 +166,12 @@ class LocalWalSyncImpl implements LocalWalSync {
 
   List<WalFrame> _frames = [];
   List<bool> _frameSynced = [];
+  List<Map<String, dynamic>?> _frameProvenance = [];
+  final _sourceSequence = CapturedSourceSequence();
+  Map<String, dynamic>? Function()? captureProvenanceProvider;
+
+  void noteSourceDiscontinuity(String reason, {bool newEpoch = true}) =>
+      _sourceSequence.discontinuity(reason, newEpoch: newEpoch);
 
   Timer? _chunkingTimer;
   Timer? _flushingTimer;
@@ -155,6 +190,15 @@ class LocalWalSyncImpl implements LocalWalSync {
   /// Session fence. Incremented on logout so in-flight chunk/flush/sync cannot
   /// publish retired-account WALs into the successor via [listener.onWalUpdated].
   int _sessionGeneration = 0;
+
+  // A durable recording-window identity, independent of wall-clock seconds.
+  // A finalization rotates it synchronously before awaiting disk writes.
+  String _captureWindowId = const Uuid().v4();
+  String get captureWindowId => _captureWindowId;
+  int _nextCaptureChunkSequence = 0;
+  ExactAccountAuthorityVerifier? Function()? recoveryAuthorityProvider;
+
+  ExactAccountAuthorityVerifier? _recoveryAuthority() => recoveryAuthorityProvider?.call();
 
   /// Durable inventory moved off the published list on logout. Saves write
   /// both this and [_wals] so disk is not wiped; [getAllWals] returns [_wals]
@@ -226,9 +270,13 @@ class LocalWalSyncImpl implements LocalWalSync {
       wal.ownerUid ??= _currentWalOwnerUid();
     }
     _retiredWals.addAll(_wals);
+    _captureWindowId = const Uuid().v4();
+    _nextCaptureChunkSequence = 0;
+    _sourceSequence.newSession();
     _wals = [];
     _frames = [];
     _frameSynced = [];
+    _frameProvenance = [];
   }
 
   /// Completes when _initializeWals() finishes loading WALs from disk.
@@ -256,8 +304,6 @@ class LocalWalSyncImpl implements LocalWalSync {
   DateTime _now() => _nowOverride?.call() ?? DateTime.now();
 
   Timer Function(Duration, void Function(Timer)) get _periodic => _periodicOverride ?? Timer.periodic;
-
-  Future<SyncJobFetch> Function(String jobId) get _jobStatusFetcher => _jobStatusFetcherOverride ?? fetchSyncJobStatus;
 
   LocalWalSyncImpl(
     this.listener, {
@@ -402,6 +448,7 @@ class LocalWalSyncImpl implements LocalWalSync {
 
     _frames = [];
     _frameSynced = [];
+    _frameProvenance = [];
   }
 
   @override
@@ -413,9 +460,11 @@ class LocalWalSyncImpl implements LocalWalSync {
     await _flush(generation);
     _frames = [];
     _frameSynced = [];
+    _frameProvenance = [];
 
     _framesPerSecond = codec.getFramesPerSecond();
     _codec = codec;
+    noteSourceDiscontinuity('unknown');
   }
 
   @override
@@ -451,27 +500,23 @@ class LocalWalSyncImpl implements LocalWalSync {
     var chunk = _frames.sublist(low, high).map((f) => f.payload).toList();
     var timerStart = timerEnd - (high - low) ~/ _framesPerSecond;
     var chunkFrameCount = high - low;
+    final provenance = foldCapturedProvenance(_frameProvenance.sublist(low, high));
 
-    bool shouldStored = SharedPreferencesUtil().unlimitedLocalStorageEnabled;
-    if (!shouldStored) {
-      shouldStored = _frameSynced.sublist(low, high).any((synced) => !synced);
-    }
-
-    if (shouldStored) {
-      int syncedOffset = 0;
-      for (var i = low; i < high; i++) {
-        if (_frameSynced[i]) {
-          syncedOffset++;
-        } else {
-          break;
-        }
-      }
+    // Transport acceptance cannot acknowledge audio. Retain the whole window
+    // for the existing claimed recovery upload, including already-sent overlap.
+    {
+      const syncedOffset = 0;
       Logger.debug("${low} - ${high} - ${syncedOffset} - ${chunkFrameCount} - ${_framesPerSecond}");
 
       Wal wal;
       var walIdx = _wals.indexWhere(
-        (w) => w.timerStart == timerStart && w.device == (_deviceId ?? "omi") && w.codec == _codec,
+        (w) =>
+            w.timerStart == timerStart &&
+            w.device == (_deviceId ?? "omi") &&
+            w.codec == _codec &&
+            w.captureWindowId == _captureWindowId,
       );
+      if (walIdx != _wals.length - 1) walIdx = -1;
       if (walIdx < 0) {
         wal = Wal(
           codec: _codec,
@@ -485,15 +530,23 @@ class LocalWalSyncImpl implements LocalWalSync {
           totalFrames: chunkFrameCount,
           syncedFrameOffset: syncedOffset,
           ownerUid: _currentWalOwnerUid(),
+          sourceProvenance: provenance,
+          captureWindowId: _captureWindowId,
+          captureChunkSequence: _nextCaptureChunkSequence++,
+          hasTransportAttempts: _frameSynced.sublist(low, high).any((sent) => sent),
           geolocation: _copyGeolocation(_sessionGeolocation),
         );
         _wals.add(wal);
       } else {
         wal = _wals[walIdx];
         wal.data.addAll(chunk);
+        wal.sourceProvenance = appendCapturedProvenance(wal.sourceProvenance, provenance);
         wal.storage = WalStorage.mem;
-        wal.totalFrames = chunkFrameCount;
+        wal.totalFrames += chunkFrameCount;
+        wal.seconds = wal.totalFrames ~/ _framesPerSecond;
         wal.syncedFrameOffset = syncedOffset;
+        wal.hasTransportAttempts =
+            (wal.hasTransportAttempts ?? true) || _frameSynced.sublist(low, high).any((sent) => sent);
         wal.status = syncedOffset == chunkFrameCount ? WalStatus.synced : WalStatus.miss;
         _wals[walIdx] = wal;
       }
@@ -508,6 +561,7 @@ class LocalWalSyncImpl implements LocalWalSync {
 
     _frames.removeRange(0, pivot);
     _frameSynced.removeRange(0, pivot);
+    _frameProvenance.removeRange(0, pivot);
   }
 
   Future _flush(int generation) async {
@@ -539,7 +593,10 @@ class LocalWalSyncImpl implements LocalWalSync {
           data.addAll(byteFrame.buffer.asUint8List());
         }
         final file = File(filePath);
-        await file.writeAsBytes(data);
+        await file.parent.create(recursive: true);
+        final staging = File('$filePath.capture-tmp');
+        await staging.writeAsBytes(data, flush: true);
+        await staging.rename(filePath);
         wal.filePath = wal.getFileName();
         wal.storage = WalStorage.disk;
 
@@ -678,7 +735,17 @@ class LocalWalSyncImpl implements LocalWalSync {
   /// Force-drain all in-flight frames (including the tail buffer that _chunk() normally
   /// keeps in memory) and flush everything to disk. Call this when a capture session ends
   /// to ensure no audio is lost in memory.
-  Future<void> finalizeCurrentSession() async {
+  Future<void> checkpointCurrentSession() => finalizeCurrentSession(rotateWindow: false);
+
+  Future<void> finalizeCurrentSession({bool rotateWindow = true}) async {
+    final windowId = _captureWindowId;
+    final provenance = foldCapturedProvenance(_frameProvenance);
+    final chunkSequence = _nextCaptureChunkSequence++;
+    if (rotateWindow) {
+      _captureWindowId = const Uuid().v4();
+      _nextCaptureChunkSequence = 0;
+      _sourceSequence.newSession();
+    }
     if (_frames.isEmpty) return;
 
     final generation = _sessionGeneration;
@@ -691,46 +758,56 @@ class LocalWalSyncImpl implements LocalWalSync {
     var timerStart = timerEnd - high ~/ _framesPerSecond;
     var chunkFrameCount = high;
 
-    // Same shouldStored check as _chunk(): one unconfirmed frame is enough to
-    // retain the session. A transport send is not transcript confirmation.
-    bool shouldStored = SharedPreferencesUtil().unlimitedLocalStorageEnabled;
-    if (!shouldStored) {
-      shouldStored = _frameSynced.sublist(0, high).any((synced) => !synced);
-    }
+    // Send attempts do not prove that the server durably covered any frame.
+    const shouldStored = true;
+    {
+      const syncedOffset = 0;
 
-    if (shouldStored) {
-      int syncedOffset = 0;
-      for (var i = 0; i < high; i++) {
-        if (_frameSynced[i]) {
-          syncedOffset++;
-        } else {
-          break;
-        }
+      final existing = _wals
+          .where((wal) => identical(wal, _wals.lastOrNull))
+          .where((wal) =>
+              wal.captureWindowId == windowId &&
+              wal.timerStart == timerStart &&
+              wal.device == (_deviceId ?? 'omi') &&
+              wal.codec == _codec &&
+              wal.conversationId == null &&
+              wal.status == WalStatus.miss &&
+              !wal.isSyncing)
+          .firstOrNull;
+      if (existing != null) {
+        // Same-second checkpoints append only to an unclaimed active window.
+        // A sealed/stamped/uploaded source is never rewritten.
+        existing.data.addAll(chunk);
+        existing.sourceProvenance = appendCapturedProvenance(existing.sourceProvenance, provenance);
+        existing.hasTransportAttempts = (existing.hasTransportAttempts ?? true) || _frameSynced.any((sent) => sent);
+        existing.totalFrames += chunkFrameCount;
+        existing.seconds = existing.totalFrames ~/ _framesPerSecond;
+        existing.storage = WalStorage.mem;
+      } else {
+        _wals = List.from(_wals)
+          ..add(Wal(
+              codec: _codec,
+              timerStart: timerStart,
+              data: chunk,
+              storage: WalStorage.mem,
+              status: WalStatus.miss,
+              device: _deviceId ?? 'omi',
+              deviceModel: _deviceModel ?? 'Omi',
+              seconds: chunkFrameCount ~/ _framesPerSecond,
+              totalFrames: chunkFrameCount,
+              syncedFrameOffset: syncedOffset,
+              ownerUid: _currentWalOwnerUid(),
+              sourceProvenance: provenance,
+              captureWindowId: windowId,
+              captureChunkSequence: chunkSequence,
+              hasTransportAttempts: _frameSynced.any((sent) => sent),
+              geolocation: _copyGeolocation(_sessionGeolocation)));
       }
-
-      // Use a distinct timerStart so we don't collide with WALs from _chunk().
-      // This is the tail buffer that _chunk() left behind.
-      _wals = List.from(_wals)
-        ..add(
-          Wal(
-            codec: _codec,
-            timerStart: timerStart,
-            data: chunk,
-            storage: WalStorage.mem,
-            status: syncedOffset == chunkFrameCount ? WalStatus.synced : WalStatus.miss,
-            device: _deviceId ?? "omi",
-            deviceModel: _deviceModel ?? "Omi",
-            seconds: chunkFrameCount ~/ _framesPerSecond,
-            totalFrames: chunkFrameCount,
-            syncedFrameOffset: syncedOffset,
-            ownerUid: _currentWalOwnerUid(),
-            geolocation: _copyGeolocation(_sessionGeolocation),
-          ),
-        );
     }
 
     _frames = [];
     _frameSynced = [];
+    _frameProvenance = [];
 
     // Flush all in-memory WALs to disk immediately
     await _flush(generation);
@@ -740,15 +817,17 @@ class LocalWalSyncImpl implements LocalWalSync {
 
   /// Stamp all session WALs with the given conversationId and persist to disk.
   /// This makes WAL→conversation linkage survive app kill.
-  Future<void> stampConversationId(int sessionStartSeconds, String conversationId) async {
+  Future<void> stampConversationId(int sessionStartSeconds, String conversationId, {String? captureWindowId}) async {
     final generation = _sessionGeneration;
     final now = _now().millisecondsSinceEpoch ~/ 1000;
     int stamped = 0;
     for (final wal in _wals) {
       if (wal.status == WalStatus.miss &&
-          wal.timerStart >= sessionStartSeconds &&
-          wal.timerStart <= now &&
-          wal.conversationId == null) {
+          (captureWindowId != null
+              ? wal.captureWindowId == captureWindowId
+              : wal.timerStart >= sessionStartSeconds && wal.timerStart <= now) &&
+          wal.conversationId == null &&
+          wal.ownerUid == _currentWalOwnerUid()) {
         wal.conversationId = conversationId;
         stamped++;
       }
@@ -793,28 +872,56 @@ class LocalWalSyncImpl implements LocalWalSync {
     return reset;
   }
 
-  /// Delete the durable safety copy after the server confirms that this live
-  /// session produced transcript content. Until this acknowledgement arrives,
-  /// socket writes are transport attempts—not delivery confirmation.
-  Future<int> confirmSessionTranscription(int sessionStartSeconds, String conversationId) async {
-    final generation = _sessionGeneration;
-    final now = _now().millisecondsSinceEpoch ~/ 1000;
-    final confirmed = _wals
-        .where(
-          (wal) =>
-              wal.timerStart >= sessionStartSeconds && wal.timerStart <= now && wal.conversationId == conversationId,
-        )
-        .toList();
-    var deleted = 0;
-    for (final wal in confirmed) {
-      if (await _deleteWal(wal)) deleted++;
+  /// A transcript is progress, not a durable frame-coverage receipt. Keep
+  /// compatibility with callers while refusing to prune from this signal.
+  /// Only the existing HTTP upload/job reconciler may mark a WAL synced.
+  Future<int> confirmSessionTranscription(int sessionStartSeconds, String conversationId) async => 0;
+
+  bool _receiptCoversSource(SyncLocalFilesResponse result, List<Wal> members) {
+    if (members.isEmpty || result.failedSegments != 0 || result.errors.isNotEmpty) return false;
+    final request = members.first.sourceRevisionRequest;
+    return members.every((w) => canonicalSourceJson(w.sourceRevisionRequest) == canonicalSourceJson(request)) &&
+        sourceRevisionReceiptMatches(request, result.coverageReceipt);
+  }
+
+  Future<bool> _receiptCoversCurrentFiles(SyncLocalFilesResponse result, List<Wal> members, List<File> files,
+      ExactAccountAuthorityVerifier? authority, int generation) async {
+    if (!_receiptCoversSource(result, members) || authority == null || !authority.isExactCurrent()) return false;
+    final request = await buildSourceRevisionRequest(members, files, authority.uid);
+    return request != null &&
+        _isCurrent(generation) &&
+        authority.isExactCurrent() &&
+        sourceRevisionReceiptMatches(request, result.coverageReceipt);
+  }
+
+  Future<Map<String, dynamic>?> _prepareSourceRevision(
+      List<Wal> members, List<File> files, ExactAccountAuthorityVerifier? authority, int generation) async {
+    if (authority == null || !authority.isExactCurrent()) return null;
+    final request = await buildSourceRevisionRequest(members, files, authority.uid);
+    if (request == null || !_isCurrent(generation) || !authority.isExactCurrent()) return null;
+    for (final wal in members) {
+      wal.sourceRevisionRequest = request;
     }
-    if (deleted > 0) {
-      await _saveWalsToFile(generation);
-      _notifyUpdated(generation);
-      DebugLogManager.logInfo('Pruned transcript-confirmed live-capture WALs', {'count': deleted});
+    // Operation intent must reach the atomic inventory before any network send.
+    final snapshot = [..._retiredWals, ..._foreignWals, ..._wals];
+    if (_persistWalsOverride != null) {
+      await _persistWalsOverride!(snapshot);
+    } else if (!await WalFileManager.saveWals(snapshot)) {
+      throw StateError('Source revision operation intent was not persisted');
     }
-    return deleted;
+    if (!_isCurrent(generation) || !authority.isExactCurrent()) return null;
+    return request;
+  }
+
+  void _holdUnprovenCompletion(Iterable<Wal> members) {
+    for (final wal in members) {
+      wal.status = WalStatus.uploaded;
+      wal.jobId = null;
+      wal.isSyncing = false;
+      wal.syncStartedAt = null;
+      wal.syncEtaSeconds = null;
+    }
+    DebugLogManager.logEvent('capture_recovery_complete_source_proof_unavailable', {'member_count': members.length});
   }
 
   /// Returns the approximate duration (in seconds) of UNSYNCED audio frames
@@ -881,6 +988,7 @@ class LocalWalSyncImpl implements LocalWalSync {
   @override
   void onFrameCaptured(WalFrame frame) {
     _frames.add(frame);
+    _frameProvenance.add(_sourceSequence.observe(frame, _codec, captureProvenanceProvider?.call()));
     _frameSynced.add(false);
   }
 
@@ -903,14 +1011,19 @@ class LocalWalSyncImpl implements LocalWalSync {
 
   Future<SyncLocalFilesResponse?> _syncAll({IWalSyncProgressListener? progress, required bool liveCaptureOnly}) async {
     final generation = _sessionGeneration;
+    final recoveryAuthority = _recoveryAuthority();
+    if (recoveryAuthorityProvider != null && (recoveryAuthority == null || !recoveryAuthority.isExactCurrent()))
+      return null;
     await _flush(generation);
-    if (!_isCurrent(generation)) return null;
+    if (!_isCurrent(generation) || (recoveryAuthority != null && !recoveryAuthority.isExactCurrent())) return null;
     _isCancelled = false;
     _accumulatedResponse = null;
 
     final initialNowSeconds = _now().millisecondsSinceEpoch ~/ 1000;
     var wals = _wals
-        .where((wal) => isAutoUploadEligible(wal) && (!liveCaptureOnly || isLiveCaptureWal(wal, initialNowSeconds)))
+        .where((wal) =>
+            isAutoUploadEligible(wal) &&
+            (!liveCaptureOnly || isLiveCaptureWal(wal, initialNowSeconds) || wal.sourceProvenance != null))
         .toList();
     if (wals.isEmpty) {
       Logger.debug("All synced!");
@@ -940,24 +1053,39 @@ class LocalWalSyncImpl implements LocalWalSync {
     // later remainder must not claim one covering only part of it.
     final unclaimableConversationIds = <String>{};
     while (true) {
+      if (!_isCurrent(generation) || (recoveryAuthority != null && !recoveryAuthority.isExactCurrent())) break;
       // Re-snapshot between batches so a newly captured WAL can preempt an
       // hours-long historical drain without waiting for the original list.
       final batchNowSeconds = _now().millisecondsSinceEpoch ~/ 1000;
       final candidates = _wals.where((wal) => isAutoUploadEligible(wal) && !attemptedWalIds.contains(wal.id)).toList();
-      final pending = candidates.where((wal) => !liveCaptureOnly || isLiveCaptureWal(wal, batchNowSeconds)).toList();
+      final pending = candidates
+          .where((wal) => !liveCaptureOnly || isLiveCaptureWal(wal, batchNowSeconds) || wal.sourceProvenance != null)
+          .toList();
       if (pending.isEmpty) break;
       final batch = nextSyncUploadBatch(pending, batchNowSeconds);
       if (batch.isEmpty) break;
       attemptedWalIds.addAll(batch.map((wal) => wal.id));
       final batchConversationId = batch.first.conversationId;
-      final claimLiveCapture = !unclaimableConversationIds.contains(batchConversationId) &&
+      final isSourceRevision = batch.every((w) => w.sourceProvenance != null);
+      // v2 commits a separate revision for this bounded file set. It never
+      // claims live overlap or a whole conversation's transcript coverage.
+      final claimLiveCapture = !isSourceRevision &&
+          !unclaimableConversationIds.contains(batchConversationId) &&
           canClaimLiveCapture(
             batch,
             candidates.where((wal) => wal.conversationId == batchConversationId).toList(),
             batchNowSeconds,
           );
-      if (!claimLiveCapture && batchConversationId != null) {
-        unclaimableConversationIds.add(batchConversationId);
+      if (!claimLiveCapture && !isSourceRevision) {
+        if (batchConversationId != null) unclaimableConversationIds.add(batchConversationId);
+        if (recoveryAuthorityProvider != null &&
+            candidates
+                .where((wal) => wal.conversationId == batchConversationId)
+                .any((wal) => wal.captureWindowId != null && wal.hasTransportAttempts != false)) {
+          // A repair must claim the entire immutable window. Never silently
+          // append unclaimed overlap when admission/batch bounds prevent that.
+          break;
+        }
       }
       if (_isCancelled) {
         Logger.debug("LocalWalSync: Upload cancelled");
@@ -1027,6 +1155,14 @@ class LocalWalSyncImpl implements LocalWalSync {
         }
       }
 
+      if (recoveryAuthorityProvider != null &&
+          (claimLiveCapture || isSourceRevision) &&
+          batchWals.length != batch.length) {
+        for (final wal in batchWals) {
+          wal.isSyncing = false;
+        }
+        break; // A partial manifest cannot acknowledge the full retained window.
+      }
       if (files.isEmpty) {
         Logger.debug("Files are empty");
         continue;
@@ -1051,16 +1187,66 @@ class LocalWalSyncImpl implements LocalWalSync {
         // wait for server-side processing here; the reconciler resolves the
         // job_id later. Only WALs that actually became files (batchWals) are
         // mutated — corrupted ones already short-circuited above.
+        // All strict revision sources are ordered by their immutable chunk index.
+        if (isSourceRevision) {
+          final pairs = [for (var i = 0; i < batchWals.length; i++) (batchWals[i], files[i])]
+            ..sort((a, b) => (a.$1.captureChunkSequence ?? -1).compareTo(b.$1.captureChunkSequence ?? -1));
+          batchWals = pairs.map((e) => e.$1).toList();
+          files = pairs.map((e) => e.$2).toList();
+        }
+        final sourceCoverage = await _prepareSourceRevision(batchWals, files, recoveryAuthority, generation);
+        if (batchWals.any((w) => w.sourceProvenance != null) && sourceCoverage == null) {
+          for (final wal in batchWals) {
+            wal.isSyncing = false;
+          }
+          continue;
+        }
+        final sourceSnapshot = [
+          for (final wal in batchWals)
+            (wal, wal.id, wal.filePath, wal.conversationId, wal.captureWindowId, wal.ownerUid)
+        ];
+        final uploadAuthority = recoveryAuthority == null
+            ? null
+            : _WalUploadAuthority(
+                recoveryAuthority,
+                () =>
+                    _isCurrent(generation) &&
+                    !_isCancelled &&
+                    sourceSnapshot.every((entry) =>
+                        _wals.contains(entry.$1) &&
+                        entry.$1.status == WalStatus.miss &&
+                        entry.$1.id == entry.$2 &&
+                        entry.$1.filePath == entry.$3 &&
+                        entry.$1.conversationId == entry.$4 &&
+                        entry.$1.captureWindowId == entry.$5 &&
+                        entry.$1.ownerUid == entry.$6));
         final result = await _uploadGate.upload(
           files,
           conversationId: batchWals.first.conversationId,
           claimLiveCapture: claimLiveCapture,
           geolocation: batchWals.first.geolocation,
+          recoveryAuthority: uploadAuthority,
+          sourceCoverage: sourceCoverage,
         );
 
+        if (!_isCurrent(generation) || (recoveryAuthority != null && !recoveryAuthority.isExactCurrent())) {
+          for (final wal in batchWals) {
+            wal.isSyncing = false;
+          }
+          break;
+        }
         if (result.completed != null) {
           // 200 fast-path: server processed synchronously and returned a result.
           final r = result.completed!;
+          if (recoveryAuthorityProvider != null &&
+              batchWals.any((wal) => wal.captureWindowId != null) &&
+              !await _receiptCoversCurrentFiles(r, batchWals, files, recoveryAuthority, generation)) {
+            _holdUnprovenCompletion(batchWals);
+            await _saveWalsToFile(generation);
+            _notifyUpdated(generation);
+            continue;
+          }
+
           resp.newConversationIds.addAll(r.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
           resp.updatedConversationIds.addAll(
             r.updatedConversationIds.where(
@@ -1093,6 +1279,12 @@ class LocalWalSyncImpl implements LocalWalSync {
 
         batchesCompleted++;
         reportUploadProgress();
+      } on ExactAccountAuthorityChangedException {
+        for (final wal in batchWals) {
+          wal.isSyncing = false;
+        }
+        await _saveWalsToFile(generation);
+        break; // Obsolete source/account completions are not backend failures.
       } on SyncRateLimitedException {
         // The cooldown is account-global, so every remaining batch would hit it too.
         DebugLogManager.logEvent('local_upload_rate_limited', {'until': '${SyncRateLimiter.instance.until}'});
@@ -1202,6 +1394,9 @@ class LocalWalSyncImpl implements LocalWalSync {
   @override
   Future<SyncLocalFilesResponse?> syncWal({required Wal wal, IWalSyncProgressListener? progress}) async {
     final generation = _sessionGeneration;
+    final recoveryAuthority = _recoveryAuthority();
+    if (recoveryAuthorityProvider != null && (recoveryAuthority == null || !recoveryAuthority.isExactCurrent()))
+      return null;
     await _flush(generation);
     if (!_isCurrent(generation)) return null;
 
@@ -1211,6 +1406,11 @@ class LocalWalSyncImpl implements LocalWalSync {
       return null;
     }
     final walToSync = matches.first;
+    // A prior server response without complete-source proof must not become a
+    // fresh upload merely because Retry was tapped. Await contract reconciliation.
+    if (recoveryAuthorityProvider != null &&
+        walToSync.captureWindowId != null &&
+        walToSync.status == WalStatus.uploaded) return null;
     // A deliberate single-recording retry is a fresh start, so it restores the
     // auto-upload budget a previous failure spent. It costs at most one extra
     // upload for a permanently refused recording: the reconciler spends the
@@ -1268,24 +1468,76 @@ class LocalWalSyncImpl implements LocalWalSync {
 
     try {
       // Upload only — no poll-to-terminal. Reconciler resolves the job later.
-      final claimLiveCapture = canClaimLiveCapture(
-        [walToSync],
-        _wals
-            .where(
-              (candidate) => candidate.status == WalStatus.miss && candidate.conversationId == walToSync.conversationId,
-            )
-            .toList(),
-        _now().millisecondsSinceEpoch ~/ 1000,
-      );
+      final claimLiveCapture = walToSync.sourceProvenance == null &&
+          canClaimLiveCapture(
+            [walToSync],
+            _wals
+                .where(
+                  (candidate) =>
+                      candidate.status == WalStatus.miss && candidate.conversationId == walToSync.conversationId,
+                )
+                .toList(),
+            _now().millisecondsSinceEpoch ~/ 1000,
+          );
+      if (recoveryAuthorityProvider != null &&
+          walToSync.sourceProvenance == null &&
+          !claimLiveCapture &&
+          _wals
+              .where((candidate) =>
+                  candidate.conversationId == walToSync.conversationId && candidate.captureWindowId != null)
+              .any((candidate) => candidate.hasTransportAttempts != false)) {
+        walToSync.isSyncing = false;
+        await _saveWalsToFile(generation);
+        return null;
+      }
+      final sourceCoverage = await _prepareSourceRevision([walToSync], [walFile], recoveryAuthority, generation);
+      if (walToSync.sourceProvenance != null && sourceCoverage == null) {
+        walToSync.isSyncing = false;
+        return null;
+      }
+      final sourceSnapshot =
+          (walToSync.id, walToSync.filePath, walToSync.conversationId, walToSync.captureWindowId, walToSync.ownerUid);
+      final uploadAuthority = recoveryAuthority == null
+          ? null
+          : _WalUploadAuthority(
+              recoveryAuthority,
+              () =>
+                  _isCurrent(generation) &&
+                  !_isCancelled &&
+                  _wals.contains(walToSync) &&
+                  walToSync.status == WalStatus.miss &&
+                  (
+                        walToSync.id,
+                        walToSync.filePath,
+                        walToSync.conversationId,
+                        walToSync.captureWindowId,
+                        walToSync.ownerUid
+                      ) ==
+                      sourceSnapshot);
       final result = await _uploadGate.upload(
         [walFile],
         conversationId: walToSync.conversationId,
         claimLiveCapture: claimLiveCapture,
         geolocation: walToSync.geolocation,
+        recoveryAuthority: uploadAuthority,
+        sourceCoverage: sourceCoverage,
       );
 
+      if (!_isCurrent(generation) || (recoveryAuthority != null && !recoveryAuthority.isExactCurrent())) {
+        walToSync.isSyncing = false;
+        return null;
+      }
       if (result.completed != null) {
         final r = result.completed!;
+        if (recoveryAuthorityProvider != null &&
+            walToSync.captureWindowId != null &&
+            !await _receiptCoversCurrentFiles(r, [walToSync], [walFile], recoveryAuthority, generation)) {
+          _holdUnprovenCompletion([walToSync]);
+          await _saveWalsToFile(generation);
+          _notifyUpdated(generation);
+          return resp;
+        }
+
         resp.newConversationIds.addAll(r.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
         resp.updatedConversationIds.addAll(
           r.updatedConversationIds.where(
@@ -1309,6 +1561,10 @@ class LocalWalSyncImpl implements LocalWalSync {
         DebugLogManager.logInfo('Single WAL uploaded; reconciler will finish', {'walId': wal.id});
         _notifyUpdated(generation);
       }
+    } on ExactAccountAuthorityChangedException {
+      walToSync.isSyncing = false;
+      await _saveWalsToFile(generation);
+      return resp;
     } on SyncRateLimitedException {
       // Account-level rate limit — leave the WAL pending without consuming its
       // retry budget. The global upload gate owns the cooldown.
@@ -1416,6 +1672,10 @@ class LocalWalSyncImpl implements LocalWalSync {
   /// grouped by their shared `jobId` (batched upload → one job : N WALs).
   Future<SyncLocalFilesResponse> reconcileUploadedWals() async {
     final generation = _sessionGeneration;
+    final recoveryAuthority = _recoveryAuthority();
+    if (recoveryAuthorityProvider != null && (recoveryAuthority == null || !recoveryAuthority.isExactCurrent())) {
+      return SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
+    }
     final resp = SyncLocalFilesResponse(newConversationIds: [], updatedConversationIds: []);
 
     final byJob = <String, List<Wal>>{};
@@ -1433,9 +1693,16 @@ class LocalWalSyncImpl implements LocalWalSync {
 
     for (var i = 0; i < entries.length; i += maxConcurrent) {
       final slice = entries.sublist(i, min(i + maxConcurrent, entries.length));
-      final fetched = await Future.wait(slice.map((e) async => (e.value, await _jobStatusFetcher(e.key))));
+      if (!_isCurrent(generation) || (recoveryAuthority != null && !recoveryAuthority.isExactCurrent())) return resp;
+      final fetched = await Future.wait(slice.map((e) async => (
+            e.value,
+            await (_jobStatusFetcherOverride?.call(e.key) ??
+                fetchSyncJobStatus(e.key, exactAuthority: recoveryAuthority))
+          )));
+      if (!_isCurrent(generation) || (recoveryAuthority != null && !recoveryAuthority.isExactCurrent())) return resp;
 
       for (final (members, fetch) in fetched) {
+        if (members.any((wal) => !_wals.contains(wal) || wal.status != WalStatus.uploaded)) continue;
         final jobId = members.first.jobId;
         final memberWalIds = members.map((w) => w.id).toList();
         switch (fetch.outcome) {
@@ -1484,6 +1751,15 @@ class LocalWalSyncImpl implements LocalWalSync {
                 'totalSegments': s.totalSegments,
               });
               break; // still queued/processing — check later
+            }
+            if (terminalPolicy == SyncJobTerminalPolicy.acknowledge &&
+                recoveryAuthorityProvider != null &&
+                members.any((wal) => wal.captureWindowId != null)) {
+              // v2 is synchronous-only. A job result cannot upgrade this contract.
+              // Terminal progress for a different job/conversation cannot cover
+              // this retained source. Keep its job and original bytes intact.
+              DebugLogManager.logEvent('capture_recovery_receipt_mismatch', {'member_count': members.length});
+              break;
             }
             if (s.result != null) {
               resp.newConversationIds.addAll(

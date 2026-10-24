@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:omi/services/capture/capture_operation_cancellation.dart';
 
 import 'package:omi/upstream_capture/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/upstream_capture/utils/batch_recording.dart';
@@ -603,7 +604,8 @@ class PhoneStopRequested extends CaptureEvent {
 /// `finishCapture`: stop and process the phone conversation before a pendant
 /// it took over from resumes.
 class FinishRequested extends CaptureEvent {
-  const FinishRequested({this.isCurrent});
+  const FinishRequested({this.isCurrent, this.stopDeviceIngress = false});
+  final bool stopDeviceIngress;
 
   /// Optional owner/window admission, evaluated when this queued event runs.
   /// A phone Finish intentionally retires its session during its effects, so
@@ -613,12 +615,15 @@ class FinishRequested extends CaptureEvent {
 
 /// `pauseCapture`: pause whichever source currently owns capture.
 class PauseCaptureRequested extends CaptureEvent {
-  const PauseCaptureRequested();
+  const PauseCaptureRequested({this.isCurrent});
+  final bool Function()? isCurrent;
 }
 
 /// `resumeCapture`: resume the source pause paused.
 class ResumeCaptureRequested extends CaptureEvent {
-  const ResumeCaptureRequested();
+  const ResumeCaptureRequested({this.isCurrent, this.cancellation});
+  final bool Function()? isCurrent;
+  final CaptureOperationCancellation? cancellation;
 }
 
 /// `toggleOfflineMute`.
@@ -630,14 +635,24 @@ class OfflineMuteToggled extends CaptureEvent {
 /// The [BtDevice] is carried for the stage body; the reducer stores only its
 /// identity in state.
 class DeviceStartRequested extends CaptureEvent {
-  const DeviceStartRequested({this.device});
+  const DeviceStartRequested({this.device,
+    this.resumeByDefault = false,
+    this.isCurrent,
+    this.refreshDeviceStream = false,
+  });
   final BtDevice? device;
+
+  /// Product connect/foreground/reconnect intent only; ordinary internal restarts preserve policy.
+  final bool resumeByDefault;
+  final bool refreshDeviceStream;
+  final bool Function()? isCurrent;
 }
 
 /// `stopStreamDeviceRecording`.
 class DeviceStopRequested extends CaptureEvent {
-  const DeviceStopRequested({this.cleanDevice = false});
+  const DeviceStopRequested({this.cleanDevice = false, this.isCurrent});
   final bool cleanDevice;
+  final bool Function()? isCurrent;
 }
 
 /// `updateRecordingDevice` — connect, disconnect (null), or identity update.
@@ -858,6 +873,12 @@ class StartDeviceSessionStage extends CaptureStage {
   final bool promptLocation;
 }
 
+/// Explicit Disconnect closes ingress before draining/processing, retaining the
+/// exact session owner until the existing serialized Finish has settled.
+class QuiesceDeviceIngressStage extends CaptureStage {
+  const QuiesceDeviceIngressStage();
+}
+
 class StopDeviceSessionStage extends CaptureStage {
   const StopDeviceSessionStage({required this.cleanDevice});
   final bool cleanDevice;
@@ -866,6 +887,10 @@ class StopDeviceSessionStage extends CaptureStage {
 /// Post-mute tail of `pauseDeviceRecording`.
 class PauseDeviceTailStage extends CaptureStage {
   const PauseDeviceTailStage();
+}
+
+class ConfirmNativeMicStopStage extends CaptureStage {
+  const ConfirmNativeMicStopStage();
 }
 
 /// Post-unmute tail of `resumeDeviceRecording`.
@@ -1292,15 +1317,18 @@ class CaptureCoordinator {
     required CaptureEffectPorts ports,
     required CaptureEnvironment Function() readEnvironment,
     void Function(CaptureCoordinatorState state)? onCommit,
+    CaptureRetirementFence? retirementFence,
   })  : _ports = ports,
         _readEnvironment = readEnvironment,
-        _onCommit = onCommit {
+        _onCommit = onCommit,
+        _retirementFence = retirementFence ?? CaptureRetirementFence() {
     final persisted = _ports.readSnapshot();
     _lastPersistedSnapshot = persisted;
     final restored = CaptureCoordinatorState.tryParse(persisted);
     _state = restored?.sanitizedForLaunch() ?? CaptureCoordinatorState.idle();
   }
 
+  final CaptureRetirementFence _retirementFence;
   final CaptureEffectPorts _ports;
   final CaptureEnvironment Function() _readEnvironment;
   final void Function(CaptureCoordinatorState state)? _onCommit;
@@ -1329,7 +1357,13 @@ class CaptureCoordinator {
 
   /// Completes when every queued event has run. Mirrors the old
   /// `pendingSourceSwitch` contract for the call-switch tests.
-  Future<void> get pendingDrain => _drain?.future ?? Future<void>.value();
+  /// True throughout queued/staged effects, including admission waits.
+  bool get hasPendingEffectsForDiagnostic => _drain != null || _retirementFence.pending;
+
+  Future<void> get pendingDrain async {
+    await (_drain?.future ?? Future<void>.value());
+    await _retirementFence.drain;
+  }
 
   /// Serialized FIFO admission. Awaits the event's full effect list, so the
   /// returned outcome only exists after the transition is safely committed —
@@ -1396,9 +1430,56 @@ class CaptureCoordinator {
   }
 
   Future<CaptureDispatchOutcome> _run(CaptureEvent event) async {
+    final quarantined = _retirementFence.pending;
+    if (quarantined && event is PhoneStopRequested) {
+      event = PhoneStopRequested(reason: event.reason, userStop: false, resumeSuspendedPendant: false);
+    }
+    if (quarantined &&
+        event is! PhoneStopRequested &&
+        event is! DeviceStopRequested &&
+        event is! DeviceUpdated &&
+        event is! CallStateChanged &&
+        event is! SocketClosed &&
+        event is! SocketError) {
+      return CaptureDispatchOutcome.denied(_state);
+    }
+    final cancellation = event is ResumeCaptureRequested ? event.cancellation : null;
+
+    final pauseGuard = switch (event) {
+      PauseCaptureRequested(:final isCurrent) => isCurrent,
+      ResumeCaptureRequested(:final isCurrent) => isCurrent,
+      _ => null,
+    };
+    if (pauseGuard != null) {
+      try {
+        if (!pauseGuard()) return CaptureDispatchOutcome.denied(_state);
+        final eligible = event is PauseCaptureRequested
+            ? _state.phase == CapturePhase.phoneLive || _state.phase == CapturePhase.pendantLive
+            : _state.phase == CapturePhase.phonePaused || _state.phase == CapturePhase.pendantPaused;
+        if (!eligible) return CaptureDispatchOutcome.denied(_state);
+      } catch (_) {
+        return CaptureDispatchOutcome.denied(_state);
+      }
+    }
+    if (event is DeviceStopRequested && event.isCurrent != null) {
+      try {
+        if (!event.isCurrent!()) return CaptureDispatchOutcome.denied(_state);
+      } catch (_) {
+        return CaptureDispatchOutcome.denied(_state);
+      }
+    }
     if (event is FinishRequested && event.isCurrent != null) {
       try {
         if (!event.isCurrent!()) return CaptureDispatchOutcome.denied(_state);
+      } catch (_) {
+        return CaptureDispatchOutcome.denied(_state);
+      }
+    }
+    final startGuard = event is DeviceStartRequested ? event.isCurrent : null;
+    final transitionGuard = pauseGuard ?? startGuard;
+    if (startGuard != null) {
+      try {
+        if (!startGuard()) return CaptureDispatchOutcome.denied(_state);
       } catch (_) {
         return CaptureDispatchOutcome.denied(_state);
       }
@@ -1411,6 +1492,23 @@ class CaptureCoordinator {
     } catch (error, stack) {
       // Nothing physical could have started; keep the committed state.
       return CaptureDispatchOutcome.completed(state: _state, error: error, stackTrace: stack);
+    }
+    if (quarantined) {
+      // Preserve disconnect/call/identity state while refusing all reactivation
+      // and policy restoration until every retired receipt has settled.
+      final error = StateError('retired capture work pending');
+      final safeState = transition.state.failedClosed(error).copyWith(callActive: transition.state.callActive);
+      _staged = safeState;
+      try {
+        for (final effect in transition.effects.whereType<RunStage>()) {
+          if (effect.stage is UpdateRecordingDeviceStage) {
+            await _awaitCleanup(_ports.runStage(effect.stage).then<void>((_) {}), true);
+          }
+        }
+        return await _failClosed(safeState, error, boundedCleanup: true, safeState: safeState);
+      } finally {
+        _staged = null;
+      }
     }
     var working = transition.state;
     _staged = working;
@@ -1433,7 +1531,10 @@ class CaptureCoordinator {
       Object? result = transition.result;
       for (var i = 0; i < transition.effects.length; i++) {
         try {
-          final value = await _execute(transition.effects[i]);
+          // Pause/resume keeps the session identity. Recheck after every
+          // asynchronous effect so retirement cannot enable a later source.
+          if (transitionGuard != null && !transitionGuard()) throw StateError('capture transition authority changed');
+          final value = await _awaitCancellable(_execute(transition.effects[i]), cancellation);
           if (transition.effects[i] is CheckPhonePermission) {
             if (value != true) {
               return CaptureDispatchOutcome.completed(state: _state, result: false);
@@ -1506,6 +1607,7 @@ class CaptureCoordinator {
             return CaptureDispatchOutcome.completed(state: _state, error: error, stackTrace: stack);
           }
           return _failClosed(working, error,
+              boundedCleanup: cancellation != null,
               stackTrace: stack,
               recoverPendant: recoverPendant,
               preserveDebt: preserveDebt,
@@ -1516,22 +1618,29 @@ class CaptureCoordinator {
       // Required durability is part of the safe transition: a failed snapshot
       // write fails closed like any other effect failure, before publish.
       try {
+        if (transitionGuard != null && !transitionGuard()) throw StateError('capture transition authority changed');
         final encoded = working.encode();
         if (encoded != _lastPersistedSnapshot) {
-          await _ports.persistSnapshot(encoded);
+          await _awaitCancellable(_ports.persistSnapshot(encoded), cancellation);
           _lastPersistedSnapshot = encoded;
         }
       } catch (error, stack) {
         return _failClosed(working, error,
+            boundedCleanup: cancellation != null,
             stackTrace: stack,
             recoverPendant: recoverPendant,
             preserveDebt: preserveDebt,
             restorePolicy: restoreHeldDebtPolicy);
       }
+      if (transitionGuard != null && !transitionGuard()) {
+        return _failClosed(working, StateError('capture transition authority changed'),
+            boundedCleanup: cancellation != null);
+      }
       _commit(working);
       return CaptureDispatchOutcome.completed(state: _state, result: result);
     } catch (error, stack) {
       return _failClosed(working, error,
+          boundedCleanup: cancellation != null,
           stackTrace: stack,
           recoverPendant: recoverPendant,
           preserveDebt: preserveDebt,
@@ -1542,12 +1651,81 @@ class CaptureCoordinator {
     }
   }
 
+  Future<T> _awaitCancellable<T>(Future<T> effect, CaptureOperationCancellation? cancellation) async {
+    if (cancellation == null) return effect;
+    var settled = false;
+    final receipt = effect.whenComplete(() => settled = true);
+    try {
+      return await Future.any<T>([
+        receipt,
+        cancellation.whenCancelled.then<T>((_) => throw StateError('capture resume cancelled')),
+      ]);
+    } catch (_) {
+      if (!settled) {
+        _retirementFence.hold();
+        // A late effect is not allowed to run under a replacement source. Keep
+        // activation quarantined through its receipt and compensating deny.
+        unawaited(() async {
+          try {
+            await receipt;
+          } catch (_) {}
+          try {
+            if (_disposed) return;
+            for (final deny in [
+              () => _ports.setNativeWriterGate(CaptureSource.phone, false),
+              () => _ports.setNativeWriterGate(CaptureSource.pendant, false),
+              () => _ports.stopNativeMic(),
+              () => _ports.stopBleStream(disableNativeBackground: true),
+              () => _ports.closeSocket('retired capture resume'),
+            ]) {
+              if (_disposed) break;
+              try {
+                await deny();
+              } catch (_) {}
+            }
+            try {
+              if (!_disposed) await _ports.persistSnapshot(_state.encode());
+            } catch (_) {}
+          } finally {
+            _retirementFence.release();
+          }
+        }());
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _awaitCleanup(Future<void> receipt, bool bounded) async {
+    if (!bounded) return receipt;
+    try {
+      await receipt.timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      _retirementFence.hold();
+      unawaited(() async {
+        try {
+          try {
+            await receipt;
+          } catch (_) {}
+          if (!_disposed) {
+            try {
+              await _ports.persistSnapshot(_state.encode());
+            } catch (_) {}
+          }
+        } finally {
+          _retirementFence.release();
+        }
+      }());
+      rethrow;
+    }
+  }
+
   /// The transition failed after committing to state: physical capture is
   /// denied best-effort before the safe idle form is published, and the
   /// original error reaches the caller.
   Future<CaptureDispatchOutcome> _failClosed(CaptureCoordinatorState working, Object error,
       {StackTrace? stackTrace,
       bool absorbed = false,
+      bool boundedCleanup = false,
       SuspendedCapture? recoverPendant,
       SuspendedCapture? preserveDebt,
       bool? restorePolicy,
@@ -1561,7 +1739,8 @@ class CaptureCoordinator {
       () => _ports.closeSocket('capture transition failed'),
     ]) {
       try {
-        await deny();
+        final pending = deny();
+        await _awaitCleanup(pending, boundedCleanup);
       } catch (_) {}
     }
     if (restorePolicy != null) {
@@ -1582,7 +1761,8 @@ class CaptureCoordinator {
     _commit(closed);
     try {
       final encoded = _state.encode();
-      await _ports.persistSnapshot(encoded);
+      final pending = _ports.persistSnapshot(encoded);
+      await _awaitCleanup(pending, boundedCleanup);
       _lastPersistedSnapshot = encoded;
     } catch (_) {}
     if (recoverPendant != null && _state.connectedDevice != null) {
@@ -1642,8 +1822,8 @@ CaptureTransition transitionCapture(CaptureCoordinatorState state, CaptureEvent 
     switch (event) {
       PhoneStartRequested() => _reducePhoneStart(state, event, env),
       PhoneStopRequested() => _reducePhoneStop(state, event),
-      FinishRequested() => _reduceFinish(state),
-      PauseCaptureRequested() => _reducePause(state, env),
+      FinishRequested() => _reduceFinish(state, event),
+      PauseCaptureRequested(:final isCurrent) => _reducePause(state, env, confirmNativeStop: isCurrent != null),
       ResumeCaptureRequested() => _reduceResume(state, env),
       OfflineMuteToggled() => _reduceOfflineMuteToggle(state, env),
       DeviceStartRequested() => _reduceDeviceStart(state, event, env),
@@ -1942,7 +2122,13 @@ CaptureTransition _reducePhoneStop(CaptureCoordinatorState state, PhoneStopReque
   );
 }
 
-CaptureTransition _reduceFinish(CaptureCoordinatorState state) {
+CaptureTransition _reduceFinish(CaptureCoordinatorState state, FinishRequested event) {
+  final transition = _reduceFinishBody(state);
+  if (!event.stopDeviceIngress || !state.pendantOwns) return transition;
+  return CaptureTransition(transition.state, [const RunStage(QuiesceDeviceIngressStage()), ...transition.effects]);
+}
+
+CaptureTransition _reduceFinishBody(CaptureCoordinatorState state) {
   if (!state.phoneOwns) {
     final debt = state.pendantSuspension;
     if (!state.awaitingPhoneResume || debt?.reason != SuspendReason.phone) {
@@ -2111,15 +2297,16 @@ CaptureTransition _reduceFinish(CaptureCoordinatorState state) {
   );
 }
 
-CaptureTransition _reducePause(CaptureCoordinatorState state, CaptureEnvironment env) {
+CaptureTransition _reducePause(CaptureCoordinatorState state, CaptureEnvironment env,
+    {bool confirmNativeStop = false}) {
   return switch (state.phase) {
     CapturePhase.phoneLive => CaptureTransition(
         state.copyWith(phase: CapturePhase.phonePaused),
-        const [
-          PolicyWrite(true),
-          RunStage(FlushPhoneFramesStage()),
-          NativeMicStop(),
-          RunStage(RecordingMarkStage(RecordingState.pause)),
+        [
+          const PolicyWrite(true),
+          const RunStage(FlushPhoneFramesStage()),
+          confirmNativeStop ? const RunStage(ConfirmNativeMicStopStage()) : const NativeMicStop(),
+          const RunStage(RecordingMarkStage(RecordingState.pause)),
         ],
       ),
     CapturePhase.audioInterrupted => state.active?.mode == CaptureTransport.batch
@@ -2258,7 +2445,23 @@ CaptureTransition _reduceDeviceStart(
   if (device != null) {
     effects.add(RunStage(UpdateRecordingDeviceStage(device)));
   }
-  final suspended = List<SuspendedCapture>.of(state.suspended);
+  final suspended = event.resumeByDefault
+      ? _withPendantWasPaused(state.suspended, false)
+      : List<SuspendedCapture>.of(state.suspended);
+
+  // Reopening an already recording source must not roll its conversation/WAL.
+  if (event.resumeByDefault &&
+      state.pendantOwns &&
+      connected?.id == state.active?.deviceId &&
+      !state.callActive) {
+    final resume = _reduceDeviceResume(state, env);
+    return CaptureTransition(resume.state, [
+      ...resume.effects,
+      if (event.refreshDeviceStream &&
+          resume.effects.whereType<RunStage>().every((effect) => effect.stage is! ResumeDeviceTailStage))
+        const RunStage(ResumeDeviceTailStage()),
+    ]);
+  }
 
   if (state.phoneOwns || state.callActive) {
     // The phone or a call has the capture: remember the pendant and start it
@@ -2268,7 +2471,9 @@ CaptureTransition _reduceDeviceStart(
         suspended.add(SuspendedCapture(
           source: CaptureSource.pendant,
           reason: state.phoneOwns ? SuspendReason.phone : SuspendReason.call,
-          wasPaused: state.phoneOwns ? (state.mutedBeforePhone ?? false) : env.paused,
+          wasPaused: event.resumeByDefault
+                ? false
+                : (state.phoneOwns ? (state.mutedBeforePhone ?? false) : env.paused),
           mode: env.batchModeEnabled ? CaptureTransport.batch : CaptureTransport.live,
           deviceId: connected.id,
           deviceType: connected.type,
@@ -2342,7 +2547,12 @@ CaptureTransition _reduceDeviceStart(
   final seq = state.sessionSeq + 1;
   final key = 'pendant-$seq';
   final mode = env.batchModeEnabled ? CaptureTransport.batch : CaptureTransport.live;
-  final phase = env.paused
+  // Only the explicit current-owner lifecycle event clears a persisted pause.
+  // A failed/superseded policy write prevents later start stages.
+  if (event.resumeByDefault && env.policyMuted)
+    effects.insert(0, const PolicyWrite(false));
+  final startPaused = event.resumeByDefault ? false : env.paused;
+  final phase = startPaused
       ? (mode == CaptureTransport.batch ? CapturePhase.pendantBatchPaused : CapturePhase.pendantPaused)
       : (mode == CaptureTransport.batch ? CapturePhase.pendantBatchLive : CapturePhase.pendantLive);
 

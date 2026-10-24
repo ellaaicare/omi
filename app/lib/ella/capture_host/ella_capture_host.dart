@@ -1,3 +1,4 @@
+import 'ella_capture_protocol_trace.dart';
 import 'package:flutter/widgets.dart';
 
 import 'package:omi/services/devices.dart';
@@ -141,7 +142,9 @@ class EllaCaptureDiagnosticsSnapshot {
         receivedBytes = null,
         sentBytes = null,
         lastFailure = null,
-        lastAttempt = null;
+        lastAttempt = null,
+        protocolTrace = const [],
+        audioHealth = null;
 
   const EllaCaptureDiagnosticsSnapshot.upstream({
     required this.ready,
@@ -149,6 +152,8 @@ class EllaCaptureDiagnosticsSnapshot {
     required this.sentBytes,
     this.lastFailure,
     this.lastAttempt,
+    this.protocolTrace = const [],
+    this.audioHealth,
   }) : initialized = true;
 
   final bool initialized;
@@ -157,6 +162,8 @@ class EllaCaptureDiagnosticsSnapshot {
   final int? sentBytes;
   final EllaCaptureSocketFailure? lastFailure;
   final EllaCaptureSocketAttempt? lastAttempt;
+  final List<CaptureTraceEntry> protocolTrace;
+  final Map<String, Object?>? audioHealth;
 }
 
 class EllaCaptureHost {
@@ -167,7 +174,13 @@ class EllaCaptureHost {
 
   static Widget Function(BuildContext context)? _homeCaptureDockBuilder;
 
+  static Widget Function(BuildContext context)? _homeTranscriptPreviewBuilder;
   static IDeviceService? _deviceService;
+  static bool Function()? _companionRecordingReader;
+
+  /// Presentation read only: never boots, connects, starts, or changes capture.
+  static bool get companionRecordingActive => _companionRecordingReader?.call() ?? false;
+  static void installCompanionRecordingReader(bool Function() reader) => _companionRecordingReader = reader;
 
   static Future<EllaNativeDiscoveryDiagnostics> Function()? _nativeDiscoveryDiagnosticsLoader;
   static EllaCaptureDiagnosticsSnapshot Function()? _captureDiagnosticsReader;
@@ -191,6 +204,8 @@ class EllaCaptureHost {
   /// Home capture dock supplied by the upstream capture graph, or null (legacy dock).
   static Widget Function(BuildContext context)? get homeCaptureDockBuilder => _homeCaptureDockBuilder;
 
+  static Widget Function(BuildContext context)? get homeTranscriptPreviewBuilder => _homeTranscriptPreviewBuilder;
+
   /// Flag-ON adapter that routes legacy picker/settings call sites through the
   /// same upstream hardware authority as the capture dock.
   static IDeviceService? get deviceService => _deviceService;
@@ -204,6 +219,7 @@ class EllaCaptureHost {
   static void installUpstreamCapture({
     required Widget Function(BuildContext context) homeCaptureDockBuilder,
     IDeviceService? deviceService,
+    Widget Function(BuildContext context)? homeTranscriptPreviewBuilder,
   }) {
     if (!upstreamCaptureDefine) {
       throw StateError('ELLA_UPSTREAM_CAPTURE_ENABLED is not set; refusing to install the upstream capture graph');
@@ -211,6 +227,7 @@ class EllaCaptureHost {
     if (deviceService == null) {
       throw StateError('The upstream capture graph requires a shared device-service adapter');
     }
+    _homeTranscriptPreviewBuilder = homeTranscriptPreviewBuilder;
     _homeCaptureDockBuilder = homeCaptureDockBuilder;
     _deviceService = deviceService;
   }
@@ -223,7 +240,9 @@ class EllaCaptureHost {
   static void installForTesting({
     required Widget Function(BuildContext context) homeCaptureDockBuilder,
     IDeviceService? deviceService,
+    Widget Function(BuildContext context)? homeTranscriptPreviewBuilder,
   }) {
+    _homeTranscriptPreviewBuilder = homeTranscriptPreviewBuilder;
     _homeCaptureDockBuilder = homeCaptureDockBuilder;
     _deviceService = deviceService;
   }
@@ -231,8 +250,10 @@ class EllaCaptureHost {
   @visibleForTesting
   static void resetForTesting() {
     _homeCaptureDockBuilder = null;
+    _homeTranscriptPreviewBuilder = null;
     _deviceService = null;
     _nativeDiscoveryDiagnosticsLoader = null;
     _captureDiagnosticsReader = null;
+    _companionRecordingReader = null;
   }
 }

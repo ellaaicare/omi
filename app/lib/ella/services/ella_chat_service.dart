@@ -47,10 +47,20 @@ typedef EllaVoiceTurnTransport = Future<http.Response?> Function({
 });
 
 class EllaChatHistoryPage {
-  const EllaChatHistoryPage({required this.messages, required this.hasMore});
+  const EllaChatHistoryPage(
+      {required this.messages,
+      required this.hasMore,
+      this.isKeyset = false,
+      this.paginationVersion,
+      this.rawRowCount,
+      this.nextCursor});
 
   final List<ServerMessage> messages;
   final bool hasMore;
+  final bool isKeyset;
+  final int? paginationVersion;
+  final int? rawRowCount;
+  final String? nextCursor;
 }
 
 const ellaChatInactivityTimeout = Duration(seconds: 75);
@@ -284,12 +294,17 @@ Future<EllaServiceResult<bool>> lookupEllaChatTurn({
   }
 }
 
+bool _validHistoryCursor(String value) =>
+    value.length <= 8192 && RegExp(r'^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$').hasMatch(value);
+
 /// Fetch one owner-bound chat history page from the VPS proxy endpoint.
 /// Messages are chronological (oldest first); [hasMore] is the server's
 /// pagination authority and must be honored before proving a turn absent.
 Future<EllaServiceResult<EllaChatHistoryPage>> fetchEllaChatHistoryPage({
   int limit = 50,
   DateTime? before,
+  bool keyset = false,
+  String? cursor,
   required String expectedAuthenticatedUid,
   required ExactAccountAuthorityVerifier exactAuthority,
   EllaChatHistoryTransport? transport,
@@ -298,9 +313,17 @@ Future<EllaServiceResult<EllaChatHistoryPage>> fetchEllaChatHistoryPage({
     return EllaServiceResult.success(EllaChatHistoryPage(messages: DemoFixtures.chatMessages(), hasMore: false));
   }
 
+  if (keyset && (before != null || limit < 1 || limit > 200 || (cursor != null && !_validHistoryCursor(cursor)))) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
+  if (!keyset && cursor != null) {
+    return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
+  }
   try {
     final query = <String, String>{
       'limit': '$limit',
+      if (keyset) 'pagination': 'keyset-v1',
+      if (cursor != null) 'cursor': cursor,
       if (before != null) 'before': before.toUtc().toIso8601String(),
     };
     final url = Uri.parse('${Env.apiBaseUrl}v1/ella/chat/history').replace(queryParameters: query).toString();
@@ -320,16 +343,50 @@ Future<EllaServiceResult<EllaChatHistoryPage>> fetchEllaChatHistoryPage({
     }
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
+    if (keyset && data['messages'] is! List) throw const FormatException('Invalid history envelope');
     final rawMessages = data['messages'] as List<dynamic>? ?? [];
     final hasMore = data['hasMore'];
     if (hasMore is! bool) {
       return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
     }
 
+    String? nextCursor;
+    if (keyset) {
+      final next = data['nextCursor'];
+      if (data['paginationVersion'] != 1 ||
+          data['paginationVersion'] is! int ||
+          data['pageOrder'] != 'canonical-keyset-v1-c8' ||
+          data['source'] != 'canonical_timeline' ||
+          data['fallback'] != false ||
+          !['available', 'available_empty'].contains(data['canonical_memory_status']) ||
+          !data.containsKey('nextCursor') ||
+          (hasMore ? next is! String || !_validHistoryCursor(next) : next != null) ||
+          rawMessages.length > limit) throw const FormatException('Invalid keyset envelope');
+      nextCursor = next as String?;
+    }
+    final seenKeys = <String>{};
     final result = <ServerMessage>[];
     var recognizedHistoryShape = rawMessages.isEmpty;
     for (final m in rawMessages) {
-      if (m is! Map<String, dynamic>) continue;
+      if (m is! Map<String, dynamic>) {
+        if (keyset) throw const FormatException('Invalid history row');
+        continue;
+      }
+      final eventKey = m['canonicalEventKey'];
+      if (keyset &&
+          (eventKey is! String ||
+              !RegExp(r'^[0-9a-f]{64}$').hasMatch(eventKey) ||
+              !seenKeys.add(eventKey) ||
+              m['id'] is! String ||
+              (m['id'] as String).isEmpty ||
+              (m['timestamp'] ?? m['created_at']) is! String ||
+              !['user', 'human', 'assistant', 'ai'].contains(m['sender'] ?? m['role']))) {
+        throw const FormatException('Invalid canonical row');
+      }
+      if (keyset) {
+        if ((m['content'] ?? m['text']) is! String) throw const FormatException('Invalid canonical content');
+        DateTime.parse((m['timestamp'] ?? m['created_at']) as String);
+      }
       final metadata =
           m['metadata'] is Map ? Map<String, dynamic>.from(m['metadata'] as Map) : const <String, dynamic>{};
       final rawSender = (m['sender'] ?? m['role']) as String? ?? '';
@@ -368,6 +425,13 @@ Future<EllaServiceResult<EllaChatHistoryPage>> fetchEllaChatHistoryPage({
           [],
           [],
           askForNps: false,
+          isCanonicalMemoryArtifact: isCanonicalOmiMemory,
+          isCanonicalOverheardTranscript: parsedSender == MessageSender.human &&
+              metadata['source'] == 'canonical_timeline' &&
+              metadata['channel'] == 'omi' &&
+              metadata['provider'] == 'omi-backend' &&
+              !isCanonicalOmiMemory,
+          canonicalEventKey: keyset ? eventKey as String : null,
           canonicalConversationId: metadata['conversation_id']?.toString(),
           canonicalTurnId: metadata['turn_id']?.toString(),
           canonicalTurnOrdinal: parseCanonicalTurnOrdinal(metadata['turn_ordinal']),
@@ -382,15 +446,33 @@ Future<EllaServiceResult<EllaChatHistoryPage>> fetchEllaChatHistoryPage({
     }
 
     // API returns newest first; reverse for chronological UI order
-    result.sort(compareServerMessagesChronologically);
+    if (keyset) {
+      final positions = {for (var i = 0; i < result.length; i++) result[result.length - 1 - i]: i};
+      result.sort((a, b) {
+        final compared = compareServerMessagesChronologically(a, b);
+        return compared == 0 ? positions[a]!.compareTo(positions[b]!) : compared;
+      });
+    } else {
+      result.sort(compareServerMessagesChronologically);
+    }
     Logger.debug('[EllaChat] Fetched ${result.length} messages from history');
-    return EllaServiceResult.success(EllaChatHistoryPage(messages: result, hasMore: hasMore));
+    return EllaServiceResult.success(EllaChatHistoryPage(
+        messages: result,
+        hasMore: hasMore,
+        isKeyset: keyset,
+        paginationVersion: keyset ? 1 : null,
+        rawRowCount: rawMessages.length,
+        nextCursor: nextCursor));
   } on ClientApiFailure catch (failure) {
     return EllaServiceResult.failure(failure);
   } on ExactAccountAuthorityChangedException {
     return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.accountChanged));
   } catch (e) {
-    Logger.debug('[EllaChat] History fetch error: $e');
+    if (keyset) {
+      Logger.debug('[EllaChat] Keyset history invalid response');
+    } else {
+      Logger.debug('[EllaChat] History fetch error: $e');
+    }
     return const EllaServiceResult.failure(ClientApiFailure(ClientApiFailureKind.invalidResponse));
   }
 }

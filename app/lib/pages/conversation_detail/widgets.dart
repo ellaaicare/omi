@@ -289,7 +289,7 @@ class GetSummaryWidgets extends StatelessWidget {
           const SizedBox(width: 6),
           Text(
             label,
-            style: const TextStyle(color: EllaColors.textTertiary, fontSize: 13, fontWeight: FontWeight.w500),
+            style: TextStyle(color: EllaColors.textTertiary, fontSize: 13, fontWeight: FontWeight.w500),
           ),
         ],
       ),
@@ -311,10 +311,10 @@ class GetSummaryWidgets extends StatelessWidget {
             conversation.discarded
                 ? Text(
                     context.l10n.discardedConversation,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.w600,
-                      color: EllaColors.textSecondary,
+                      color: EllaPalette.of(context).textSecondary,
                       height: 1.3,
                     ),
                   )
@@ -331,10 +331,10 @@ class GetSummaryWidgets extends StatelessWidget {
                           focusNode: data.item3,
                           controller: data.item2,
                           content: titleDisplayValue.text,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 24,
                             fontWeight: FontWeight.w600,
-                            color: EllaColors.textPrimary,
+                            color: EllaPalette.of(context).textPrimary,
                             height: 1.3,
                           ),
                         ),
@@ -342,11 +342,18 @@ class GetSummaryWidgets extends StatelessWidget {
                     ],
                   ),
             const SizedBox(height: 16),
-            if (hasCurrentHermesSummary(conversation)) ...[
-              HermesSummarySource(conversation: conversation),
+            if (hasCurrentSummarySource(conversation)) ...[
+              ActiveSummarySource(conversation: conversation, showVersion: true),
               const SizedBox(height: 12),
             ],
-            _buildInfoChips(context, conversation),
+            ExpansionTile(
+              key: ValueKey('memory-details-${conversation.id}'),
+              tilePadding: EdgeInsets.zero,
+              title: Text(context.l10n.irisMemoryDetails, style: EllaTypography.of(context).secondary),
+              children: [
+                Padding(padding: const EdgeInsets.only(bottom: 8), child: _buildInfoChips(context, conversation))
+              ],
+            ),
             const SizedBox(height: 16),
             conversation.discarded ? const SizedBox.shrink() : const SizedBox(height: 8),
           ],
@@ -390,7 +397,7 @@ class ActionItemsListWidget extends StatelessWidget {
                           );
                           MixpanelManager().copiedConversationDetails(provider.conversation, source: 'Action Items');
                         },
-                        icon: const Icon(Icons.copy_rounded, color: EllaColors.textSecondary, size: 20),
+                        icon: Icon(Icons.copy_rounded, color: EllaPalette.of(context).textSecondary, size: 20),
                       ),
                     ],
                   )
@@ -470,7 +477,7 @@ class ActionItemsListWidget extends StatelessWidget {
                           child: SelectionArea(
                             child: Text(
                               item.description.decodeString,
-                              style: const TextStyle(color: EllaColors.textSecondary, fontSize: 16, height: 1.3),
+                              style: TextStyle(color: EllaPalette.of(context).textSecondary, fontSize: 16, height: 1.3),
                             ),
                           ),
                         ),
@@ -1009,10 +1016,11 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
                 children: [
                   const Icon(Icons.graphic_eq_rounded, size: 18, color: EllaColors.paper),
                   const SizedBox(width: 8),
-                  Text(
+                  Flexible(
+                      child: Text(
                     context.l10n.memoryTalkAction,
                     style: const TextStyle(color: EllaColors.paper, fontSize: 14, fontWeight: FontWeight.w700),
-                  ),
+                  )),
                 ],
               ),
             ),

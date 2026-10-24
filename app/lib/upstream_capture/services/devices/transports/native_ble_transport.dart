@@ -34,9 +34,52 @@ class NativeBleTransport extends DeviceTransport {
   DeviceTransportState _state = DeviceTransportState.disconnected;
   Timer? _audioLivenessTimer;
   int _audioSilenceResubscribes = 0;
+  final Stopwatch _healthClock = Stopwatch()..start();
+  final int Function()? _healthMicros;
+  final DateTime Function() _healthUtcNow;
+  int _audioPackets = 0, _audioBytes = 0, _audioRecoveryAttempts = 0, _disconnectCount = 0;
+  int? _lastAudioMicros;
+  DateTime? _lastAudioAt, _lastReconnectAt;
+  String _lastLinkEvent = 'not_observed';
 
-  NativeBleTransport(this._peripheralUuid, {this.requiresBond = false, BleHostApi? hostApi})
-      : _hostApi = hostApi ?? BleHostApi() {
+  /// Count/timing-only, read-only health. No peripheral ID, payload, transcript,
+  /// account, credential, queue persistence or server acknowledgement is retained.
+  Map<String, Object?> get audioHealth {
+    final last = _lastAudioMicros;
+    final age = last == null
+        ? null
+        : ((_healthMicros?.call() ?? _healthClock.elapsedMicroseconds) - last).clamp(0, 1 << 62) ~/ 1000;
+    final observing = _activeSubscriptionKeys.any(
+        (key) => isBleAudioCharacteristicUuid(key.split(':').last) && (_streamControllers[key]?.hasListener ?? false));
+    return Map.unmodifiable({
+      'coverage': 'dart_ble_notifications',
+      'ble_link': _state.name,
+      'packet_count': _audioPackets,
+      'notification_bytes': _audioBytes,
+      'last_packet_utc': _lastAudioAt?.toUtc().toIso8601String(),
+      'last_packet_age_ms': age,
+      'last_ready_callback_utc': _lastReconnectAt?.toUtc().toIso8601String(),
+      'last_link_event': _lastLinkEvent,
+      'connection_lost_callbacks': _disconnectCount,
+      'cccd_recovery_attempts': _audioRecoveryAttempts,
+      'liveness_watch_active': _audioLivenessTimer?.isActive == true,
+      'stream_health': !observing
+          ? 'no_active_audio_listener'
+          : _state != DeviceTransportState.connected
+              ? 'link_unavailable'
+              : age == null
+                  ? 'audio_not_observed'
+                  : age >= _captureAudioLivenessWindow.inMilliseconds * 2
+                      ? 'audio_stale'
+                      : 'audio_recent',
+    });
+  }
+
+  NativeBleTransport(this._peripheralUuid,
+      {this.requiresBond = false, BleHostApi? hostApi, int Function()? monotonicMicros, DateTime Function()? utcNow})
+      : _healthMicros = monotonicMicros,
+        _healthUtcNow = utcNow ?? DateTime.now,
+        _hostApi = hostApi ?? BleHostApi() {
     BleBridge.instance.registerPeripheral(
       peripheralUuid: _peripheralUuid,
       onConnectionState: _handleConnectionState,
@@ -98,6 +141,8 @@ class NativeBleTransport extends DeviceTransport {
     _audioLivenessTimer?.cancel();
     _audioSilenceResubscribes = 0;
 
+    _lastAudioMicros = null;
+    _lastLinkEvent = 'explicit_disconnect';
     _updateState(DeviceTransportState.disconnecting);
 
     // Unsubscribe all active streams
@@ -274,6 +319,9 @@ class NativeBleTransport extends DeviceTransport {
         _activeSubscriptionKeys.clear();
       }
 
+      _disconnectCount++;
+      _lastLinkEvent = 'connection_lost';
+      _lastAudioMicros = null;
       _subscribedSubscriptionKeys.clear();
       _audioLivenessTimer?.cancel();
       _audioSilenceResubscribes = 0;
@@ -290,6 +338,7 @@ class NativeBleTransport extends DeviceTransport {
   void _handleDeviceReady(List<BleService> services) {
     if (_deviceReadyCompleter != null && !_deviceReadyCompleter!.isCompleted) {
       // Initial connection
+      _lastLinkEvent = 'initial_device_ready';
       _services = services;
       _deviceReadyCompleter!.complete(services);
       _subscribeActiveCharacteristics();
@@ -317,6 +366,8 @@ class NativeBleTransport extends DeviceTransport {
     try {
       _services = services;
 
+      _lastReconnectAt = _healthUtcNow();
+      _lastLinkEvent = 'device_ready_recovery';
       // Native re-emits ready for a link that is already up, so keep live controllers.
       for (final key in _activeSubscriptionKeys) {
         final parts = key.split(':');
@@ -347,6 +398,18 @@ class NativeBleTransport extends DeviceTransport {
       _audioSilenceResubscribes = 0;
       _audioLivenessTimer?.cancel();
     }
+    // Passive observation only: do not change subscription, timer or recovery behavior.
+    final key = '${serviceUuid.toLowerCase()}:${characteristicUuid.toLowerCase()}';
+    if (_state == DeviceTransportState.connected &&
+        _activeSubscriptionKeys.contains(key) &&
+        _streamControllers[key]?.hasListener == true &&
+        isBleAudioCharacteristicUuid(characteristicUuid) &&
+        value.isNotEmpty) {
+      _audioPackets++;
+      _audioBytes += value.length;
+      _lastAudioMicros = _healthMicros?.call() ?? _healthClock.elapsedMicroseconds;
+      _lastAudioAt = _healthUtcNow();
+    }
     _addToStream(serviceUuid, characteristicUuid, value);
   }
 
@@ -369,6 +432,7 @@ class NativeBleTransport extends DeviceTransport {
     if (_state != DeviceTransportState.connected) return;
     if (_audioSilenceResubscribes < _captureAudioSilenceResubscribeLimit) {
       _audioSilenceResubscribes++;
+      _audioRecoveryAttempts++;
       Logger.debug('[NativeBleTransport] no audio after reconnect, retrying CCCD subscribe once');
       for (final key in _activeSubscriptionKeys) {
         final parts = key.split(':');
