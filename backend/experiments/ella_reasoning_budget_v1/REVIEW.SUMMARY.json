@@ -1,0 +1,9 @@
+{
+  "state": "PASS_SOURCE_AND_CONTROLLER",
+  "candidate_sha256": "c4510619c8e63279d8e8080aa953a520ee91829a25c78099b5eea60466864452",
+  "controller_sha256": "cac50ec90a691fb72e59d5ef837fdc32709e5ed755f42710c8a8ae2ef5383eb2",
+  "independent_tests_passed": 18,
+  "controller_fault_cases_passed": 6,
+  "scope": "Source and atomic one-file controller only; no provider success proved",
+  "deployment": "one request reasoning effort setting installed without restart; serving imports and HTTPhealth pass; enhanced writeback pending"
+}

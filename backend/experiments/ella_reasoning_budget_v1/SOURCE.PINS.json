@@ -1,0 +1,50 @@
+{
+  "scope": "ONE_REQUEST_FIELD_ONLY_REVIEWED_CORRECTION",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "f8f9d92e2b38203eb87861c2d398848ee7a46610bdee21b9f6ffca8e658db406",
+      "bytes": 1566
+    },
+    {
+      "path": "REVIEW.SUMMARY.json",
+      "sha256": "3ce4a1748df17605f6b00a5a31fc691eeeae730a313b6498f7bbada8b14df02b",
+      "bytes": 529
+    },
+    {
+      "path": "baseline/semantic_openrouter_transport.py.source",
+      "sha256": "6cc479ad127e0e77cf8069dd974e3aa3430ad2e42673514ef5ad3336319a4a04",
+      "bytes": 13467
+    },
+    {
+      "path": "candidate/semantic_openrouter_transport.py",
+      "sha256": "c4510619c8e63279d8e8080aa953a520ee91829a25c78099b5eea60466864452",
+      "bytes": 13516
+    },
+    {
+      "path": "candidate/semantic_role_worker.py",
+      "sha256": "a8ddc5e343e63a36a2c5be4f737e19ac0900b44e5d5ce07b70427e26aaef4a9f",
+      "bytes": 22250
+    },
+    {
+      "path": "evidence/PUBLIC.MODEL.REASONING.CAPABILITY.safe.json",
+      "sha256": "1ce3cc2b851bc435f7241af757dae165379aa33df97402733ccea416d6112c7a",
+      "bytes": 938
+    },
+    {
+      "path": "tests/test_completion_metadata.py",
+      "sha256": "15dc99aa35284a563ff78a7c2238cbd18949b7524fa65199d271dc79272f438d",
+      "bytes": 5681
+    },
+    {
+      "path": "tests/test_reasoning_budget.py",
+      "sha256": "b8961ffe313dfe863a1d5216b2f959dfc78664f113f320fed67ce72f419aeb79",
+      "bytes": 3636
+    },
+    {
+      "path": "tests/test_transport_regressions.py",
+      "sha256": "9267d0c33f54ac4795da01f534742c785a6c05841a62d28c11cb955f3bf81137",
+      "bytes": 7831
+    }
+  ]
+}
