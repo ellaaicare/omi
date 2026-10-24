@@ -1,0 +1,14 @@
+{
+  "contract": "ella-json-contract-source-pins-v1",
+  "files": {
+    "README.md": "1041656f5a4aaef653e3dbd1d183ce8deb953ff75a5c3a3c92085ac1dd2dc1b0",
+    "REVIEW.SUMMARY.json": "d426c96c5dcece465abaa757f30e5ebe03d4984e4b965fb7c6d68f65ee2b74ac",
+    "baseline/semantic_openrouter_transport.py.source": "c4510619c8e63279d8e8080aa953a520ee91829a25c78099b5eea60466864452",
+    "baseline/semantic_role_worker.py.source": "a8ddc5e343e63a36a2c5be4f737e19ac0900b44e5d5ce07b70427e26aaef4a9f",
+    "candidate/semantic_openrouter_transport.py.source": "74e024dbeecc5fc9cab362aa91bff699e3d5ad4cff226cc0cc8cb410909f1ba0",
+    "candidate/semantic_role_worker.py.source": "0a133b4388c135d7c8e6828c5a0c9122633b6ec1ef8d00d4eb78e850e6a7729c",
+    "tests/test_completion_metadata.py": "453047272748297b967e6f3246acbadb1833a0aefad35e7e1cebed9f9fdf8d1f",
+    "tests/test_instruction_and_json.py": "6c7827c22b0e40592d915580fc74397cacdd67f7ded58577cc83915a908fbf61",
+    "tests/test_transport_regressions.py": "768cfe04e56c55fc41ada01625265b70a26017f059261801cfe54364fc159496"
+  }
+}

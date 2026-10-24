@@ -1,0 +1,9 @@
+# Trusted instruction channel and closed JSON-shape diagnostics
+
+The prior OpenRouter transport placed the entire frozen role request, including trusted instructions, in one user message. The retained Codex transport supplies those same instructions through its API instruction field and retains the request as user data. This correction gives the static backend-generated instruction string a system role; transcript, candidate and companion context remain frozen user data. Approved request/source/nonce hashes and actual authority checks stay unchanged.
+
+This establishes wire fidelity, not the exact cause or raw syntax of historical discarded output. Closed optional output_json_status reports only object/array/string/number/boolean/null/fenced/syntax_invalid/duplicate_key/nonfinite/other. It never exports response values or keys. Existing strict JSON-object parsing remains authoritative: fenced JSON, scalar/array, duplicate keys and invalid syntax remain rejected. Object classification is not schema/evidence approval.
+
+17 actual-function fakeHTTP/projector tests pass, independently reviewed. No real model inference occurs in this suite. Seven disposable deployment-controller fault cases also pass. Module source is stored byte-exact as .py.source to preserve reviewed serving-overlay bytes; tests read these exact snapshots. These files are not an import-ready directory without controlled filename mapping.
+
+Actual rollout at19:41UTC updated the compatible diagnostic worker before transport; gateway did not restart, actual fresh3.11.14 serving imports passed with network/credential discovery blocked, backendhealth200 both. Claims were held closed for qualification. No enhanced canonical writeback is established by deployment or source tests. Request cap4096, reasoningnone,90s provider/600s operation, byte/schema/owner/receipt/route/CAS/no-retry guards remain. No credentials or real transcript data in this package.

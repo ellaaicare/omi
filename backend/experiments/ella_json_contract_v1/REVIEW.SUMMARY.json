@@ -1,0 +1,35 @@
+{
+  "state": "PASS_SOURCE_ONLY_JSON_WIRE_FIDELITY_NOT_HISTORICAL_CAUSE",
+  "candidate_transport_sha256": "74e024dbeecc5fc9cab362aa91bff699e3d5ad4cff226cc0cc8cb410909f1ba0",
+  "candidate_worker_sha256": "0a133b4388c135d7c8e6828c5a0c9122633b6ec1ef8d00d4eb78e850e6a7729c",
+  "baseline_transport_sha256": "c4510619c8e63279d8e8080aa953a520ee91829a25c78099b5eea60466864452",
+  "baseline_worker_sha256": "a8ddc5e343e63a36a2c5be4f737e19ac0900b44e5d5ce07b70427e26aaef4a9f",
+  "source_provenance_pins": {
+    "repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/ella/services/semantic_contract_v2.py": "0599d368723d8dd5db44e7f8d472359f6ba7e5458f6fc860f126fd37a8095302",
+    "repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/ella/services/semantic_contextual_producer_v3.py": "7af91845d207580a459b73a728c845ca8302aa187280adcf415ffea418459f03",
+    "repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/ella/services/summary_title_quality.py": "e9aca8fa77d8d75b5c3c62f98b151ec2dc246fd999e7c7af80af27f9013c7917",
+    "reasoning-budget-v1/staged/gateway/platforms/semantic_direct_role.py": "eff376bbd1c72826c3c1a0c2e1af4e4f8759056abe6b201c3cd554c6f93799a8"
+  },
+  "independent_tests": {
+    "count": 17,
+    "pass": true,
+    "seconds": 0.256,
+    "boundary": "actual transport functions/diagnostic projector with fakeHTTP and snapshot doubles; no real generation"
+  },
+  "findings": [
+    "Approved frozen user wire is unchanged and remains user message; request.instructions now receives system-message role rather than being only buried inside user JSON.",
+    "Normal retained generator/verifier inputs set instructions from static GENERATOR/VERIFIER constants plus static context/title rules; transcript, candidate and companion documents remain separate data fields. This is not permission to promote arbitrary user/context strings.",
+    "Existing direct Codex execute path already passes same request.instructions into dedicated instructions field.",
+    "Instruction nonempty/type check is fail-closed; approved request hash and original auth/model/scope checks remain intact.",
+    "Optional output_json_status is closed structural category only; current strict JSON-object acceptance check unchanged. Fenced/scalar/array/duplicate/NaN/nonfinite literal/syntax fixtures remain rejected.",
+    "Worker AST outside diagnostic projector unchanged, legacy completion metadata remains accepted, unknown/type-invalid new diagnostic fields rejected.",
+    "No change to4096 caller cap, reasoningnone, provider90/job600, one-use/no-retry,tools/refusal/terminal/index/owner/route/CAS."
+  ],
+  "limitations": [
+    "Wire-level fidelity correction is not proof that missing system role caused any historical failure, nor proof future model returns valid schema/evidence.",
+    "System instructions are trusted only for audited server-generated path. Source/context injection remains untrusted data; no generic user-prompt privilege elevation is qualified.",
+    "Closed classifier prioritizes structural categories; object category is not semantic-schema/evidence approval and is not a full mathematical finite-number validator.",
+    "No live source/deployment/controller/credential/config/provider/DB action by reviewer.",
+    "No replay of latest failed job or other held sources authorized by this source verdict."
+  ]
+}
