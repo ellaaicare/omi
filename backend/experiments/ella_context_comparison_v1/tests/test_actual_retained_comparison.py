@@ -11,8 +11,11 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-HOST = ROOT / 'baseline/semantic_context_snapshot.py'
-spec = importlib.util.spec_from_file_location('actual_context_host_for_comparison', HOST)
+HOST = ROOT / 'baseline/semantic_context_snapshot.py.source'
+from importlib.machinery import SourceFileLoader
+
+loader = SourceFileLoader('actual_context_host_for_comparison', str(HOST))
+spec = importlib.util.spec_from_loader(loader.name, loader)
 host = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(host)
 
@@ -102,7 +105,7 @@ class Rig:
             'JOBS_FIELD': 'semantic_retained_completion_jobs_v1',
             'MAX_JOBS': 8,
         }
-        tree = ast.parse((ROOT / 'candidate/ella/services/retained_completion_enrichment.py').read_text())
+        tree = ast.parse((ROOT / 'candidate/ella/services/retained_completion_enrichment.py.source').read_text())
         nodes = [
             n
             for n in tree.body
@@ -113,7 +116,7 @@ class Rig:
         exec(
             compile(
                 ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
-                str(ROOT / 'candidate/ella/services/retained_completion_enrichment.py'),
+                str(ROOT / 'candidate/ella/services/retained_completion_enrichment.py.source'),
                 'exec',
             ),
             scope,
@@ -140,7 +143,7 @@ class Rig:
         with patch.dict(sys.modules, self.modules):
             exec(
                 compile(
-                    (ROOT / 'candidate/ella/services/context_snapshot_diagnostics.py').read_text(),
+                    (ROOT / 'candidate/ella/services/context_snapshot_diagnostics.py.source').read_text(),
                     'context_snapshot_diagnostics.py',
                     'exec',
                 ),

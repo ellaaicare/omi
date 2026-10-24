@@ -1,11 +1,12 @@
 {
   "contract": "ella-context-comparison-source-v1",
   "scope": "offline diagnostics candidate; NOT serving",
+  "immutable_source_suffix": ".py.source prevents publication hooks changing reviewed bytes",
   "files": {
-    "baseline/semantic_context_snapshot.py": "8fedeb9c857924a362976efdb6fe72ef412011d6a91a6cd04fe18ca68b251fbb",
-    "baseline/ella/services/retained_completion_enrichment.py": "5add890b6794a299434d1ace24a78e936377b760277233f22af33c0328152630",
-    "candidate/ella/services/context_snapshot_diagnostics.py": "88362dcbfef439e57523c4fe0b079856b4aac4750761137c0362ce16f4083ae8",
-    "candidate/ella/services/retained_completion_enrichment.py": "76918d3e0d7211322b7103a7edd39d2b21c9b0b41ad4aedb9f26398874e4903f",
-    "tests/test_actual_retained_comparison.py": "faf1618225d551693903c73fc2a0f1243841c0c6a0c733b99eb35420ccef57da"
+    "baseline/ella/services/retained_completion_enrichment.py.source": "5add890b6794a299434d1ace24a78e936377b760277233f22af33c0328152630",
+    "baseline/semantic_context_snapshot.py.source": "8fedeb9c857924a362976efdb6fe72ef412011d6a91a6cd04fe18ca68b251fbb",
+    "candidate/ella/services/context_snapshot_diagnostics.py.source": "88362dcbfef439e57523c4fe0b079856b4aac4750761137c0362ce16f4083ae8",
+    "candidate/ella/services/retained_completion_enrichment.py.source": "76918d3e0d7211322b7103a7edd39d2b21c9b0b41ad4aedb9f26398874e4903f",
+    "tests/test_actual_retained_comparison.py": "c593278e562db3a79465700255d4ef3ce8ad8cf0d296c89427b7e8eda841f6ec"
   }
 }
