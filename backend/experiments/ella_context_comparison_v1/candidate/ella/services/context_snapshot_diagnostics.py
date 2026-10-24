@@ -1,0 +1,58 @@
+"""Closed context comparison metadata. Never authority or acceptance semantics."""
+
+from __future__ import annotations
+import hashlib, json
+from ella.services.semantic_companion_context import SOURCES, MAX_DOCUMENT_BYTES, MAX_SNAPSHOT_BYTES
+
+
+def _hash(value):
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+    ).hexdigest()
+
+
+def compare_context_snapshots(expected, current):
+    """Return hashes/counts from two already-authenticated bounded snapshots only.
+    The caller keeps its full equality check and rejection. No context text,
+    arbitrary field names, identity values or private exception values are returned.
+    """
+    for value in (expected, current):
+        if not isinstance(value, dict) or set(value) != {'owner_uid', 'revision', 'documents'}:
+            return {'contract': 'ella-context-comparison-v1', 'valid_snapshots': False}
+        if (
+            not isinstance(value['owner_uid'], str)
+            or not isinstance(value['revision'], str)
+            or not isinstance(value['documents'], dict)
+            or set(value['documents']) != set(SOURCES)
+        ):
+            return {'contract': 'ella-context-comparison-v1', 'valid_snapshots': False}
+        if (
+            any(not isinstance(v, str) or len(v.encode()) > MAX_DOCUMENT_BYTES for v in value['documents'].values())
+            or len(json.dumps(value, ensure_ascii=False).encode()) > MAX_SNAPSHOT_BYTES
+        ):
+            return {'contract': 'ella-context-comparison-v1', 'valid_snapshots': False}
+
+    def view(value):
+        return {
+            'snapshot_sha256': _hash(value),
+            'revision_sha256': hashlib.sha256(value['revision'].encode()).hexdigest(),
+            'documents': {
+                k: {
+                    'sha256': hashlib.sha256(value['documents'][k].encode()).hexdigest(),
+                    'utf8_bytes': len(value['documents'][k].encode()),
+                }
+                for k in SOURCES
+            },
+        }
+
+    return {
+        'contract': 'ella-context-comparison-v1',
+        'valid_snapshots': True,
+        'owner_equal': expected['owner_uid'] == current['owner_uid'],
+        'revision_equal': expected['revision'] == current['revision'],
+        'normalized_documents_equal': expected['documents'] == current['documents'],
+        'changed_document_keys': [k for k in SOURCES if expected['documents'][k] != current['documents'][k]],
+        'expected': view(expected),
+        'current': view(current),
+        'authority_or_acceptance_changed': False,
+    }

@@ -20,3 +20,6 @@ pytest tests/postgres/test_voice_canary_postgres.py -v
 
 # Real distinct publication/producer binding classes; no provider/network effects.
 pytest experiments/ella_context_binding_v2/tests/test_context_fences.py -v
+
+# Actual retained coordinator and host hydration; mismatch remains fail-closed.
+pytest experiments/ella_context_comparison_v1/tests/test_actual_retained_comparison.py -v
