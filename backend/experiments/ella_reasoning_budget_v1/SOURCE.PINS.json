@@ -38,8 +38,8 @@
     },
     {
       "path": "tests/test_reasoning_budget.py",
-      "sha256": "b8961ffe313dfe863a1d5216b2f959dfc78664f113f320fed67ce72f419aeb79",
-      "bytes": 3636
+      "sha256": "36324b16a50adddc839a1094b16117a0cc0eca109caaf5e3e1ad598c510be57c",
+      "bytes": 4115
     },
     {
       "path": "tests/test_transport_regressions.py",
