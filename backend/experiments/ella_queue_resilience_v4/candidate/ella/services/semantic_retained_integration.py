@@ -1,0 +1,148 @@
+"""Explicit internal contextual producer for an already approved retained owner.
+
+No route, scheduler, policy write, automatic admission or publication is added.
+This entry point holds when the approved workspace is unavailable on this host;
+it never copies context from another profile or silently changes providers.
+"""
+
+from __future__ import annotations
+
+from ella.services import enrichment_stage_timing as _timing
+from ella.services.semantic_operation_budget import current_budget
+import asyncio
+
+from ella.services import semantic_publication as admission
+from ella.services.semantic_host_context import context_reader, HostReadBudget
+from ella.services.semantic_producer_ledger import run_versioned_producer
+
+
+async def run_retained_contextual_producer(
+    *,
+    uid,
+    conversation_id,
+    repository,
+    read_conversation,
+    update_conversation,
+    provider_deadline_seconds=90,
+    host_read_budget=None,
+    role_deadline_seconds=120,
+):
+    """Return an opaque verified proposal; never apply it to active summary.
+
+    Repository and conversation callbacks are internal owner-scoped production
+    dependencies, not caller JSON. Private schema-v2 policy and exact current
+    hydration digest/revision must already be admitted by the owning coordinator.
+    The existing owner gateway, model and credentials remain resolver-selected.
+    """
+    from ella.services.semantic_runtime_authority import (
+        resolve_semantic_runtime as resolve_isolated_runtime,
+        semantic_runtime_authority_identity as runtime_authority_identity,
+        revalidate_semantic_runtime as revalidate_runtime_authority,
+    )
+    from ella.services.ai_consent import assert_current_ai_consent
+    from ella.services.semantic_self_hosted_runtime import create_self_hosted_runtime_bridge
+
+    # Preserve the provider HTTP budget; include mandatory authority/canonical
+    # work in a separate finite whole-role allowance (existing adapter cap120).
+    if (
+        type(provider_deadline_seconds) not in (int, float)
+        or type(role_deadline_seconds) not in (int, float)
+        or not 0 < provider_deadline_seconds <= role_deadline_seconds <= 120
+    ):
+        raise admission.SemanticPublicationRejectedError('semantic_role_budget_invalid')
+    budget = current_budget()
+    if budget is not None:
+        budget.require_source(uid, conversation_id)
+    host_read_budget = host_read_budget or HostReadBudget()
+    if (
+        await _timing.await_stage(
+            'semantic_retained_integration.await.31', asyncio.to_thread(assert_current_ai_consent, uid)
+        )
+        != uid
+    ):
+        raise admission.SemanticPublicationRejectedError('semantic_consent_owner_changed')
+    runtime = await _timing.await_stage(
+        'semantic_retained_integration.await.33',
+        resolve_isolated_runtime(
+            uid, repository=repository, target_mode='hermes-cloud-transcript', host_read_budget=host_read_budget
+        ),
+    )
+    if runtime is None or runtime.uid != uid or runtime.provider != 'hermes':
+        raise admission.SemanticPublicationRejectedError('semantic_retained_owner_target_required')
+    identity = runtime_authority_identity(runtime)
+
+    host_reader = context_reader(
+        conversation_id=conversation_id, read_conversation=read_conversation, read_budget=host_read_budget
+    )
+
+    def context(owner_uid):
+        return host_reader(runtime, uid=owner_uid, runtime_identity=identity)
+
+    def current():
+        with _timing.stage('semantic_retained_integration.current'):
+            snapshot = context(uid)
+            conversation = read_conversation(uid, conversation_id)
+            if (
+                not isinstance(conversation, dict)
+                or conversation.get('id') != conversation_id
+                or conversation.get('uid', uid) != uid
+            ):
+                raise admission.SemanticPublicationRejectedError('semantic_owned_source_unavailable')
+            if admission.candidate_schema(conversation) != 2:
+                raise admission.SemanticPublicationRejectedError('semantic_contextual_policy_required')
+            binding = admission.current_binding(conversation, uid=uid, conversation_id=conversation_id)
+            if (
+                snapshot['revision'] != binding.companion_context_revision
+                or admission.digest(snapshot) != binding.companion_context_sha256
+            ):
+                raise admission.SemanticPublicationRejectedError('semantic_context_changed')
+            return binding
+
+    binding = await _timing.await_stage('semantic_retained_integration.await.57', asyncio.to_thread(current))
+    actual_runtime = await _timing.await_stage(
+        'semantic_retained_integration.await.58',
+        revalidate_runtime_authority(identity, repository=repository, host_read_budget=host_read_budget),
+    )
+    if runtime_authority_identity(actual_runtime) != identity:
+        raise admission.SemanticPublicationRejectedError('semantic_runtime_target_changed')
+    if (
+        await _timing.await_stage(
+            'semantic_retained_integration.await.61', asyncio.to_thread(assert_current_ai_consent, uid)
+        )
+        != uid
+    ):
+        raise admission.SemanticPublicationRejectedError('semantic_consent_owner_changed')
+    # Host provider90 < owned child100 < caller HTTP105. The original600-second
+    # normal-job budget still bounds authority, both roles and canonical checks.
+    gateway_timeout = (
+        105 if budget is not None and provider_deadline_seconds == 90 else min(provider_deadline_seconds, 120)
+    )
+    if budget is not None:
+        budget.remaining()
+    turn = create_self_hosted_runtime_bridge(
+        binding=binding,
+        current_binding=current,
+        repository=repository,
+        timeout_seconds=gateway_timeout,
+        expected_runtime_identity=identity,
+        host_read_budget=host_read_budget,
+    )
+    return await _timing.await_stage(
+        'semantic_retained_integration.await.66',
+        run_versioned_producer(
+            uid=uid,
+            conversation_id=conversation_id,
+            read_conversation=read_conversation,
+            update_conversation=update_conversation,
+            read_companion_context=context,
+            run_backend_turn=turn,
+            provider_deadline_seconds=provider_deadline_seconds,
+            role_deadline_seconds=role_deadline_seconds,
+            candidate_schema_version=2,
+            semantic_contract_version=admission.semantic_contract_version(
+                await _timing.await_stage(
+                    'semantic_retained_integration.await.69', asyncio.to_thread(read_conversation, uid, conversation_id)
+                )
+            ),
+        ),
+    )

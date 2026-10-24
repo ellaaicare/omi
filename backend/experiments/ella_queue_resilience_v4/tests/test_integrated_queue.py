@@ -1,3 +1,5 @@
+from test_shared_operation_budget import budget
+
 """Actual candidate transaction functions, synthetic serializable store.
 
 Cloud SDK/credential initialization and transcript decoding are replaced with
@@ -820,6 +822,8 @@ class IntegratedQueueTests(unittest.TestCase):
         scope = {
             '_timing': SimpleNamespace(stage=lambda name: nullcontext(), await_stage=await_stage),
             'SELF_HOSTED_CHANNELS': {'generator': 'generator'},
+            'current_budget': budget.current_budget,
+            'remaining_timeout': budget.remaining_timeout,
             'ROLE_POLICIES': {'generator': 'policy'},
             'copy': __import__('copy'),
             'json': json,

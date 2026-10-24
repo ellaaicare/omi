@@ -1,0 +1,19 @@
+{
+  "state": "INDEPENDENT_SOURCE_PASS_NOT_DEPLOYED",
+  "tests": 83,
+  "boundary": "actual transaction functions/AST runtime, actual thread-loop propagation and HTTPcore exception mapping; synthetic external adapters, no provider calls",
+  "source_pins_sha256": "527aa770d890a35c262127d8744859562b460ac7f3974a06e65af8032f02649e",
+  "independent_verdict_sha256": "1147c59c88349773411f19f865027d951e9756d2f0937ebf4c35decc7e03aeea",
+  "changes": [
+    "same exact attempt600-second budget shared by generator/verifier; legacy/shorter caps preserved",
+    "provider90 / ownedchild100 unchanged; normal gateway response105",
+    "closed TimeoutError diagnostics and partial-byte counters",
+    "OpenRouter preserves validated caller output cap"
+  ],
+  "limits": [
+    "no validated enhancement/writeback from failed verification",
+    "provider-delay cause remains unproven",
+    "service imports, rollout controllers and serving acceptance pending",
+    "fake long JSON does not establish real report token sufficiency"
+  ]
+}

@@ -1,3 +1,4 @@
+from test_shared_operation_budget import budget, JOB
 import ast, asyncio, copy, dataclasses, importlib.util, json, sys, types, unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -79,7 +80,12 @@ class DiagnosticTests(unittest.TestCase):
             captured.append(value)
             return value
 
-        scope = {'asyncio': asyncio, 'DeliveryResult': DeliveryResult, 'emit_causal_diagnostic': emit}
+        scope = {
+            'asyncio': asyncio,
+            'DeliveryResult': DeliveryResult,
+            'emit_causal_diagnostic': emit,
+            'operation_budget_scope': budget.operation_budget_scope,
+        }
         exec(
             compile(
                 ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
@@ -101,6 +107,7 @@ class DiagnosticTests(unittest.TestCase):
                 scope['direct_enrichment'](
                     Service(),
                     {
+                        **JOB,
                         'uid': 'synthetic-owner',
                         'conversation_id': 'synthetic-source',
                         'client_interaction_id': 'synthetic-client',

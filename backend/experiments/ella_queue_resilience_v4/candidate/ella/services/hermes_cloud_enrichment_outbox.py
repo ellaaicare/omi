@@ -1,6 +1,7 @@
 """Retryable delivery worker for the durable Hermes Cloud enrichment outbox."""
 
 from __future__ import annotations
+from ella.services.semantic_operation_budget import operation_budget_scope
 
 import asyncio
 import math
@@ -423,14 +424,15 @@ async def direct_enrichment(service, job):
     from ella.services.runtime_errors import ProvisioningError
 
     try:
-        async with asyncio.timeout(600):
-            result = await service.enrich(
-                uid=job['uid'],
-                conversation_id=job['conversation_id'],
-                allow_shadow=False,
-                expected_client_interaction_id=job['client_interaction_id'],
-                expected_transcript_sha256=job['transcript_sha256'],
-            )
+        with operation_budget_scope(job, 600):
+            async with asyncio.timeout(600):
+                result = await service.enrich(
+                    uid=job['uid'],
+                    conversation_id=job['conversation_id'],
+                    allow_shadow=False,
+                    expected_client_interaction_id=job['client_interaction_id'],
+                    expected_transcript_sha256=job['transcript_sha256'],
+                )
         if (
             result.conversation_id != job['conversation_id']
             or result.client_interaction_id != job['client_interaction_id']
@@ -467,8 +469,11 @@ async def direct_enrichment(service, job):
             retryable=False,
             receipt={'failure_diagnostic': diagnostic},
         )
-    except TimeoutError:
-        return DeliveryResult(False, 'normal_enrichment_timeout_unknown', retryable=False)
+    except TimeoutError as error:
+        diagnostic = emit_causal_diagnostic(error, 'normal_enrichment_dispatch')
+        return DeliveryResult(
+            False, 'normal_enrichment_timeout_unknown', retryable=False, receipt={'failure_diagnostic': diagnostic}
+        )
     except asyncio.CancelledError:
         raise  # Leave owned running lease unresolved; never make it pending again.
     except Exception as error:

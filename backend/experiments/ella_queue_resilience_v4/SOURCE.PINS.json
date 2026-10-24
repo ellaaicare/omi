@@ -1,8 +1,8 @@
 {
   "contract": "ella-queue-v4-review-package-v1",
-  "state": "DIAGNOSTIC_SUCCESSOR_REVIEWED_AND_DEPLOYED_ENHANCEMENT_UNQUALIFIED",
+  "state": "DEADLINE_TRANSPORT_SUCCESSOR_SOURCE_REVIEWED_NOT_DEPLOYED",
   "serving_snapshot_commit": "ec0247ead8ef19a4419cdaac0cc807eb795ab7bc",
-  "test_count": 61,
+  "test_count": 83,
   "files": [
     {
       "path": "BACKLOG.CALLER.REVIEW.json",
@@ -13,6 +13,16 @@
       "path": "CONTROL.REVIEW.json",
       "sha256": "e34e3ade1019bc3e1a75724a88dd024a60993f2ca12130304fcf89afb0082ba8",
       "bytes": 5372
+    },
+    {
+      "path": "DEADLINE.REVIEW.SUMMARY.json",
+      "sha256": "ebaf8553f2c5482a03d2c20037f711418a05a182425fbfeaa67ad732314a80f9",
+      "bytes": 1021
+    },
+    {
+      "path": "DEPLOYMENT.SOURCE.MAP.json",
+      "sha256": "e418e8394d9821dc772cbb44ba12de82df26a4138521c3decb70fafcfac1ca90",
+      "bytes": 1580
     },
     {
       "path": "DIAGNOSTIC.REVIEW.SUMMARY.json",
@@ -31,13 +41,48 @@
     },
     {
       "path": "README.md",
-      "sha256": "1284381acf5705fceb115ad74a17e70f521764996650a6dca0a79033fc444a80",
-      "bytes": 5075
+      "sha256": "2556a6a4db6b74838d3fb4dc97e85357bc7a54d244c5ada56d2f75e3abe93605",
+      "bytes": 6092
     },
     {
       "path": "ROLLOUT.md",
       "sha256": "af886fb26a397843102bd93a8999bd56492e81ea0833414c340f3f413fbccb33",
       "bytes": 7419
+    },
+    {
+      "path": "baseline/database/normal_enrichment_activation.py",
+      "sha256": "866ecc3e16043b110065abb62e6b78d669502ed9d07631a6b21f2445d9884bc5",
+      "bytes": 28963
+    },
+    {
+      "path": "baseline/ella/services/causal_diagnostics.py",
+      "sha256": "db84355b11a3e4d463c86349ada4ea10263a90e07bfc6d1548b820bb3feeac26",
+      "bytes": 4005
+    },
+    {
+      "path": "baseline/ella/services/hermes_cloud_enrichment_outbox.py",
+      "sha256": "a36dd56d543a33915fb9cf6f73dad9bbf076eefd28f71334599ff25b06ce8157",
+      "bytes": 22293
+    },
+    {
+      "path": "baseline/ella/services/semantic_host_context.py",
+      "sha256": "4da36796cabc076692a4f5873ed06ad7de86e049f89afd2510252c3283164d23",
+      "bytes": 14680
+    },
+    {
+      "path": "baseline/ella/services/semantic_producer_ledger.py",
+      "sha256": "df1cf705d4d43f15b2d61165b9b10d592f2d7baaa838fa248a29ead625ba6180",
+      "bytes": 21563
+    },
+    {
+      "path": "baseline/ella/services/semantic_retained_integration.py",
+      "sha256": "2820092aab81e06b32d53bac13da75307cce41d48943b478699245335d00ef94",
+      "bytes": 5727
+    },
+    {
+      "path": "baseline/ella/services/semantic_self_hosted_runtime.py",
+      "sha256": "0693ee6ccb5216264d8f535e54edf10fb07ec73005b37eea513537b4596ae5ab",
+      "bytes": 16837
     },
     {
       "path": "baseline/ella/services/transcript_processing_hold.py",
@@ -91,8 +136,8 @@
     },
     {
       "path": "candidate/ella/services/hermes_cloud_enrichment_outbox.py",
-      "sha256": "a36dd56d543a33915fb9cf6f73dad9bbf076eefd28f71334599ff25b06ce8157",
-      "bytes": 22293
+      "sha256": "f41a4ace8613fe5bb270eb8641da80aecbdb59fdcdb9949f94a7b824db8be5b0",
+      "bytes": 22603
     },
     {
       "path": "candidate/ella/services/normal_account_routing.py",
@@ -101,8 +146,8 @@
     },
     {
       "path": "candidate/ella/services/semantic_host_context.py",
-      "sha256": "4da36796cabc076692a4f5873ed06ad7de86e049f89afd2510252c3283164d23",
-      "bytes": 14680
+      "sha256": "069e6d768c192ddc8fb3c9cf6c0e636279e21e0c3aed3294862beb261308a0fe",
+      "bytes": 14799
     },
     {
       "path": "candidate/ella/services/semantic_learning_host_client.py",
@@ -110,9 +155,24 @@
       "bytes": 3637
     },
     {
+      "path": "candidate/ella/services/semantic_operation_budget.py",
+      "sha256": "db029f0a748d2a3f8a87712c8df1cca7b4b5929e935112094a4f793628880878",
+      "bytes": 2841
+    },
+    {
+      "path": "candidate/ella/services/semantic_producer_ledger.py",
+      "sha256": "bac56df9726256db03c6fb97a00ef078c8afd0f808e2941d84afc0f1a0799151",
+      "bytes": 24827
+    },
+    {
+      "path": "candidate/ella/services/semantic_retained_integration.py",
+      "sha256": "61be1529638cf83b81acc2cddd8aaf23a31b016d9a2304d1f5892440667d957d",
+      "bytes": 6696
+    },
+    {
       "path": "candidate/ella/services/semantic_self_hosted_runtime.py",
-      "sha256": "0693ee6ccb5216264d8f535e54edf10fb07ec73005b37eea513537b4596ae5ab",
-      "bytes": 16837
+      "sha256": "eb07cf47dbae43b6cf78e24c5c71faeb511bf9595683d9ef41b3342d79cf582d",
+      "bytes": 17213
     },
     {
       "path": "candidate/ella/services/summary_writeback.py",
@@ -125,19 +185,59 @@
       "bytes": 15570
     },
     {
+      "path": "host-baseline/semantic_direct_role.py.source",
+      "sha256": "9ea0c5c8d3fb59bac8e66b8643765c7946d80378ce68f81fa2d244f5942b7d3f",
+      "bytes": 13006
+    },
+    {
+      "path": "host-baseline/semantic_openrouter_transport.py.source",
+      "sha256": "4966910cafe91e9ea3762945956ac1c1dd099a7dfb5baf1796ca2bf93688ccf1",
+      "bytes": 8360
+    },
+    {
+      "path": "host-candidate/semantic_direct_role.py",
+      "sha256": "eff376bbd1c72826c3c1a0c2e1af4e4f8759056abe6b201c3cd554c6f93799a8",
+      "bytes": 14809
+    },
+    {
+      "path": "host-candidate/semantic_openrouter_transport.py",
+      "sha256": "2d528179d4e5fe96e5d6050ce06d5cbaaa8c35a647810a08b3295025de9a7fc5",
+      "bytes": 11415
+    },
+    {
       "path": "tests/test_attempt_fence.py",
       "sha256": "a8ffd631b6c446a2099cd51fe2bdc79a4d9b10b35b0f00cd1a36c259e5ac7cb7",
       "bytes": 9092
     },
     {
       "path": "tests/test_failure_diagnostics.py",
-      "sha256": "bdf855d3f7fb74758f4f4f69d2b9a935b73e6631fb9049e4d9e79554adc6d39b",
-      "bytes": 4783
+      "sha256": "8774263f5b11f243d7b0e40dc5b5d749c10193c1380cae816d66d969e6b662ef",
+      "bytes": 4983
     },
     {
       "path": "tests/test_integrated_queue.py",
-      "sha256": "73d9a305034f3a5e17a0d70fdce15481e33b058cdddc1d33deea8e27468319d8",
-      "bytes": 73024
+      "sha256": "b7224fce46a5bba092e7abfdb5e524921daca3bcd2104cfc3a6233c3d7c1641e",
+      "bytes": 73185
+    },
+    {
+      "path": "tests/test_provider_timeout_metadata.py",
+      "sha256": "603e763826095488e97de9cdb2014d741f641f342c1f928fd554fd64648eda15",
+      "bytes": 7836
+    },
+    {
+      "path": "tests/test_role_output_budget.py",
+      "sha256": "14d00335ee70151145b37cee4ca55e00e7b3292475eee12c0173ab3c4b190d75",
+      "bytes": 3675
+    },
+    {
+      "path": "tests/test_shared_operation_budget.py",
+      "sha256": "478b3235077865fe0728b88986ffe7f44564935e36dffb34f57dc32c43b45168",
+      "bytes": 13341
+    },
+    {
+      "path": "tests/test_timeout_diagnostic.py",
+      "sha256": "75e4cd8b85c5b83c86937ef592dc36f1f1acaec9f6d99e1ff9e29c78a0b0631a",
+      "bytes": 3950
     }
   ],
   "reviews": {

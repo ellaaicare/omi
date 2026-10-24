@@ -9,6 +9,7 @@ actual provider ID and owned canonical readback are required before success.
 from __future__ import annotations
 
 from ella.services import enrichment_stage_timing as _timing
+from ella.services.semantic_operation_budget import current_budget, remaining_timeout
 from database.enrichment_graph_guard import require_current as require_queue_graph
 
 import asyncio
@@ -202,6 +203,9 @@ class SelfHostedSemanticRuntimeBridge:
         with _timing.stage('semantic_self_hosted_runtime.__call__'):
             if role not in SELF_HOSTED_CHANNELS or not isinstance(request, dict):
                 _reject("semantic_runtime_request_invalid")
+            budget = current_budget()
+            if budget is not None:
+                budget.require_source(self.binding.uid, self.binding.conversation_id)
             request = copy.deepcopy(request)
             if request.get("policy") != ROLE_POLICIES[role] or not isinstance(request.get("instructions"), str):
                 _reject("semantic_runtime_policy_invalid")
@@ -219,7 +223,7 @@ class SelfHostedSemanticRuntimeBridge:
             session = "ella-semantic-" + role + "-" + key
             runtime, identity = await _timing.await_stage('semantic_self_hosted_runtime.await.155', self._authority())
             started = datetime.now(timezone.utc)
-            async with self._deps.client_factory(timeout=self.timeout_seconds) as client:
+            async with self._deps.client_factory(timeout=remaining_timeout(self.timeout_seconds)) as client:
                 runtime, _ = await _timing.await_stage(
                     'semantic_self_hosted_runtime.await.158', self._authority(identity)
                 )
@@ -228,6 +232,7 @@ class SelfHostedSemanticRuntimeBridge:
                     'semantic_self_hosted_runtime.await.159',
                     client.post(
                         runtime.gateway_url.rstrip('/') + '/v1/chat/completions',
+                        **({'timeout': remaining_timeout(self.timeout_seconds)} if budget is not None else {}),
                         headers={
                             'Authorization': 'Bearer ' + runtime.gateway_token,
                             'Content-Type': 'application/json',

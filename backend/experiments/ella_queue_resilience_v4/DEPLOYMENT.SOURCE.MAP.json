@@ -1,0 +1,32 @@
+[
+  {
+    "target_relative_path": "ella/services/hermes_cloud_enrichment_outbox.py",
+    "expected_serving_sha256": "a36dd56d543a33915fb9cf6f73dad9bbf076eefd28f71334599ff25b06ce8157",
+    "reviewed_sha256": "f41a4ace8613fe5bb270eb8641da80aecbdb59fdcdb9949f94a7b824db8be5b0"
+  },
+  {
+    "target_relative_path": "ella/services/semantic_producer_ledger.py",
+    "expected_serving_sha256": "df1cf705d4d43f15b2d61165b9b10d592f2d7baaa838fa248a29ead625ba6180",
+    "reviewed_sha256": "bac56df9726256db03c6fb97a00ef078c8afd0f808e2941d84afc0f1a0799151"
+  },
+  {
+    "target_relative_path": "ella/services/semantic_retained_integration.py",
+    "expected_serving_sha256": "2820092aab81e06b32d53bac13da75307cce41d48943b478699245335d00ef94",
+    "reviewed_sha256": "61be1529638cf83b81acc2cddd8aaf23a31b016d9a2304d1f5892440667d957d"
+  },
+  {
+    "target_relative_path": "ella/services/semantic_host_context.py",
+    "expected_serving_sha256": "4da36796cabc076692a4f5873ed06ad7de86e049f89afd2510252c3283164d23",
+    "reviewed_sha256": "069e6d768c192ddc8fb3c9cf6c0e636279e21e0c3aed3294862beb261308a0fe"
+  },
+  {
+    "target_relative_path": "ella/services/semantic_self_hosted_runtime.py",
+    "expected_serving_sha256": "0693ee6ccb5216264d8f535e54edf10fb07ec73005b37eea513537b4596ae5ab",
+    "reviewed_sha256": "eb07cf47dbae43b6cf78e24c5c71faeb511bf9595683d9ef41b3342d79cf582d"
+  },
+  {
+    "target_relative_path": "ella/services/semantic_operation_budget.py",
+    "expected_serving_sha256": null,
+    "reviewed_sha256": "db029f0a748d2a3f8a87712c8df1cca7b4b5929e935112094a4f793628880878"
+  }
+]

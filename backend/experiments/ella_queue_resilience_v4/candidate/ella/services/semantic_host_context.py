@@ -7,6 +7,7 @@ bounded; it replaces a local file read without fallback or cached authority.
 from __future__ import annotations
 
 from ella.services import enrichment_stage_timing as _timing
+from ella.services.semantic_operation_budget import remaining_timeout
 from database.enrichment_graph_guard import require_current as require_queue_graph
 import asyncio
 import hashlib
@@ -157,7 +158,9 @@ class HostReadBudget:
             if remaining <= 0 or self.calls >= self.max_calls:
                 raise CompanionContextUnavailable('semantic_host_read_budget_exhausted')
             self.calls += 1
-            return min(90 if action == 'sync' else 60 if action == 'context_snapshot' else 5, remaining)
+            return remaining_timeout(
+                min(90 if action == 'sync' else 60 if action == 'context_snapshot' else 5, remaining)
+            )
 
 
 def digest(value):
