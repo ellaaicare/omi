@@ -14,6 +14,7 @@ import requests
 from ella.services.normal_account_routing import resolve_route
 from ella.services import normal_account_routing
 from ella.services.runtime_errors import ProvisioningError
+from ella.services.causal_diagnostics import emit as emit_causal_diagnostic
 
 from database.hermes_cloud_enrichment_outbox import (
     FirestoreHermesCloudEnrichmentOutbox,
@@ -459,15 +460,19 @@ async def direct_enrichment(service, job):
             'account_provider_unsupported',
             'retained_completion_rejected',
         }
-        return DeliveryResult(False, exc.code if exc.code in codes else 'normal_enrichment_held', retryable=False)
+        diagnostic = emit_causal_diagnostic(exc, 'normal_enrichment_dispatch')
+        return DeliveryResult(
+            False,
+            exc.code if exc.code in codes else 'normal_enrichment_held',
+            retryable=False,
+            receipt={'failure_diagnostic': diagnostic},
+        )
     except TimeoutError:
         return DeliveryResult(False, 'normal_enrichment_timeout_unknown', retryable=False)
     except asyncio.CancelledError:
         raise  # Leave owned running lease unresolved; never make it pending again.
     except Exception as error:
-        from ella.services.causal_diagnostics import emit
-
-        diagnostic = emit(error, 'normal_enrichment_dispatch')
+        diagnostic = emit_causal_diagnostic(error, 'normal_enrichment_dispatch')
         return DeliveryResult(
             False, 'normal_enrichment_unknown', retryable=False, receipt={'failure_diagnostic': diagnostic}
         )

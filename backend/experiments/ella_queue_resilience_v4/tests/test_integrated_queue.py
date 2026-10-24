@@ -265,6 +265,7 @@ class IntegratedQueueTests(unittest.TestCase):
         cls.saved = dict(sys.modules)
         cls.modules = patch.dict(sys.modules, mods)
         cls.modules.start()
+        sys.modules['ella.services'].__path__ = [str(ROOT / 'candidate/ella/services')]
         cls.lifecycle = importlib.import_module('database.normal_account_lifecycle')
         cls.activation = importlib.import_module('database.normal_enrichment_activation')
         cls.isolation = importlib.import_module('database.enrichment_job_isolation')
@@ -1661,6 +1662,45 @@ class IntegratedQueueTests(unittest.TestCase):
             self.assertEqual(self.db.rows[path]['summary_writeback_receipt']['status'], 'pending_reconciliation')
         finally:
             self.future._worker_job.reset(token)
+
+    def test_bound_unknown_failure_diagnostic_persisted_without_success_receipt(self):
+        from ella.services.causal_diagnostics import safe_exception
+
+        self.owner('one')
+        job = self.claim(self.job('one'))
+        self.assertTrue(self.begin(job))
+        diagnostic = safe_exception(ValueError('private text not exported'), 'normal_enrichment_dispatch')
+        self.assertTrue(self.finish(job, receipt={'failure_diagnostic': diagnostic}))
+        current = self.db.rows[(self.activation.JOBS, job['job_id'])]
+        tombstone = self.isolation.tombstone_ref(self.db, job).get().to_dict()
+        self.assertEqual(current['status'], 'quarantined')
+        self.assertEqual(current['failure_diagnostic'], diagnostic)
+        self.assertEqual(tombstone['failure_diagnostic'], diagnostic)
+        self.assertNotIn('receipt', current)
+        self.assertEqual(tombstone['outcome'], 'unknown_quarantined')
+
+    def test_foreign_lease_and_prior_quarantine_cannot_add_diagnostic(self):
+        self.owner('one')
+        job = self.claim(self.job('one'))
+        self.begin(job)
+        before = deepcopy(self.db.rows)
+        foreign = {**job, 'lease_token': 'foreign'}
+        self.assertFalse(self.finish(foreign, receipt={'failure_diagnostic': {'raw': 'private'}}))
+        self.assertEqual(self.db.rows, before)
+        self.assertTrue(self.finish(job))
+        before = deepcopy(self.db.rows)
+        self.assertFalse(self.finish(job, receipt={'failure_diagnostic': {'raw': 'private'}}))
+        self.assertEqual(self.db.rows, before)
+
+    def test_untrusted_failure_payload_never_persisted(self):
+        self.owner('one')
+        job = self.claim(self.job('one'))
+        self.begin(job)
+        self.assertTrue(self.finish(job, receipt={'failure_diagnostic': {'raw_transcript': 'private'}}))
+        current = self.db.rows[(self.activation.JOBS, job['job_id'])]
+        self.assertEqual(current['status'], 'quarantined')
+        self.assertNotIn('failure_diagnostic', current)
+        self.assertNotIn('failure_diagnostic', self.isolation.tombstone_ref(self.db, job).get().to_dict())
 
 
 if __name__ == '__main__':

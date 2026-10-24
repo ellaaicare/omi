@@ -7,6 +7,7 @@ clear API. Tenant quarantine requires reviewed operation/readback and cleanup.
 from database import normal_account_lifecycle as lifecycle
 from database import enrichment_job_isolation as isolation
 from database import enrichment_attempt_fence as attempt_fence
+from ella.services.causal_diagnostics import sanitize_diagnostic
 import hashlib
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -601,6 +602,13 @@ def finish(transaction, db, ref, *, lease_token, now, outcome, error_code='', re
         'updated_at': now,
         'last_error_code': error_code[:120] or None,
     }
+    diagnostic = (
+        sanitize_diagnostic(receipt.get('failure_diagnostic'))
+        if outcome != 'success' and type(receipt) is dict
+        else None
+    )
+    if diagnostic is not None:
+        update['failure_diagnostic'] = diagnostic
     tu = {**tenant, 'active_job_id': None}
     pu = {'active': [a for a in active if a['job_id'] != job['job_id']]}
     if outcome == 'success' and job.get('dispatch_state') == 'started_unknown' and isinstance(receipt, dict):
@@ -648,7 +656,13 @@ def finish(transaction, db, ref, *, lease_token, now, outcome, error_code='', re
     if closed is not None:
         update[isolation.FENCE_FIELD] = closed
         if tombstone_ref is not None:
-            transaction.create(tombstone_ref, isolation.tombstone(job, closed, now))
+            transaction.create(
+                tombstone_ref,
+                {
+                    **isolation.tombstone(job, closed, now),
+                    **({'failure_diagnostic': diagnostic} if diagnostic is not None else {}),
+                },
+            )
         if marker_update is not None:
             transaction.update(marker_ref, marker_update)
     transaction.update(reference(db), pu)

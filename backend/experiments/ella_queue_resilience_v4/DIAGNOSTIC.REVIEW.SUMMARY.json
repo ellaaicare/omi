@@ -1,0 +1,14 @@
+{
+  "contract": "ella-diagnostic-source-review-summary-v1",
+  "independent_review_sha256": "85ae29b1d3d4fd57180081d82dd808bb290952a4b666d32a4cacdc36837f0985",
+  "offline_checks_passed": 61,
+  "boundary": "Actual transaction functions with synthetic store; no provider or customer-data test. Known branch test executes actual function AST with a synthetic exception.",
+  "candidate_files": {
+    "ella/services/causal_diagnostics.py": "7dd2607728a5f26cfd8305ff558e7adbf26ddad4cf6e0bd9bb6b71bb96228784",
+    "ella/services/hermes_cloud_enrichment_outbox.py": "a36dd56d543a33915fb9cf6f73dad9bbf076eefd28f71334599ff25b06ce8157",
+    "database/normal_enrichment_activation.py": "ab69ebdb514ecaaad4a2ea14c7584a85445e47dafb896c49ff6ee0cafad7a5be"
+  },
+  "actual_deployment_utc": "2026-10-24T11:00:03.117827Z",
+  "health": "both existing backend health endpoints200",
+  "limits": "No successful enhanced canonical writeback yet. Deadline mismatch causality unproven; no timeout change. Prior quarantines unchanged."
+}

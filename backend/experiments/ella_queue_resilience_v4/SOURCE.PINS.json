@@ -1,8 +1,8 @@
 {
   "contract": "ella-queue-v4-review-package-v1",
-  "state": "REVIEWED_54_CHECK_SUCCESSOR_STAGED_NOT_DEPLOYED",
+  "state": "DIAGNOSTIC_SUCCESSOR_REVIEWED_AND_DEPLOYED_ENHANCEMENT_UNQUALIFIED",
   "serving_snapshot_commit": "ec0247ead8ef19a4419cdaac0cc807eb795ab7bc",
-  "test_count": 54,
+  "test_count": 61,
   "files": [
     {
       "path": "BACKLOG.CALLER.REVIEW.json",
@@ -13,6 +13,11 @@
       "path": "CONTROL.REVIEW.json",
       "sha256": "e34e3ade1019bc3e1a75724a88dd024a60993f2ca12130304fcf89afb0082ba8",
       "bytes": 5372
+    },
+    {
+      "path": "DIAGNOSTIC.REVIEW.SUMMARY.json",
+      "sha256": "e57555d473ac53d73a7aea19b4464dd26ac1fbb4a8eed5c6984c37855c0c9fb9",
+      "bytes": 1010
     },
     {
       "path": "INTEGRATED.REVIEW.json",
@@ -26,8 +31,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "d2f1092d8c03d103d12ae52be4ac4da5cd813d62a8f7cc5c245564078e7c02bf",
-      "bytes": 4451
+      "sha256": "1284381acf5705fceb115ad74a17e70f521764996650a6dca0a79033fc444a80",
+      "bytes": 5075
     },
     {
       "path": "ROLLOUT.md",
@@ -76,13 +81,18 @@
     },
     {
       "path": "candidate/database/normal_enrichment_activation.py",
-      "sha256": "866ecc3e16043b110065abb62e6b78d669502ed9d07631a6b21f2445d9884bc5",
-      "bytes": 28963
+      "sha256": "ab69ebdb514ecaaad4a2ea14c7584a85445e47dafb896c49ff6ee0cafad7a5be",
+      "bytes": 29457
+    },
+    {
+      "path": "candidate/ella/services/causal_diagnostics.py",
+      "sha256": "7dd2607728a5f26cfd8305ff558e7adbf26ddad4cf6e0bd9bb6b71bb96228784",
+      "bytes": 9721
     },
     {
       "path": "candidate/ella/services/hermes_cloud_enrichment_outbox.py",
-      "sha256": "d013c91a518a19dbe254f3cef90bd8bc11fba3dd63a85fa9fe0a24ed5e99ea4f",
-      "bytes": 22076
+      "sha256": "a36dd56d543a33915fb9cf6f73dad9bbf076eefd28f71334599ff25b06ce8157",
+      "bytes": 22293
     },
     {
       "path": "candidate/ella/services/normal_account_routing.py",
@@ -120,9 +130,14 @@
       "bytes": 9092
     },
     {
+      "path": "tests/test_failure_diagnostics.py",
+      "sha256": "aec561cae21823e1cffc07a876451e11b18961c984552cf4d68c526e945b09b1",
+      "bytes": 4068
+    },
+    {
       "path": "tests/test_integrated_queue.py",
-      "sha256": "5b204b4dc8505ef6b16a69f8792316be7aff9baac10c4972db1973e1d36ea7a3",
-      "bytes": 70832
+      "sha256": "eeadc1c228a271d5bc555bf4248e06c6415168842dc152fbc3f25951170b2c9f",
+      "bytes": 72976
     }
   ],
   "reviews": {
