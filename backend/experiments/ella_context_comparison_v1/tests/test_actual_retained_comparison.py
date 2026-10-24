@@ -266,6 +266,29 @@ class ActualRetainedTests(unittest.IsolatedAsyncioTestCase):
     async def test_diagnostic_failure_cannot_replace_original_rejection(self):
         self.assertIsNone(await self.mismatch(lambda r: (r.path / 'MEMORY.md').write_text('changed'), True))
 
+    async def test_selected_file_mtime_only_is_not_context_change(self):
+        import os
+
+        r = Rig(lambda value: os.utime(value.path / 'MEMORY.md', ns=(1000000000, 2000000000)))
+        (r.path / 'MEMORY.md').write_text('synthetic stable content')
+        try:
+            with self.assertRaises(StopAtProduce):
+                await r.run()
+            self.assertEqual(r.produce_calls, 1)
+            self.assertEqual(r.policy_commits, 1)
+        finally:
+            r.close()
+
+    async def test_unselected_attempt_file_does_not_enter_context_identity(self):
+        r = Rig(lambda value: (value.path / 'synthetic-attempt-metadata.json').write_text('new-attempt'))
+        try:
+            with self.assertRaises(StopAtProduce):
+                await r.run()
+            self.assertEqual(r.produce_calls, 1)
+            self.assertEqual(r.policy_commits, 1)
+        finally:
+            r.close()
+
 
 if __name__ == '__main__':
     unittest.main()
