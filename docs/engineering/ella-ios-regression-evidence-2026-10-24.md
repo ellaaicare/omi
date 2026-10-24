@@ -172,3 +172,33 @@ Remaining: external Atlas takeover and finite source/Git write plan; authoritati
 ## Scope of this review publication
 
 This branch adds only this sanitized appendix. It does not change app/backend code, workflow files, credentials, tester access or live storage. No SDK/CI workflow is manually dispatched. The code reconciliation, authoritative Thin mapping, required app tests, upstream merge-base calculation and actual storage/capture/enhancement acceptance remain open. No local dirty checkout/index is touched. Backend source fixes and their tests remain owned by the backend branch.
+
+## Reconciliation of Claude's final external architecture assessment
+
+The final local review was received on 2026-10-24: 16,940 bytes, SHA256 `f4b09f5cf2b5d53485ad87e92a96128fb1fe0f78fdfd4debbdafed8c8b18071a`. This section summarizes that external assessment; it is not an independently executed backend audit or a deployment approval. Its original Drive task remains open because the reviewer reported expired Drive write access; no formal Drive reply was uploaded. No credential repair is implied.
+
+Claude recommends **repair in place after G0**, deferring a minimal upstream re-port and rejecting a wholesale rewrite for now. G0 means an exact serving-source snapshot in Git, a per-file SHA256 manifest and import/dependency closure, plus an artifact-to-source reconciliation for each installed app. These are deliverables still required, not completed by this documentation branch. A directory digest and a git-archive digest must use the same explicitly defined canonical inventory/serialization before equality is meaningful; comparing unlike archive formats is insufficient.
+
+The external findings map to the existing implementation boundaries as follows:
+
+| Finding | Required boundary / iOS implication | Evidence limit |
+|---|---|---|
+| B1: unversioned serving baseline | Commit exact backend serving closure and reconcile Main967/Thin30 artifact source/config to reviewable commits. Preserve original snapshots. | This branch remains documentation only; no serving snapshot or iOS code reconciliation is claimed. |
+| B2: mutable job quarantine affects account authority | Keep immutable owner/route/consent/epoch authority separate from per-job outcomes. Queue failures must not become setup/consent failures. | Backend-owned causal assessment; do not remove genuine auth failure checks to hide it. |
+| B3: historical quarantines poison capacity | Distinguish live leases, bounded uncertain reservations and terminal history; require age alarms/operator resolution. | Never auto-release an uncertain external effect or replay it merely because a lease expires. |
+| B4: claims pause exits worker | Maintenance should close claims while keeping worker/capture/source admission independently operable. | Proposed versioned maintenance policy is not deployed or enabled by this review. |
+| B5: lease/attempt ABA and late effects | Require transactional phase/attempt/lease and owner/route/epoch fences at effect and writeback boundaries. | Offline pure-core results do not establish production call-site coverage. |
+| B6: silent unavailable/result-label/empty-successor paths | Expose truthful not-attempted/unavailable state; contract-test backend labels against Main and Thin; retain the latest meaningful version. | Each app's actual read path must be tested; no shared-result support or fix is assumed. |
+
+Claude proposes 13 integrated adversarial cases: quarantine isolation; historical/uncertain capacity; lease ABA; START-versus-close; unknown commit; owner/route change; manual-versus-automatic finalization; claims maintenance; scan starvation; unavailable replacement; cross-repo result labels; rollback policy; and foreign/retired authority rejection. **These are proposed tests, not 13 executed passes.** They supplement, rather than replace, physical capture/background/reconnect/Stop/upgrade acceptance and separate Whispers qualification. The referenced 17/42-test backend candidate needs an exact reviewable commit and separately reconciled actual results; this appendix does not resolve that count or infer integration coverage.
+
+Measurement corrections and open decision inputs:
+
+- Claude's Git counts, root-history explanation and GitHub comparison outcomes are external claims not independently reverified here. The verified local facts remain the pinned refs and artifact-versus-fork-main path counts above.
+- A reported lack of common ancestry does not prove content integration or a deliberate unrelated-history merge impossible. A history rewrite is a hypothesis, not established causality. Do not base the architecture decision on an absolute impossibility claim.
+- Counts against cached September 30 upstream cannot be called a lower bound on today's drift: current upstream content may converge or diverge. Fresh upstream graph/content measurement remains storage-gated; no fetch was performed for this reconciliation.
+- Claude's effort ranges are low-confidence estimates, not delivery commitments. Likewise, its cited 30/50 GB storage policy is not adopted as a replacement for this build lane's existing explicit protected floors and cumulative accounting.
+- Main966-to-967 changed both Ella-owned presentation/lifecycle code and vendored `upstream_capture` controller/coordinator paths. That identifies touched boundaries, not which upstream revision caused or fixed a physical defect. Map each failure to an exact failing/passing fixture and source delta before treating current-upstream re-port criterion as met.
+- The authoritative Thin repository/subtree remains unresolved. Current Thin HTTP detail is Conversation-only and cannot be composed with the canonical MCP adapter by inventing query arguments or stripping authority headers.
+
+Next implementation evidence remains: exact serving/import closure and app-source commits, transactional effect-call-site inventory, reviewed integrated tests, then a fresh mapped-account capture → stock save → own-agent enhancement → canonical writeback → visible version/recall slice, repeated with a sealed failed job present. Preserve source, sessions, account mappings, unknown operations and quarantine history. No replay, reseal, remap, policy activation, storage change, build or rollout was performed for this review update.
