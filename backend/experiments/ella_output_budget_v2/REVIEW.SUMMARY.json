@@ -1,0 +1,24 @@
+{
+  "state": "PASS_ISOLATED_SOURCE_NOT_DEPLOYMENT",
+  "candidate_sha256": "42db97802e6f91f2f4a334442d8791d34313726666230045088700b5abc87e02",
+  "baseline_sha256": "eb07cf47dbae43b6cf78e24c5c71faeb511bf9595683d9ef41b3342d79cf582d",
+  "test_sha256": "ae0507c705e20fd365ea51285779cf18a05e612c593153df4e54285e04acc528",
+  "independent_tests": {
+    "count": 3,
+    "pass": true,
+    "seconds": 0.027,
+    "scope": "AST actual caller-cap extraction into actual transport functions with fakeHTTP; not full actual async caller execution."
+  },
+  "findings": [
+    "Exact diff only max_tokens1600 to4096. Baseline byte-identical to reviewed deadline-v1 bridge.",
+    "4096 is bounded below existing strict gateway8192 ceiling; reasoningnone existing transport setting retained.",
+    "No authority/route/nonce/CAS/role/terminal/length/tool/no-retry/time-limit change.",
+    "Producer16000-byte result bound remains independently enforced."
+  ],
+  "limitations": [
+    "Not a fix for latest strict-inner-JSON response_invalid failure.",
+    "Does not prove model response fits4096 or16000bytes, nor successful enrichment or latency.",
+    "Direct Codex payload currently omits output cap; this bridge change affects current OpenRouter transport, not Codex budgeting.",
+    "No live import/deployment/controller/provider/DB/inference executed by review."
+  ]
+}

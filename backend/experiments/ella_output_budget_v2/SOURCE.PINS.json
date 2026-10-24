@@ -1,0 +1,30 @@
+{
+  "scope": "REVIEWED_4096_CALLER_BUDGET",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "dec81c49e832283a86c097077a5b6999d7fde41a13475f6306936d6eeb3ac495",
+      "bytes": 1005
+    },
+    {
+      "path": "REVIEW.SUMMARY.json",
+      "sha256": "9e64292ac3450e31a38d7ea7f863d17e278d150299cc6e272743d03d5852716c",
+      "bytes": 1351
+    },
+    {
+      "path": "baseline/semantic_self_hosted_runtime.py.source",
+      "sha256": "eb07cf47dbae43b6cf78e24c5c71faeb511bf9595683d9ef41b3342d79cf582d",
+      "bytes": 17213
+    },
+    {
+      "path": "candidate/semantic_self_hosted_runtime.py",
+      "sha256": "42db97802e6f91f2f4a334442d8791d34313726666230045088700b5abc87e02",
+      "bytes": 17213
+    },
+    {
+      "path": "tests/test_requested_budget.py",
+      "sha256": "9c4922b604a3547f26e34a6c838e2219b49b185f280c9b7ab9778cdf7a4e5687",
+      "bytes": 2643
+    }
+  ]
+}
