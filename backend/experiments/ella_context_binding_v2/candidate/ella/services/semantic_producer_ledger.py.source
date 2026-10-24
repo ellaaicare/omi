@@ -1,0 +1,522 @@
+"""Internal server-only producer adapter and durable, finite one-attempt ledger.
+
+No HTTP receipt-issuance surface exists. Repository callbacks are trusted,
+owner-scoped conversation reads and update_conversation_with_builder writes.
+Runtime calls must use the existing owner-bound backend turn service/model.
+"""
+
+from __future__ import annotations
+
+from ella.services import enrichment_stage_timing as _timing
+from ella.services.semantic_operation_budget import current_budget
+
+import asyncio
+import copy
+import json
+import threading
+import time
+from dataclasses import asdict, dataclass
+from typing import Callable
+
+from ella.services.canonical_summary_source import canonical_source_from_conversation
+from ella.services import semantic_publication as admission
+
+EXECUTIONS_FIELD = 'semantic_producer_executions_v1'
+MAX_OPERATIONS = 8
+MAX_RESULT_BYTES = 16000
+
+
+@dataclass(frozen=True)
+class BackendTurn:
+    """Constructed only from an actual owned backend runtime turn result."""
+
+    result: dict
+    runtime_interaction_id: str
+    canonical_assistant_event_id: str
+
+
+class TrustedRuntimeAdapter:
+    def __init__(self, *, loop, run_turn, role, observations, deadline, cancellation=None):
+        if role not in {'generator', 'verifier'} or not 0 < deadline <= 120:
+            raise ValueError('semantic_runtime_configuration')
+        self.loop, self.run_turn, self.role = loop, run_turn, role
+        self.observations, self.deadline = observations, deadline
+        self.cancellation = cancellation or threading.Event()
+        self.future = None
+        self.worker_budget = current_budget()
+        self.operation_budget = self.worker_budget if deadline == 120 else None
+
+    def cancel(self):
+        self.cancellation.set()
+        if self.future is not None:
+            self.future.cancel()
+
+    def __call__(self, request):
+        if self.worker_budget is not None and current_budget() is not self.worker_budget:
+            raise ValueError('semantic_operation_scope_changed')
+
+        # Called in the producer thread; execute on the owning application's
+        # main loop, never create a second event loop/pool or borrow credentials.
+        async def guarded():
+            if self.cancellation.is_set():
+                raise admission.SemanticPublicationRejectedError('semantic_cancelled_hold')
+            result = await _timing.await_stage(
+                'semantic_producer_ledger.await.52', self.run_turn(role=self.role, request=copy.deepcopy(request))
+            )
+            if self.cancellation.is_set():
+                raise admission.SemanticPublicationRejectedError('semantic_cancelled_hold')
+            return result
+
+        if self.cancellation.is_set():
+            raise admission.SemanticPublicationRejectedError('semantic_cancelled_hold')
+        # The normal worker already owns one600-second job deadline. Reuse its
+        # remaining wall time for both roles; legacy callers retain their120 cap.
+        if self.worker_budget is not None:
+            self.worker_budget.remaining()  # Expiry cannot start a provider coroutine.
+        future = asyncio.run_coroutine_threadsafe(guarded(), self.loop)
+        self.future = future
+        if self.cancellation.is_set():
+            future.cancel()
+        try:
+            remaining = self.worker_budget.remaining() if self.worker_budget is not None else self.deadline
+            if self.operation_budget is None:
+                remaining = min(self.deadline, remaining)
+            clock = self.worker_budget.clock if self.worker_budget is not None else time.monotonic
+            wait_deadline = clock() + remaining
+            turn = future.result(timeout=remaining)
+            if self.worker_budget is not None:
+                if current_budget() is not self.worker_budget:
+                    raise ValueError('semantic_operation_scope_changed')
+                self.worker_budget.remaining()
+            if clock() >= wait_deadline:
+                raise TimeoutError('semantic_operation_budget_exhausted')
+            if self.cancellation.is_set():
+                raise admission.SemanticPublicationRejectedError('semantic_cancelled_hold')
+        except BaseException:
+            future.cancel()
+            # Cancellation does not prove provider drain. Durable START remains
+            # unresolved, preventing a second attempt with this operation key.
+            raise
+        if (
+            not isinstance(turn, BackendTurn)
+            or not isinstance(turn.result, dict)
+            or not all(
+                isinstance(v, str) and v for v in (turn.runtime_interaction_id, turn.canonical_assistant_event_id)
+            )
+        ):
+            raise ValueError('semantic_backend_turn_invalid')
+        self.observations[(self.role, admission.digest(request))] = (
+            turn.runtime_interaction_id,
+            turn.canonical_assistant_event_id,
+        )
+        return copy.deepcopy(turn.result)
+
+
+class DurableServerLedger:
+    def __init__(
+        self,
+        *,
+        uid,
+        conversation_id,
+        read_conversation,
+        update_conversation,
+        read_companion_context,
+        observations,
+        candidate_schema_version=1,
+        semantic_contract_version=1,
+        cancellation=None,
+    ):
+        self.uid, self.cid = uid, conversation_id
+        self.read, self.update, self.observations = read_conversation, update_conversation, observations
+        self.read_context = read_companion_context
+        if type(candidate_schema_version) is not int or candidate_schema_version not in {1, 2}:
+            raise admission.SemanticPublicationRejectedError('semantic_schema_invalid')
+        if (
+            type(semantic_contract_version) is not int
+            or semantic_contract_version not in (1, 2)
+            or (semantic_contract_version == 2 and candidate_schema_version != 2)
+        ):
+            raise admission.SemanticPublicationRejectedError('semantic_contract_version_invalid')
+        self.contract = semantic_contract_version
+        self.schema = candidate_schema_version
+        self.cancellation = cancellation or threading.Event()
+
+    def _owned(self, conversation):
+        if (
+            not isinstance(conversation, dict)
+            or conversation.get('id') != self.cid
+            or conversation.get('uid', self.uid) != self.uid
+        ):
+            raise admission.SemanticPublicationRejectedError('semantic_owned_source_unavailable')
+        return conversation
+
+    def _binding(self, incoming):
+        value = dict(incoming)
+        if value.pop('policy', None) != 'ella-semantic-summary-v1':
+            raise admission.SemanticPublicationRejectedError('semantic_policy_invalid')
+        contract = value.pop('semantic_contract_version', 1)
+        if type(contract) is not int or contract != self.contract:
+            raise admission.SemanticPublicationRejectedError('semantic_contract_version_changed')
+        incoming_schema = value.pop('candidate_schema_version', 1)
+        if type(incoming_schema) is not int or incoming_schema != self.schema:
+            raise admission.SemanticPublicationRejectedError('semantic_schema_invalid')
+        binding = admission.PublicationBinding(**value)
+        if binding.uid != self.uid or binding.conversation_id != self.cid:
+            raise admission.SemanticPublicationRejectedError('semantic_owner_changed')
+        return binding
+
+    def _fresh(self, conversation, binding):
+        with _timing.stage('semantic_producer_ledger._fresh'):
+            if self.cancellation.is_set():
+                raise admission.SemanticPublicationRejectedError('semantic_cancelled_hold')
+            if admission.semantic_contract_version(conversation) != self.contract:
+                raise admission.SemanticPublicationRejectedError('semantic_contract_version_changed')
+            if admission.candidate_schema(conversation) != self.schema:
+                raise admission.SemanticPublicationRejectedError('semantic_schema_changed')
+            if self.contract == 2:
+                operations = conversation.get(EXECUTIONS_FIELD) or {}
+                if not isinstance(operations, dict) or any(
+                    not isinstance(op, dict)
+                    or op.get('semantic_contract_version') != 2
+                    or op.get('binding') != asdict(binding)
+                    for op in operations.values()
+                ):
+                    raise admission.SemanticPublicationRejectedError('semantic_legacy_transition_hold')
+            if admission.current_binding(self._owned(conversation), uid=self.uid, conversation_id=self.cid) != binding:
+                raise admission.SemanticPublicationRejectedError('semantic_authority_changed')
+
+    def execute_once(self, *, binding, role, request, adapter):
+        with _timing.stage('semantic_producer_ledger.execute_once'):
+            bound = self._binding(binding)
+            contract = request.get('semantic_contract_version', 1) if isinstance(request, dict) else None
+            if type(contract) is not int or contract != self.contract:
+                raise admission.SemanticPublicationRejectedError('semantic_contract_request_mismatch')
+            if role not in {'generator', 'verifier'}:
+                raise admission.SemanticPublicationRejectedError('semantic_role_invalid')
+            request_hash = admission.digest(request)
+            key = admission.digest({'binding': asdict(bound), 'role': role, 'request': request_hash})
+
+            def reserve(conversation):
+                self._fresh(conversation, bound)
+                operations = copy.deepcopy(conversation.get(EXECUTIONS_FIELD) or {})
+                if not isinstance(operations, dict):
+                    raise admission.SemanticPublicationRejectedError('semantic_execution_ledger_invalid')
+                prior = operations.get(key)
+                if prior is not None:
+                    if (
+                        not isinstance(prior, dict)
+                        or prior.get('binding') != asdict(bound)
+                        or prior.get('role') != role
+                        or prior.get('request_sha256') != request_hash
+                    ):
+                        raise admission.SemanticPublicationRejectedError('semantic_execution_binding_invalid')
+                    if prior.get('status') != 'completed':
+                        raise admission.SemanticPublicationRejectedError('semantic_unknown_outcome_hold')
+                    return {}, {'replay': True, 'operation': copy.deepcopy(prior)}
+                if len(operations) >= MAX_OPERATIONS:
+                    raise admission.SemanticPublicationRejectedError('semantic_execution_capacity')
+                operations[key] = {
+                    'binding': asdict(bound),
+                    'role': role,
+                    'request_sha256': request_hash,
+                    'status': 'started',
+                    **({'semantic_contract_version': 2} if self.contract == 2 else {}),
+                }
+                return {EXECUTIONS_FIELD: operations}, {'replay': False}
+
+            reservation = self.update(self.uid, self.cid, reserve)
+            if reservation is None:
+                raise admission.SemanticPublicationRejectedError('semantic_reservation_not_committed')
+            state = reservation['result']
+            if state['replay']:
+                return {'operation_id': key, 'result': copy.deepcopy(state['operation']['result'])}
+            result = adapter(copy.deepcopy(request))
+            if (
+                not isinstance(result, dict)
+                or len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode()) > MAX_RESULT_BYTES
+            ):
+                raise admission.SemanticPublicationRejectedError('semantic_result_capacity')
+            provenance = self.observations.get((role, request_hash))
+            if not provenance:
+                raise admission.SemanticPublicationRejectedError('semantic_actual_turn_provenance_missing')
+
+            def complete(conversation):
+                self._fresh(conversation, bound)
+                operations = copy.deepcopy(conversation.get(EXECUTIONS_FIELD) or {})
+                prior = operations.get(key)
+                if (
+                    not isinstance(prior, dict)
+                    or prior.get('status') != 'started'
+                    or prior.get('binding') != asdict(bound)
+                    or prior.get('role') != role
+                    or prior.get('request_sha256') != request_hash
+                ):
+                    raise admission.SemanticPublicationRejectedError('semantic_completion_conflict')
+                operations[key] = {
+                    **prior,
+                    'status': 'completed',
+                    'result': copy.deepcopy(result),
+                    'runtime_interaction_id': provenance[0],
+                    'canonical_assistant_event_id': provenance[1],
+                }
+                return {EXECUTIONS_FIELD: operations}, {'operation_id': key, 'result': copy.deepcopy(result)}
+
+            done = self.update(self.uid, self.cid, complete)
+            if done is None:
+                raise admission.SemanticPublicationRejectedError('semantic_completion_unknown_hold')
+            return done['result']
+
+    def issue_publication(
+        self, *, binding, candidate, semantic_candidate, generator_operation_id, verifier_operation_id
+    ):
+        with _timing.stage('semantic_producer_ledger.issue_publication'):
+            from ella.services.semantic_producer_v1 import PublicationBinding
+
+            if self.contract == 2:
+                from ella.services.semantic_contextual_producer_v3 import generate_requests, validate_stored_review
+            elif self.schema == 2:
+                from ella.services.semantic_contextual_producer_v2 import generate_requests, validate_stored_review
+            else:
+                from ella.services.semantic_producer_v1 import generate_requests, validate_stored_review
+            bound = self._binding(binding)
+
+            def issue(conversation):
+                self._fresh(conversation, bound)
+                operations = conversation.get(EXECUTIONS_FIELD) or {}
+                generator = operations.get(generator_operation_id) or {}
+                verifier = operations.get(verifier_operation_id) or {}
+                for operation, role in ((generator, 'generator'), (verifier, 'verifier')):
+                    if (
+                        operation.get('status') != 'completed'
+                        or operation.get('binding') != asdict(bound)
+                        or operation.get('role') != role
+                    ):
+                        raise admission.SemanticPublicationRejectedError('semantic_durable_verification_missing')
+                if generator['result'] != semantic_candidate:
+                    raise admission.SemanticPublicationRejectedError('semantic_generator_changed')
+                canonical = canonical_source_from_conversation(
+                    uid=self.uid, conversation_id=self.cid, conversation=conversation
+                )
+                context = self.read_context(self.uid)
+                self._fresh(conversation, bound)
+                source_args = dict(
+                    binding=PublicationBinding(**asdict(bound)),
+                    canonical_source=canonical,
+                    transcript_segments=conversation.get('transcript_segments') or [],
+                    companion_context=context,
+                )
+                gp, vp = generate_requests(**source_args, candidate=semantic_candidate)
+                if generator.get('request_sha256') != admission.digest(gp) or verifier.get(
+                    'request_sha256'
+                ) != admission.digest(vp):
+                    raise admission.SemanticPublicationRejectedError('semantic_stored_request_changed')
+                # Reconstructed requests must match the durable hashes of the actual
+                # dispatched contextual requests. Private context is not duplicated
+                # into the operation ledger or exposed by callbacks.
+                expected = validate_stored_review(
+                    **source_args,
+                    generator_request=gp,
+                    verifier_request=vp,
+                    semantic_candidate=semantic_candidate,
+                    verdict=verifier['result'],
+                )
+                if candidate != expected:
+                    raise admission.SemanticPublicationRejectedError('semantic_presentation_changed')
+                # Full verdict validation above precedes this server-owned admission
+                # projection. No caller supplies these booleans.
+                evidence = {
+                    'accepted': True,
+                    'source_grounded': True,
+                    'semantic_summary': True,
+                    'context_owner_verified': True,
+                }
+                updates = {}
+                working = copy.deepcopy(conversation)
+                for operation_id, operation, role in (
+                    (generator_operation_id, generator, 'generator'),
+                    (verifier_operation_id, verifier, 'verifier'),
+                ):
+                    update, _ = admission.record_completed_operation(
+                        working,
+                        binding=bound,
+                        operation_id=operation_id,
+                        role=role,
+                        candidate=candidate,
+                        runtime_interaction_id=operation['runtime_interaction_id'],
+                        canonical_assistant_event_id=operation['canonical_assistant_event_id'],
+                        verifier_result=evidence if role == 'verifier' else None,
+                    )
+                    working.update(update)
+                    updates.update(update)
+                update, result = admission.issue_receipt(
+                    working,
+                    binding=bound,
+                    candidate=candidate,
+                    generator_operation_id=generator_operation_id,
+                    verifier_operation_id=verifier_operation_id,
+                )
+                updates.update(update)
+                self._fresh(conversation, bound)
+                return updates, result
+
+            issued = self.update(self.uid, self.cid, issue)
+            if issued is None:
+                raise admission.SemanticPublicationRejectedError('semantic_receipt_not_committed')
+            return issued['result']['receipt_id']
+
+
+async def run_versioned_producer(
+    *,
+    uid: str,
+    conversation_id: str,
+    read_conversation: Callable,
+    update_conversation: Callable,
+    read_companion_context: Callable,
+    run_backend_turn: Callable,
+    provider_deadline_seconds=90,
+    candidate_schema_version=1,
+    semantic_contract_version=1,
+    role_deadline_seconds=None,
+    read_source_binding=None,
+):
+    """Explicit internal invocation; no automatic admission, queue or APPLY.
+
+    run_backend_turn must keep the existing model and return BackendTurn from the
+    actual backend runtime service, with separate generator/verifier sessions.
+    Reads must use current exact-owner consent/authority, not historical hashes.
+    """
+    from ella.services.semantic_producer_v1 import PublicationBinding
+
+    if (
+        type(semantic_contract_version) is not int
+        or semantic_contract_version not in (1, 2)
+        or (semantic_contract_version == 2 and candidate_schema_version != 2)
+    ):
+        raise admission.SemanticPublicationRejectedError('semantic_contract_version_invalid')
+    if semantic_contract_version == 2:
+        from ella.services.semantic_contextual_producer_v3 import produce
+    elif candidate_schema_version == 2:
+        from ella.services.semantic_contextual_producer_v2 import produce
+    else:
+        from ella.services.semantic_producer_v1 import produce
+    # The backend turn includes authority/context reads and canonical confirmation,
+    # not only HTTP. Legacy callers keep their original whole-role budget.
+    role_deadline = provider_deadline_seconds if role_deadline_seconds is None else role_deadline_seconds
+    if (
+        type(role_deadline) not in (int, float)
+        or not 0 < role_deadline <= 120
+        or type(provider_deadline_seconds) not in (int, float)
+        or not 0 < provider_deadline_seconds <= role_deadline
+    ):
+        raise admission.SemanticPublicationRejectedError('semantic_role_budget_invalid')
+    budget = current_budget()
+    if budget is not None:
+        budget.require_source(uid, conversation_id)
+    if read_source_binding is not None and (
+        not callable(read_source_binding)
+        or budget is None
+        or candidate_schema_version != 2
+        or semantic_contract_version != 2
+    ):
+        raise admission.SemanticPublicationRejectedError('semantic_source_reader_scope_invalid')
+    observations = {}
+    cancellation = threading.Event()
+    ledger = DurableServerLedger(
+        uid=uid,
+        conversation_id=conversation_id,
+        read_conversation=read_conversation,
+        update_conversation=update_conversation,
+        read_companion_context=read_companion_context,
+        observations=observations,
+        candidate_schema_version=candidate_schema_version,
+        semantic_contract_version=semantic_contract_version,
+        cancellation=cancellation,
+    )
+
+    def current():
+        with _timing.stage('semantic_producer_ledger.current'):
+            if cancellation.is_set():
+                raise admission.SemanticPublicationRejectedError('semantic_cancelled_hold')
+            if read_source_binding is not None:
+                if current_budget() is not budget:
+                    raise admission.SemanticPublicationRejectedError('semantic_operation_scope_changed')
+                budget.require_source(uid, conversation_id)
+            conversation = ledger._owned(read_conversation(uid, conversation_id))
+            if admission.semantic_contract_version(conversation) != semantic_contract_version:
+                raise admission.SemanticPublicationRejectedError('semantic_contract_version_changed')
+            if admission.candidate_schema(conversation) != candidate_schema_version:
+                raise admission.SemanticPublicationRejectedError('semantic_schema_changed')
+            # Logical freshness never caches authority. The retained worker may
+            # supply a fresh source-only reader because its owned turn validates
+            # full remote context before/after every egress, and publication
+            # independently rehydrates it inside its guarded CAS below.
+            source_binding = read_source_binding() if read_source_binding is not None else None
+            context = read_companion_context(uid) if read_source_binding is None else None
+            # Either trusted read may block. Resample exact owner/policy/source after it;
+            # never authorize egress from a pre-hydration authority sample.
+            conversation = ledger._owned(read_conversation(uid, conversation_id))
+            if cancellation.is_set():
+                raise admission.SemanticPublicationRejectedError('semantic_cancelled_hold')
+            if admission.semantic_contract_version(conversation) != semantic_contract_version:
+                raise admission.SemanticPublicationRejectedError('semantic_contract_version_changed')
+            if admission.candidate_schema(conversation) != candidate_schema_version:
+                raise admission.SemanticPublicationRejectedError('semantic_schema_changed')
+            binding = admission.current_binding(conversation, uid=uid, conversation_id=conversation_id)
+            if read_source_binding is not None:
+                if current_budget() is not budget:
+                    raise admission.SemanticPublicationRejectedError('semantic_operation_scope_changed')
+                budget.require_source(uid, conversation_id)
+            if read_source_binding is not None:
+                if not isinstance(source_binding, admission.PublicationBinding) or source_binding != binding:
+                    raise admission.SemanticPublicationRejectedError('semantic_source_binding_changed')
+            elif (
+                not isinstance(context, dict)
+                or context.get('owner_uid') != uid
+                or context.get('revision') != binding.companion_context_revision
+                or admission.digest(context) != binding.companion_context_sha256
+            ):
+                raise admission.SemanticPublicationRejectedError('semantic_context_changed')
+            return PublicationBinding(**asdict(binding))
+
+    bound = await _timing.await_stage('semantic_producer_ledger.await.289', asyncio.to_thread(current))
+    conversation = await _timing.await_stage(
+        'semantic_producer_ledger.await.290', asyncio.to_thread(read_conversation, uid, conversation_id)
+    )
+    canonical = canonical_source_from_conversation(uid=uid, conversation_id=conversation_id, conversation=conversation)
+    context = await _timing.await_stage(
+        'semantic_producer_ledger.await.293', asyncio.to_thread(read_companion_context, uid)
+    )
+    loop = asyncio.get_running_loop()
+    adapters = {
+        role: TrustedRuntimeAdapter(
+            loop=loop,
+            run_turn=run_backend_turn,
+            role=role,
+            observations=observations,
+            deadline=role_deadline,
+            cancellation=cancellation,
+        )
+        for role in ('generator', 'verifier')
+    }
+    try:
+        return await _timing.await_stage(
+            'semantic_producer_ledger.await.299',
+            asyncio.to_thread(
+                produce,
+                binding=bound,
+                canonical_source=canonical,
+                transcript_segments=copy.deepcopy(conversation.get('transcript_segments') or []),
+                companion_context=context,
+                current_binding=current,
+                ledger=ledger,
+                generator_adapter=adapters['generator'],
+                verifier_adapter=adapters['verifier'],
+            ),
+        )
+    except asyncio.CancelledError:
+        cancellation.set()
+        for adapter in adapters.values():
+            adapter.cancel()
+        # Stop local admission, but do not claim remote provider drain.
+        # A started operation remains held; no automatic retry or APPLY.
+        raise

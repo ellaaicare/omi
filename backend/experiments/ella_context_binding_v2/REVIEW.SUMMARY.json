@@ -1,0 +1,29 @@
+{
+  "state": "PASS_ONE_IDENTIFIER_BINDING_CLASS_CORRECTION_SOURCE_ONLY",
+  "candidate_sha256": "1cb305f90e3885657b20f45b4df5dfabbe7794b696572f9db9e7ce9063a81ff8",
+  "baseline_sha256": "dce031d70dfda4577a92c7d5ec02c5c2e11cf4424d557b4ae7d340d68bb15bb3",
+  "test_sha256": "47fde0ac89b15218df94dc052e1185f8888f72c4356f93206f584525578c01a7",
+  "independent_tests": {
+    "count": 15,
+    "pass": true,
+    "seconds": 0.521,
+    "negative_baseline_reproduces": true,
+    "boundary": "Both actual distinct binding class definitions, actual producer/ledger/bridge with explicitly fake external adapters/semantic leaves. Not real service import/provider."
+  },
+  "root_cause": "Source hook returns semantic_publication.PublicationBinding (source/authority type); local run_versioned_producer imports distinct semantic_producer_v1.PublicationBinding (producer protocol type). Context-v1 used latter for hook isinstance, deterministically rejecting valid former beforeprovider.",
+  "correction": "Only type reference changed to admission.PublicationBinding. Exact separately resampled sourcebinding equality remains; returned protocolbinding still constructed separately from asdict(binding).",
+  "preserved": [
+    "Wrong real producerbinding hook rejects even when field dictionaries match.",
+    "OperationBudget identity/source/deadline/cancellation/schema/contract hook guards unchanged.",
+    "Full authority/model/canonical/finalpublication context/CAS/owner checks unchanged.",
+    "No budget/model/route/credential/policy/grant/replay changes."
+  ],
+  "prior_review_limitation": "Prior context-read-v1 source review and synthetic suite missed this real type seam because source and producer bindings were aliased in harness. Preserve original review/test evidence; this verdict supersedes its type-compatibility acceptance.",
+  "rollout_gates": [
+    "Real service-interpreter smoke must import both actual module classes and exercise legitimate sourcehook plus wrongtype negative with no network; imports alone are insufficient.",
+    "Exact servingpreimage/currentPID, reviewed rollbackcontroller, closedclaims/currentresources preflight and postservinghash/health remain required.",
+    "Failed3f7 job remainsQ/stock/transcript preserved; no retry or oldjob rearm.",
+    "No claim futureenhancement succeeds from syntheticPASS."
+  ],
+  "reviewer_live_effects": 0
+}

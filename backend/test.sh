@@ -17,3 +17,6 @@ pytest tests/unit/test_speaker_assignment.py -v
 pytest tests/unit/test_voice_canary.py -v
 pytest tests/unit/test_voice_proxy_auth.py -v
 pytest tests/postgres/test_voice_canary_postgres.py -v
+
+# Real distinct publication/producer binding classes; no provider/network effects.
+pytest experiments/ella_context_binding_v2/tests/test_context_fences.py -v

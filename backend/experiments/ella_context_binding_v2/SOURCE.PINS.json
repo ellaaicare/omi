@@ -1,0 +1,16 @@
+{
+  "contract": "ella-reviewed-binding-correction-pins-v2",
+  "files": {
+    "README.md": "75b9eef1fe14027fc64be805a6f8712e3f2da5cdfa072bdb62b4310d2e5d2fee",
+    "REVIEW.SUMMARY.json": "8d94446707f3b632beea84f48551ca8043412f74b436dc11ccd983f93eb21e1f",
+    "baseline/ella/services/semantic_operation_budget.py": "db029f0a748d2a3f8a87712c8df1cca7b4b5929e935112094a4f793628880878",
+    "baseline/ella/services/semantic_producer_ledger.py.source": "dce031d70dfda4577a92c7d5ec02c5c2e11cf4424d557b4ae7d340d68bb15bb3",
+    "baseline/ella/services/semantic_retained_integration.py.source": "d39c7b4dcaa94d052b555e283efa8aefa34b60088d776337409f64663672766f",
+    "baseline/ella/services/semantic_self_hosted_runtime.py.source": "53351e96fb2b64effdb05db4e53b56d0e9745187ce241fb9646f1a71b342f93b",
+    "candidate/ella/services/semantic_producer_ledger.py.source": "1cb305f90e3885657b20f45b4df5dfabbe7794b696572f9db9e7ce9063a81ff8",
+    "candidate/ella/services/semantic_retained_integration.py.source": "d39c7b4dcaa94d052b555e283efa8aefa34b60088d776337409f64663672766f",
+    "candidate/ella/services/semantic_self_hosted_runtime.py.source": "53351e96fb2b64effdb05db4e53b56d0e9745187ce241fb9646f1a71b342f93b",
+    "tests/predeploy_real_bindings.py.source": "a686dbd62df7081221f5de0e5fa73a609932caca20773a1451af3d2b0e44f319",
+    "tests/test_context_fences.py": "ffe37bd3e20eb493d5a60c2dbbc274618352ed8936a007a6c0eacbedb5b4c5eb"
+  }
+}
