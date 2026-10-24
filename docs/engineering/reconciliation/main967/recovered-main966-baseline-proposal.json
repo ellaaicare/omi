@@ -1,0 +1,2191 @@
+{
+  "schema": "ella.main966.recovered-baseline-plan.v1",
+  "state": "INDEPENDENTLY_REVIEWED_PROPOSAL_NOT_EXECUTED",
+  "at": "2026-10-24T08:30:54.138041+00:00",
+  "repo": "https://github.com/ellaaicare/omi",
+  "recorded_origin": {
+    "commit": "736332e5e9e9c85b7ff9e5683f47e6176fcd5de2",
+    "branch": "codex/transcript-release-integration-1007",
+    "local_ref": "refs/remotes/origin/codex/transcript-release-integration-1007",
+    "remote_ref_freshly_verified": true,
+    "exact_main966_source_commit": false
+  },
+  "provenance_controls": {
+    "ella-whisper-provenance/BASE_PROVENANCE.json": {
+      "bytes": 198497,
+      "sha256": "4ade56af08b896e2b180ad433e4e31358072d1b47049671c07f089533ad2e71e"
+    },
+    "main965-incremental-preparation-20261022/SOURCE.PREP.ONLY.safe.json": {
+      "bytes": 13041,
+      "sha256": "313ceab0f011b76ed5d10689e39dcf484af9589c9c6a4c1bc3e93c22990e3523"
+    },
+    "thin-main-discovery-provenance-20261023/prepare_native_source.py": {
+      "bytes": 6825,
+      "sha256": "6463c2670de1157250cf261223086f4461db4310ee06833cfd95029a4ab3528b"
+    },
+    "thin-main-discovery-provenance-20261023/SOURCE.FREEZE2.safe.json": {
+      "bytes": 9868,
+      "sha256": "d70831b18d7670f85792b04c3fceb2d6dfa7dc96278340ecf140cb411bc8a649"
+    }
+  },
+  "assembly_chain": [
+    {
+      "destination": "Main966",
+      "base": "runs/main965-default-record-save-20261022-native1/source",
+      "overlay": "thin-main-discovery-provenance-20261023",
+      "evidence": "prepare_native_source.py chooses Main965 for main mode"
+    },
+    {
+      "destination": "Main965",
+      "base": "runs/main964-diagnostics-20261021-native1/source",
+      "evidence": "SOURCE.PREP.ONLY.safe.json records further overlay lineage"
+    },
+    {
+      "recorded_older_origin": "736332e5e9e9c85b7ff9e5683f47e6176fcd5de2",
+      "accepted_base": "public923",
+      "limit": "Historical origin, not a byte-exact Main966 build source"
+    }
+  ],
+  "main966_lib_vs_origin": {
+    "base_files": 906,
+    "source_files": 993,
+    "identical": 736,
+    "modified": 170,
+    "added": 87,
+    "removed": 0,
+    "changed_source_bytes": 20953542,
+    "l10n_changed_paths": 69,
+    "l10n_changed_bytes": 17351118,
+    "changes": [
+      {
+        "path": "lib/backend/http/api/conversations.dart",
+        "bytes": 61386,
+        "sha256": "5af929ba15fe97a29c5a1bd6f0942c72041e25f34d59264405c2e100017eed93",
+        "git_blob": "28cb7a654d05074e96a4c236a64393e8d746b7f7",
+        "recorded_origin_blob": "ed72ef453bb7933af4f11bc63b80d9cffaedc6e0",
+        "status": "modified"
+      },
+      {
+        "path": "lib/backend/http/api/messages.dart",
+        "bytes": 11265,
+        "sha256": "2f369887577c814738342c2130113ffcd6a74567135113ecd1ab5a23fad17095",
+        "git_blob": "c2208004f368503e03ddbfcbfd25fe2e736b8f89",
+        "recorded_origin_blob": "1c0262257178a70c29100340893d8a72ceda5db4",
+        "status": "modified"
+      },
+      {
+        "path": "lib/backend/http/http_pool_manager.dart",
+        "bytes": 8204,
+        "sha256": "9deb8540b0e21a0487886c401fde99be7aa443f09a71b98ff21b769b298a0370",
+        "git_blob": "79795cc440a1228a2c0f5d00f75c26eeb06c6e24",
+        "recorded_origin_blob": "a9294a7ba1e27967c1e15e1f5b860b4e2ec6e92e",
+        "status": "modified"
+      },
+      {
+        "path": "lib/backend/schema/conversation.dart",
+        "bytes": 19986,
+        "sha256": "dcb505381eb6f9ffe12af6058de97b8f1c065f27dc4eef7b4a3cccf074fc503e",
+        "git_blob": "4440ee4e2cfd623366709298de75ef90ce0298ce",
+        "recorded_origin_blob": "0749a2f324baa74473226eb19ddc20f7e35977ea",
+        "status": "modified"
+      },
+      {
+        "path": "lib/backend/schema/message.dart",
+        "bytes": 13979,
+        "sha256": "e0a15c8aa2115076dce1f126b83fc601e9336d810bc36622d256d9c098cb386b",
+        "git_blob": "087fda31f37828b627ba0100b4331dee8a3cae7c",
+        "recorded_origin_blob": "7361fd6ab08a82affdfd7ee350d8736cec29196d",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/capture_host/ella_capture_host.dart",
+        "bytes": 10703,
+        "sha256": "80a0e32ef715d826fada9d09bc6b84858a874ed76ddbaaf0cdaf626638e12202",
+        "git_blob": "6c798abeb615888ca22c61d9f1644b9465b40f66",
+        "recorded_origin_blob": "6ee0731297f3c21378ba5b9148e56e8e05cbaa9d",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/capture_host/ella_capture_protocol_trace.dart",
+        "bytes": 8659,
+        "sha256": "cd7e772b8f93962b867fca7f40b3053dcc1355a82a82270728e3d02efcac2dca",
+        "git_blob": "344ccc67731b176825b941f873afc42b7c9f249a",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/ella_theme.dart",
+        "bytes": 19328,
+        "sha256": "8ed807573d152a4b402c4b122b4424fb0129ddfefcfdc23c61b88b63befe7b0c",
+        "git_blob": "7225faf5400ae371a7f2a14ce8731fed5b282543",
+        "recorded_origin_blob": "a64494220a7f20298990a48cf1440955bc20087a",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/pages/ella_memories_page.dart",
+        "bytes": 58767,
+        "sha256": "d359580ab06f1f59a37f41f1f2b1df6361da43d04d146f4d3f420a840b752c94",
+        "git_blob": "334dcd056c9574060e99bab54ced9bcdb50c9074",
+        "recorded_origin_blob": "47539d19be74607cd8ed4d18d77ad98c67ee2346",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/pages/ella_provisioning_gate_page.dart",
+        "bytes": 18610,
+        "sha256": "acd5ad7bb5fd36df7be34de2a71f500d2642298cd5a941b10ec019aad165d6f9",
+        "git_blob": "36f87995944b972ceba19ff8f40219e49e9272d1",
+        "recorded_origin_blob": "73b71ee4e748a901565bc362418c9ce9d0fe2aa2",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/pages/ella_runtime_diagnostics_page.dart",
+        "bytes": 18463,
+        "sha256": "94abea2f2b2b406d21e7e6e8e025efe235db8ef534f76075778e0bc73edace03",
+        "git_blob": "f6b9e8140b3fc41c2574b1b71c70533c189743f2",
+        "recorded_origin_blob": "76b04b2ac51ec8a36e5d5dacc072fdcc8bea973e",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/pages/ella_settings_page.dart",
+        "bytes": 25626,
+        "sha256": "3deadc0e2d6222c3e3dfe8467abe1aec89dab186b33f5a6dbab259f7091c1c36",
+        "git_blob": "46013eb82d3b108343799702336e99e8777cdd11",
+        "recorded_origin_blob": "33512bf867ebf2a9ccf7aae3b06433ffabaaa612",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/pages/ella_voice_chat_page.dart",
+        "bytes": 78017,
+        "sha256": "adc160c6b2f6343fc58da34ce3289b3210f5314675f744fab9167cf137376962",
+        "git_blob": "99954502be468c04986ac7af5bb6faa4677f8ae9",
+        "recorded_origin_blob": "22ac9cef2af35acde7db8919853445baa75a2cc7",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/pages/guardian_alert_history_page.dart",
+        "bytes": 12956,
+        "sha256": "af7e876438d67e40728b7820bc5d39bbf9266ea75cca8dc140401a2f021d0511",
+        "git_blob": "bf20434271bd22c2bdc52c3b36de31ac3067780f",
+        "recorded_origin_blob": "ed67b423ffeef48eae521e8d62a5a45fa8f41c5f",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/recording_keep/discarded_recording_save_card.dart",
+        "bytes": 5328,
+        "sha256": "597525f1170ebc9d12a4bb1d1d20e0299818b566c3fa052e4922190981cecb1b",
+        "git_blob": "be05e4fb76b3a1c261f963d0e65f31e005152cc2",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/recording_keep/explicit_recording_keep.dart",
+        "bytes": 10802,
+        "sha256": "5f98dd1c279fd9e50a7a9fd5d6b883ebdf41260a0eea2b0dd1775cf8c82f0091",
+        "git_blob": "d5055184d3bf1bf8f8c843fce89e425fc71bc3f7",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/recording_keep/keep_http_transport.dart",
+        "bytes": 2564,
+        "sha256": "6c0a7e6e51d3fb724af6fe4cb1fdb7b783ee7cfc7e2ac52f6fba7f59ec198e2a",
+        "git_blob": "68ec3596a0bcccc38f3c90771b6bfc8172a54649",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/recording_keep/keep_intent_store.dart",
+        "bytes": 4676,
+        "sha256": "0cbe42c69addc66908f3d655b669c073a10019e475a29e1aa7d64833fc856486",
+        "git_blob": "a07f009d802ebf64068888599e2dbd2580560c8c",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/recording_keep/recording_keep_pages.dart",
+        "bytes": 11351,
+        "sha256": "3ecc42f5718e179ca2b666c1f47ded10526f727d02c1a371e2cc30b6519384d3",
+        "git_blob": "5be59e540b0c2b626ef264a90a4c041dd2f726a0",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/recording_keep/recording_keep_repository.dart",
+        "bytes": 7871,
+        "sha256": "81e9969b26a09e7f5bba84b5d96430d783fab9278b77e396dc5129cf88200a64",
+        "git_blob": "28caf7be6b29b4fe1aacaf26507449afb68725a0",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/admitted_audio_player.dart",
+        "bytes": 2589,
+        "sha256": "f64227661e26305765a58496bb4b5b513e72e908dd77b9323bb3d6e10b251ebb",
+        "git_blob": "d1d8d23fdaab06cc9dabf8def7addcc371a8726c",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/admitted_video_player.dart",
+        "bytes": 1718,
+        "sha256": "641a4594fcb6c0ce32cd2b46130f036e19f07d51c1c68e52cca4d09299bc6849",
+        "git_blob": "4c8b48bfc662da0d47874bf7b95575e09c3e2c68",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/ai_consent_coordinator.dart",
+        "bytes": 6398,
+        "sha256": "61150a53629060bd648e2345a5e818639ce949bbc0680ab68ff17324655902fb",
+        "git_blob": "df288c2732f20d31a65163cbebcb5074b680fcf7",
+        "recorded_origin_blob": "66bcfc261d0fc2fc8caaec61cb1a5cd817879a67",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/services/app_output_admission.dart",
+        "bytes": 1927,
+        "sha256": "3c8ac1aebbcdde0d94af7566677cb368f194bf7d46a1da6fe917ffae77efa596",
+        "git_blob": "585f79a32e84a9f383613cacb734b1f9c5e36ef4",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/diagnostic_presentation.dart",
+        "bytes": 1087,
+        "sha256": "c035f6767586278eed2507fb34186013aa388e617dc737e9e2f742805722c069",
+        "git_blob": "787d4b0affc4dfb08832b71803c5099727809e09",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/effective_voice_settings_diagnostics.dart",
+        "bytes": 6207,
+        "sha256": "240cccbca50dc7be4d7fabf4dd6631b3600e57f366e3112dd002e0a5fe2304c4",
+        "git_blob": "a091abe1c5418bb2c3c4908e7c5c3c12d1c3f669",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/elevenlabs_tts.dart",
+        "bytes": 12266,
+        "sha256": "c635748f3aee56fb1f6fd3b44c2bd5e22a6ece5480580976b25532a48cb5f8f0",
+        "git_blob": "72b67ed8a8de7fcf2292554ac00a916304faa019",
+        "recorded_origin_blob": "c047375c5634741dcf21c48d44d1c86f7ceb73c9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/services/ella_account_isolation_service.dart",
+        "bytes": 5622,
+        "sha256": "ddff3ecd5d060cda9cea86d57883e829936547e98df33413a85d9d80a4e4ead9",
+        "git_blob": "8cc4a9f1e7a8ed34cbf38473cf0ab600917a3603",
+        "recorded_origin_blob": "425a8ba7f50d93ce7e295946d2aa32b082bd782a",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/services/ella_chat_service.dart",
+        "bytes": 21699,
+        "sha256": "eb3f9689e4a1bab656701765f0a5bb97d2a360658586f7266044b9a48b28b53d",
+        "git_blob": "7d56f61bfdd8be70dff2c36773eafc93e3f1ec13",
+        "recorded_origin_blob": "eb68d780d47614a6882bce1c07671f0a0e88671f",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/services/ella_provisioning_service.dart",
+        "bytes": 16845,
+        "sha256": "0c8c1ae922e62bb7484ed53b57e8b9943d1bec8690db313a5ee700734bdc9163",
+        "git_blob": "b0aa7fee123267ab20f5593fc3a712b6b20ea290",
+        "recorded_origin_blob": "27365532197f8c9b612c5cda56474afe9b4894b5",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/services/emergency_audio_player.dart",
+        "bytes": 1362,
+        "sha256": "16bfe8ac931149cf0dc75efaa9ea303e094ed52fb0bca8b4fe053525170dc8f4",
+        "git_blob": "1f997a1398796fed79e4ae91c373be9f90b435a6",
+        "recorded_origin_blob": "9c16886668e2ddfddd4e3dab76724e4970e18d2c",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/services/fictional_transcript_client.dart",
+        "bytes": 4430,
+        "sha256": "99256343bdc8312db0c6ca315cfb6b688a3e84e6c7e0001467d5d852ecbf7d0f",
+        "git_blob": "736b98bbbced48fff8db1491cd49925414dbe07d",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/fictional_transcript_local_load.dart",
+        "bytes": 1297,
+        "sha256": "8804b775cb58bdcf81c22dee68c65e546c8c1b5ffbca183378fce4df6b8b3e40",
+        "git_blob": "3303f1075fa626a01d0f7bfe15ca9f2a7cb92bb6",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/fictional_transcript_run.dart",
+        "bytes": 9950,
+        "sha256": "8661b8d4dbf3f2205d6c2b5ead5309d15cc90d94d02614975054a563609f33aa",
+        "git_blob": "878b4e201a2b371d1c57ce47eb6d29b44897e7de",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/fictional_transcript_store.dart",
+        "bytes": 1353,
+        "sha256": "037b13fc2d1e37717eef917fb6870b999846601c01d18c9ed4d418261e887060",
+        "git_blob": "a2803f4cc13d46283e5d5ea6a1a8bd5a1129d0df",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/grok_provider_readiness.dart",
+        "bytes": 3099,
+        "sha256": "f883c0043c6e4cc502f096613b33a63a981cb0a722bd3f199f2d300e10649750",
+        "git_blob": "741f217c029caa2cb3c87c1fd9fff8be5a8b73f1",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/guardian_mode_api.dart",
+        "bytes": 10786,
+        "sha256": "d59a4d6d6ef68f74781334782776d4736147da39e8f329f595b57998dac5c362",
+        "git_blob": "db6ea2fa8d295c82bc89933e322b2fc51f0b11f2",
+        "recorded_origin_blob": "8a7ec2080f9e3e44b0c8e4026c134cbe8c52d43d",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/services/guardian_mode_service.dart",
+        "bytes": 13057,
+        "sha256": "68890791f5aa820a5d724d7c262f3c5a73d19049239ebe1a86b430db543d1b6b",
+        "git_blob": "002f999cd0ddebe3472afbf33b3c97bdfbd3992f",
+        "recorded_origin_blob": "4bebb01e62cbcf1bceb13d5f104500e36f8b36dc",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/services/iris_journal_reminders.dart",
+        "bytes": 4210,
+        "sha256": "332feaf2d7f00a7511731304b5239d3ef9527b1cd8b277ada819ab092b1b81b6",
+        "git_blob": "a4efe7bde53536c3619c09e9e6261fb7f892b920",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/journal_preview_refresh.dart",
+        "bytes": 9736,
+        "sha256": "e77310e2b6facd63494982b8e6c2d156ca88509d92fd858f96f5ee0f985cbcca",
+        "git_blob": "53310ef51cd4090e24027e4070dcfaac6474dcaf",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/journal_projection_diagnostics.dart",
+        "bytes": 4243,
+        "sha256": "963c7ef38818034b153828bad1383d460cf2e8ac88bfcde9f77496a0d27b8e91",
+        "git_blob": "175d566b065c3f152845901bebec2195685b80f2",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/native_dictation_output_admission.dart",
+        "bytes": 5141,
+        "sha256": "a7cbec15a35b1de622b795a4b0f5198bb3b34c1ceef3106adea8cfe74d744dda",
+        "git_blob": "c4e6697730640023b097fa1b1eda44d4175661c0",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/retained_summary.dart",
+        "bytes": 5401,
+        "sha256": "f6acbc0a87982be12143a3381e45392e9c5a2210f4775b192b5cd5ce581534b9",
+        "git_blob": "a6e961b8adcd7db0f43183cbee9bbd5cea360953",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/standard_speech_ownership.dart",
+        "bytes": 13542,
+        "sha256": "eead363549b9775ccd739a5e91013f115c6a7427c59b7c4690da8385d2e84c57",
+        "git_blob": "fffad96f2d98716dad35aede0ccc823f7dba48c1",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/summary_read_freshness.dart",
+        "bytes": 6738,
+        "sha256": "edbd17e3b918f29e8ecf9b9d6fb39c699c70d448d52a31a6c5292d7552a45b22",
+        "git_blob": "9e4d435b4a78d37473d8aa1bc01f3303e5b941d7",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/summary_read_retry.dart",
+        "bytes": 2399,
+        "sha256": "f15ad11740c3c0073f64d4b51f741d7a3ce3f74da98ebd003d08683901c01e4c",
+        "git_blob": "a8843ccd1d67dfe20e46e38fd1440cd5495fc671",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/v2v_client.dart",
+        "bytes": 86771,
+        "sha256": "01d9da6b0614fc4f58f17001cbcd1f6aebc25078879cdd9257a043d76ad8f923",
+        "git_blob": "29c723c2dd01fd933e79b66577c8f8a32e5cd358",
+        "recorded_origin_blob": "09cc78ee838c8b6e632161a8d04fb0b7d1bc8968",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/services/whisper_delivery_client.dart",
+        "bytes": 24208,
+        "sha256": "08383cb8572f02c948943338af714b6663cf51c4db8882561e45742136f609c8",
+        "git_blob": "7161a140b3c56abaf3ecf5900459481934c64c72",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/whisper_delivery_runtime.dart",
+        "bytes": 17050,
+        "sha256": "22c66cbdbc76651940dca3e67d184934539b8bdedfd180658426898ac26e89d7",
+        "git_blob": "9bcadab6cf7cc092ed224eb7159cff20071a9b03",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/services/whisper_startup_diagnostics.dart",
+        "bytes": 3177,
+        "sha256": "f8fbc3c06542e9e0d7c244a38fc596154273b932a5f9a67d2a77865079af9701",
+        "git_blob": "37757f9b8a7c0f5e1a1fa556f719c9e9402255ad",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/upstream_capture/captured_source_provenance.dart",
+        "bytes": 5022,
+        "sha256": "ab7d13c23a2025f45ffe8abcf3cff20927151ed2bd4b5e69505a5a13d3cae78f",
+        "git_blob": "98aadf98e1ce44c085f84580fa29d43ed9802a0e",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/upstream_capture/ella_capture_authority.dart",
+        "bytes": 7042,
+        "sha256": "e4cce960191aa1ee324f200d97a2b7a4e89f9e869b069dc4fbd464c29bac716d",
+        "git_blob": "b4632ddd6fe9b24033cc40ce9d36d45489b6a2fd",
+        "recorded_origin_blob": "0ff9d6059d4c53bc1025fbb25d7b29da99a6b0ce",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/upstream_capture/ella_capture_protocol_socket.dart",
+        "bytes": 26257,
+        "sha256": "18d9fb4a7106c2bd5e43db52b72078126b1d3e733135dc8c2abb17216e2c2ce6",
+        "git_blob": "5afe3dd13b83ee1343d3e3cfbe1a886b651be56a",
+        "recorded_origin_blob": "277d6b989b26ccb9522227e29ed81f99908129b2",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/upstream_capture/ella_gated_capture_seams.dart",
+        "bytes": 9575,
+        "sha256": "f3f7aaa17093fc7420cce9de65f77aebf1eeab5f89da3d1170724d909f03953c",
+        "git_blob": "d5d2cf5e8b25e494f4014ad24ba5574f23107157",
+        "recorded_origin_blob": "f85b4de6c73fde2c7dc95a605ac5f46474b2bc41",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/upstream_capture/ella_home_transcript_panel.dart",
+        "bytes": 14098,
+        "sha256": "1bba9e84f85d74bb9f63554da7a4be065c26eb79a49eb5f7a4f2aad645357a33",
+        "git_blob": "9fe949e26afcc1880b1c1596a96a42ce4a9a22a0",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/upstream_capture/ella_native_capture_authorization.dart",
+        "bytes": 3371,
+        "sha256": "942e53a3eb9d6e03b157c14fdca2ff68f9defd41f9acde0e1c2fa9bc31f811b4",
+        "git_blob": "ac26f3496ff6860ea8eb259481ffc961da9ac4c2",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/upstream_capture/ella_upstream_capture_dock.dart",
+        "bytes": 102712,
+        "sha256": "af2f3b2d11046d88c99ef03076f6063c5abde922daf6a102071e74207e476fe6",
+        "git_blob": "2139c5d6c4a78c5ec8f6481d5f4ee77e22b42f26",
+        "recorded_origin_blob": "21327300e1309263fa3aaf9f4b8966e49f8967b9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/upstream_capture/ella_upstream_capture_runtime.dart",
+        "bytes": 75296,
+        "sha256": "f3913b079c0fa343598c1ce1cba4241afb7cd07eabab9b499d6532a6959c40f8",
+        "git_blob": "19e1cc4c3d7f9c23ee138d7d1f535737d08b039b",
+        "recorded_origin_blob": "be1310cfdd9d656ba36f556ce394137e1a0678b2",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/upstream_capture/ella_upstream_device_service_adapter.dart",
+        "bytes": 25701,
+        "sha256": "a02370498cb31098b30bdd52a0ce11d9b377df661da458018778b97b2078bf48",
+        "git_blob": "70ce92589f1d2c206c47888e68711dfb0901f714",
+        "recorded_origin_blob": "e032c2fab1cb90405c83c955bbd345f0f7c7fdb0",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/upstream_capture/source_revision_contract.dart",
+        "bytes": 8025,
+        "sha256": "3d9f9f2f9adca2931a03e81a19be90bb1c9dc6cad14ae854294118b3a2a4e460",
+        "git_blob": "dd631700a399d0b26dcfb792ef29fefa84290f75",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/upstream_capture/stock_ui_exports.dart",
+        "bytes": 474,
+        "sha256": "bba872a84119e526b784ef77ca0d5966832e644d5d7ba910b5fa3de3579b26cf",
+        "git_blob": "b644e8cc81367b41703f353b9b886091687b8843",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/upstream_capture/transcript_view_diagnostics.dart",
+        "bytes": 4359,
+        "sha256": "f41d7a8e9be2f6f55dfac63a737dc75a565ba5e3625ee12f07863619d8e30ced",
+        "git_blob": "c82472c81959f4cf7fad73c436f02461db340351",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/voice/chat_dictation_admission.dart",
+        "bytes": 672,
+        "sha256": "a3d228c5448b8c099857d670599612f218e5a60c9089bcc8c189e427c33b8c57",
+        "git_blob": "ce42365abc147aca5e2f89a9dca650e2a4e0c6c1",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/voice/darwin_local_dictation_port.dart",
+        "bytes": 4026,
+        "sha256": "90c5efd274086499424a53e73fb3ff053506241cd051c66a8e509e727bc8a922",
+        "git_blob": "2f74d03a2a61ddde140ba688922eeea6ea3d340f",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/voice/dictation_draft_snapshot.dart",
+        "bytes": 1911,
+        "sha256": "c6c90cebf33c2ac33ba1dfb34925bd68db320b8ceace94e76ac84429537b66de",
+        "git_blob": "17367b9885a1e351094de85d28b3ee414d8e19a1",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/voice/ephemeral_dictation_session.dart",
+        "bytes": 8487,
+        "sha256": "7c976f6ba7fd7120df1d2cb3968f2400417ebc08fdd66895979674d5438e395b",
+        "git_blob": "89ef76657a2b2233783acbaea9203aed3efdde76",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/voice/foreground_dictation_diagnostics.dart",
+        "bytes": 10880,
+        "sha256": "9d0fa10673a8ca7bb74b26073d4e40ad3f3bdc0bfb4bc31a2a29abf1cdae5ae0",
+        "git_blob": "76f2353d35f21b2b951c853e9dc3a87f48410547",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/voice/foreground_dictation_host.dart",
+        "bytes": 16406,
+        "sha256": "6ae25d7250f7a21cadb571591a1ed576fd594c234d4a46040543cfbdc094dd39",
+        "git_blob": "ba1aeaec70fd5842be65d3ef1eb36ad283ede92b",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/voice/foreground_dictation_registration.dart",
+        "bytes": 1020,
+        "sha256": "e9e7412e2ab29ff4253e504be26128298a4a269caa374a8e7dca236c20944dc7",
+        "git_blob": "5204d1b88f1f8f6178b239d7a862b33da2b3638c",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/capture_word_receipt.dart",
+        "bytes": 1777,
+        "sha256": "7663eef3e42ef96122ac525e5fbe3d898586daf264dbe45f23aef9ceebf4b196",
+        "git_blob": "82128f912eb97514ad039063430dc9bbea1533a3",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/effective_voice_diagnostics_panel.dart",
+        "bytes": 5533,
+        "sha256": "527197a1167a074f3cd9dfca8a969237eeb3f96da84d2eef8867e5c2784dfc69",
+        "git_blob": "d5c64275b8381441a0556a11c49c8dd81c02c4d4",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/ella_companion_avatar.dart",
+        "bytes": 9426,
+        "sha256": "87741f36c110122ca1b31eb47ecad21d437856c6c9c2c075beb7009effa86179",
+        "git_blob": "43feff122ca2215cbf3c76dd680603744cdb410d",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/ella_emergency_button.dart",
+        "bytes": 6047,
+        "sha256": "52bae24aa916bfe05b27e3921caf815894e4ab1de04d19c8432993879ce772d3",
+        "git_blob": "2a0ca9585a945d453e891850e5b7385f3ea5cd16",
+        "recorded_origin_blob": "d341fdc2d05af7650830a04bec5b778dc8a27967",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/widgets/ella_memory_chat_card.dart",
+        "bytes": 5510,
+        "sha256": "10f2048e0e23d6a9f79a66c8e812295c0472a527b40146aff0a0670962a34b31",
+        "git_blob": "352770e13203b3a38dc143f0f3195634f11a4f6f",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/ella_settings_row.dart",
+        "bytes": 2999,
+        "sha256": "9d7e45454ef17c892e399930b0b3be9ab9736435e90133baba502f26503d787c",
+        "git_blob": "519998d4d1e726c5a2bf45aed4dd886b86fe9175",
+        "recorded_origin_blob": "64b543ab9c1207dfb16f5ded961542e3686f3cd7",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/widgets/ella_source_indicator.dart",
+        "bytes": 7542,
+        "sha256": "3af74601e782dd7e69e794dd6cdadffc47229572800cc15fcbdf510c1bd368a1",
+        "git_blob": "e484140758cffaab00ce3a077bbfed531b64b82a",
+        "recorded_origin_blob": "5d0747a67adc02f4e4fe3e97db19ba430f206939",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/widgets/ella_thinking_indicator.dart",
+        "bytes": 3659,
+        "sha256": "8345cdcd59733a7eae84c38ffb22f93cfcfa6c81576f5722551828c04c4d9895",
+        "git_blob": "41411e3a59fd3f2d32b88307c88d1de35c8b2a98",
+        "recorded_origin_blob": "c81f61852168463fd15b13420ef6b3a2194c34eb",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/widgets/ella_v7_appearance.dart",
+        "bytes": 5155,
+        "sha256": "aa0cdce2381303056b237b84ee7fe4043ba285c4e6161c90be7b1d2e06e3e948",
+        "git_blob": "ddd3f67e1b906f4b084873f8b6d6b9724cfaf57b",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/ella_v7_companion_art.dart",
+        "bytes": 3621,
+        "sha256": "01dd2d7eb04400f42ac184b1869e5a707c4d0f5fa76aed212525ac146a6ad6fe",
+        "git_blob": "0d2e3f9535098ad82a0feee54e94c3acc7fd8e38",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/ella_v7_companion_card.dart",
+        "bytes": 11208,
+        "sha256": "5e246e4697f043d338a2c10ffd0c3ebae0805947d349cc22b4214487d256edca",
+        "git_blob": "9360dc105de2d1429585fec63d1353e79087b464",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/ella_v7_companion_preferences.dart",
+        "bytes": 2635,
+        "sha256": "6e09fce3ac61517eca0d9f45b115757ba4059369048b21c0c4bd34929e3936ba",
+        "git_blob": "61c79315e2ffc36b17b27493bb9333d422be2604",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/ella_v7_surfaces.dart",
+        "bytes": 11697,
+        "sha256": "c0364d0b022e0e1c87fd3570b853dd336f54617aad8f0192006527cef066ffbf",
+        "git_blob": "1af88966b47e22e69708e65653d4e1b4dcfbd8dc",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/ella_voice_orb.dart",
+        "bytes": 6211,
+        "sha256": "ad8c45e939ebbfcd92dbe18d104381afae9a52b9b0f3c0234a7b6d9103ffc13e",
+        "git_blob": "e2918866bdbf59e46f8eb5e50cc04e9a29e39603",
+        "recorded_origin_blob": "eb81df4a9f385edb554a9d405a509ca9c30d638b",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/widgets/fictional_transcript_test_panel.dart",
+        "bytes": 7119,
+        "sha256": "b23ee936415cbf7b1c18a74c82917fccd3d52a8deb00de3d4489a9d77d539db3",
+        "git_blob": "83dbf2d329a874d189ef71dec3f9b7aba92a6910",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/foreground_dictation_sheet.dart",
+        "bytes": 3181,
+        "sha256": "331a281c6748eebc5b1f652d5f9cdfa82544a3d504479fcd27a6e477f75a01a1",
+        "git_blob": "2e3e5d240ff2eada3e67176e9e0a4b99cc09235b",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/guardian_mode_button.dart",
+        "bytes": 5331,
+        "sha256": "f1c1d2a24f96c1bfba0222750953c881cb294f1614f0d1753a2e90bc3080d3a8",
+        "git_blob": "a3fc48199c26666c43ddfb463b453ad087364e83",
+        "recorded_origin_blob": "7130e0d3956f26ba18e13a01598986126c11ec2b",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/widgets/iris_capture_controls.dart",
+        "bytes": 2584,
+        "sha256": "ee4893ac1821345120ecb24d15ec087e7be2bebb9a6aa1e1aa3a58a5993522ea",
+        "git_blob": "2208d821e87d31c1c3d4ae692509a58fa8f11392",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/iris_journal_presentation.dart",
+        "bytes": 732,
+        "sha256": "13c57a5c03bdef162b5f0f13d8fe724cda5e7b0eff1c533ff5ca3d1476c5877c",
+        "git_blob": "1de9e767d5da20d17204fd0e3b698de88f516d99",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/iris_journal_reminder_row.dart",
+        "bytes": 3640,
+        "sha256": "1334d406d2f48cb295bd0268a43b79d0d24703c0e847e0a78e3a6972596b735e",
+        "git_blob": "c22cec3d7e32cc1d7937483e75f9e7ef52219610",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/iris_whisper_stop_bar.dart",
+        "bytes": 6411,
+        "sha256": "7eb4684a49d13706da33b03b76e30abe9c80d93482b462c00f82c84be0985ae9",
+        "git_blob": "67a9efc62ea17aa627705f8627539415988aadac",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/journal_projection_diagnostics_panel.dart",
+        "bytes": 3170,
+        "sha256": "0ee07825fad9f1018ad11b21acb67b76ec12fb94aa4df57b97e2feee65b8dc5b",
+        "git_blob": "568cda559cf71e611f90897e155836c73e7e7481",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/memory_artwork_image.dart",
+        "bytes": 60078,
+        "sha256": "fc0af8c3be81109db72f97b9139556061ead5d0e75d6e26ef3418f13d9217345",
+        "git_blob": "de213de78dd9990ba2853af9c313da207612cc5c",
+        "recorded_origin_blob": "9fae205466e1441fba3bae0ee7493dd9df826e22",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/widgets/memory_correction_receipt.dart",
+        "bytes": 8246,
+        "sha256": "d69bdb71ffe672dfcd7d268bc5e34bf908ea8a861782fa11add4be3401d2a6d1",
+        "git_blob": "917726d54e8605b495980975a35133b061c5aebc",
+        "recorded_origin_blob": "4a1f415cdf1171209bb0e1deba573ece967818c3",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/widgets/quiet_memory_preview.dart",
+        "bytes": 8060,
+        "sha256": "d5eeffca264333718971319210302e423b7356fd59a6dd5d94f6bf00fdfea9c6",
+        "git_blob": "39a9a4255b8259dfd4bc1ce80afbc77ad61f1b6e",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/refreshed_journal_preview.dart",
+        "bytes": 3248,
+        "sha256": "02d7e29dbb31c6cf8681e05572c282a26467584c0606bed20e9a044fea912b74",
+        "git_blob": "55e3bd210e953a61bb1d2db02fb5d17052adfc2e",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/retained_summary_card.dart",
+        "bytes": 2898,
+        "sha256": "f358d3d8310cdedbf20cdc09f21c8ca28e1cb26d481a70d6fd4b4ac934a2b40a",
+        "git_blob": "8e606fe65110ab47527d70c0e9c9c8a83ec94f3e",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/summary_refresh_notice.dart",
+        "bytes": 3197,
+        "sha256": "380a9580b2a4e488a76bf80900c2119b25fe4803d8d34b93b06a3bdbae8c3374",
+        "git_blob": "b881b1340995f3f0af8d08c0b21184953e46ec69",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/ella/widgets/today_card_surface.dart",
+        "bytes": 10295,
+        "sha256": "2e5c1967e05b866f1dd2bc607c838c302f7a0b048907fbdbf91f066452d259b7",
+        "git_blob": "4c74332ee3eae62ffb72e8ecc0000158f6a719ba",
+        "recorded_origin_blob": "1e45da6c591302b47849a41a91dc531afab944bc",
+        "status": "modified"
+      },
+      {
+        "path": "lib/ella/widgets/v2v_fallback_dialog.dart",
+        "bytes": 4008,
+        "sha256": "1585a074a3bb0db1344418e6cafa6992b9fa9bf087778dc458c0ab18ad96a02c",
+        "git_blob": "696de1a08836a7adbd7ebd44f4adad9dbd4eb90d",
+        "recorded_origin_blob": "d14f378677fdcbf7966c0bc31a7208406135c3cf",
+        "status": "modified"
+      },
+      {
+        "path": "lib/env/dev_env.g.dart",
+        "bytes": 1960,
+        "sha256": "b9573150def66acb878a6f90f9658d01984e0bedbdbc35612bb65f2cbe86e0c8",
+        "git_blob": "6326acbf1ead4cb548d62cf3a05f8c15c9d22eaa",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/env/prod_env.g.dart",
+        "bytes": 2209,
+        "sha256": "19fc8812f0f7d41569e555d24fb4c96da3858b59338788f7cfd502a1fdeed0ce",
+        "git_blob": "b18ddee2c086a9cacff2a7b971d8215433f43f6a",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/firebase_options_dev.dart",
+        "bytes": 3127,
+        "sha256": "30275073ce6ba8327597860bcaa1c9e55f34930035aa4716221a9cbecefbda20",
+        "git_blob": "b9a4e267f97e993a3bbec4f34eec3079ce961a1e",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/firebase_options_prod.dart",
+        "bytes": 3127,
+        "sha256": "30275073ce6ba8327597860bcaa1c9e55f34930035aa4716221a9cbecefbda20",
+        "git_blob": "b9a4e267f97e993a3bbec4f34eec3079ce961a1e",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/gen/assets.gen.dart",
+        "bytes": 30697,
+        "sha256": "6eb1e8020687ba358c47ef9dc78d969640ea5160a549e1d708f8af60053d07e0",
+        "git_blob": "bfd6b8ad0baec70b007d90be0de813f4b10fc9c3",
+        "recorded_origin_blob": "3b82e5e5d7319a284081ac737867c246d2cd8c70",
+        "status": "modified"
+      },
+      {
+        "path": "lib/gen/fonts.gen.dart",
+        "bytes": 526,
+        "sha256": "2e6e07f828fa3bed3c24075b6d17ed492691dac4cc0fd595fa5bd7baaed458c7",
+        "git_blob": "2588fc145c238a307673475f119f42044a3415d4",
+        "recorded_origin_blob": "8ac3b5b0e80bae43ec797914959a269362bc5254",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_ar.arb",
+        "bytes": 181573,
+        "sha256": "ea337a7d554f53c8fa1be28b496d4974c2470b4fe69efefd7a7fbc27115b78b3",
+        "git_blob": "45151c0ed1bdf119aed7b72a1ae8ce1aa19ce1d6",
+        "recorded_origin_blob": "cc5303b539ca281064f629e16e82ac0f07a5b01e",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_bg.arb",
+        "bytes": 218558,
+        "sha256": "28bd76f38e19924e3afb72a72e4746a286a5f515312ee14501d4df8fb71f737a",
+        "git_blob": "b3f7aac964b077334af47b72c2d7a850d5d3f25a",
+        "recorded_origin_blob": "fec0d899a383f17232fbd3b46fd98a3c37f2db05",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_ca.arb",
+        "bytes": 156233,
+        "sha256": "97c05955f66b5abd320517c81ada967928dfc2790c8015643e1cc74218c66076",
+        "git_blob": "c42d3e1d93c77a0770ef9bf47606b357baab8d1a",
+        "recorded_origin_blob": "fd89f13952b33f1345025b079c942bb9a8d22ada",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_cs.arb",
+        "bytes": 153555,
+        "sha256": "7ba9beaa3fa2f0dd997320c0827c04a9db480d1162485bf7603cf24312de0434",
+        "git_blob": "298ac22c93d5f916ac776ded507d08f595d77be0",
+        "recorded_origin_blob": "2290335344b40afb92f7e1c2b539a4b5c1c7f76d",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_da.arb",
+        "bytes": 142961,
+        "sha256": "dace0724a4b01214312825680b956a9a50d16913bb89c9c2548cb5ec9b60320f",
+        "git_blob": "58347e11727d731614e43df3c9cf16f2903a9ad1",
+        "recorded_origin_blob": "138ca6a402f896f076989ab4ac2e1a46653eb5cc",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_de.arb",
+        "bytes": 158213,
+        "sha256": "e33034b17638be7478eef8e48a063f6459552ac58b6d54018fea5fd4155235bf",
+        "git_blob": "8cdb73031f04a501f8d262b0400367a19f18946a",
+        "recorded_origin_blob": "826dc9e17a8fb920c7490e7d8f9a05c6e7f1886a",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_el.arb",
+        "bytes": 229020,
+        "sha256": "da07ac8ef0a0e7155666a8b11763c3b452c8304eb95ff951dd818b740ea57612",
+        "git_blob": "edb9cbb0a6de0bc290bef8eb8d105c70c2afa838",
+        "recorded_origin_blob": "8856f07119829f760ba965862adafc70c5145e44",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_en.arb",
+        "bytes": 424144,
+        "sha256": "710c468ac2b733ebd44ed22493a0be152897b7bc0fcde320d8a7b4db06af533f",
+        "git_blob": "6816d33582af02e109d40911ff29a74ca183c29d",
+        "recorded_origin_blob": "cabf8248e4481653c10095deef90ad932c6c81dd",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_es.arb",
+        "bytes": 154467,
+        "sha256": "661864cb2788efb4f38d96f0b3b21fcd72645baa275726eb97e81787f56bdebf",
+        "git_blob": "074359644b4668ba54dad25a84bc456e077c65d5",
+        "recorded_origin_blob": "b9a28e447aeec25d3aa1492ed3c676ac6fb14fb9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_et.arb",
+        "bytes": 149124,
+        "sha256": "769b96beb8d92fe4d406d4a70cf0b4313b8c4e691a8288181ea82511c8de7c0c",
+        "git_blob": "5158fe7fef526b5c9857652219b1b07ba5b3aadd",
+        "recorded_origin_blob": "6daebb56e9eea89de142287f4e624967c7143d4a",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_fi.arb",
+        "bytes": 151348,
+        "sha256": "5953c8a0f262345911136f1e192ec2b8a194f1c9dbd5025bf70e380f9f3b985e",
+        "git_blob": "809e8a51c2b2a0c7d215d0e33bd051ec9c7a5846",
+        "recorded_origin_blob": "ad0b7d7ea7e34a29390428d304df4bb2b4f19464",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_fr.arb",
+        "bytes": 164568,
+        "sha256": "5696bf919fc9a8126e2f7c11156689c026dde25d1c4b4a25ac58b71c1d9df36a",
+        "git_blob": "b4ca605456e1807569e218285802382573075776",
+        "recorded_origin_blob": "87ee77dbd29f8aabd956c293e35041b79086921b",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_hi.arb",
+        "bytes": 253989,
+        "sha256": "7c0559537819ebaccb57e12323045d777f1cf6564f1e3f87cb37d07d2f687214",
+        "git_blob": "74eade5f2577dc2a9f367259fc33f1633efbddb4",
+        "recorded_origin_blob": "1a7bd2b218067edb202b899e9ed1afca108339c6",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_hu.arb",
+        "bytes": 164480,
+        "sha256": "c58a93d600e08e4e5ec0d78a6f9aedd33056f2ed5302105acf58a1b814a4fc34",
+        "git_blob": "371201aab61b18217539633e2be27645ac151fc4",
+        "recorded_origin_blob": "0df78f560302335e2ba3becfb0787f2e5115dfeb",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_id.arb",
+        "bytes": 148479,
+        "sha256": "f4e368c1aa24e198b629c88cf931c9945fab9685c7377985375dfd959bf7c828",
+        "git_blob": "fd818ffc34bf1bace64d4012f6e0fa28e12ec383",
+        "recorded_origin_blob": "742d8978bedd03f222537417f037aa36ec738bff",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_it.arb",
+        "bytes": 154413,
+        "sha256": "a684675b2a75646314f4ed7761e28926761aaa863f0f65c6851a1bb4b120581c",
+        "git_blob": "decfd531e78162cc06d540d703c1dcfd5eeff1b9",
+        "recorded_origin_blob": "cab74274fc37518e6ac04dfff1c9e7642cb1a7d8",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_ja.arb",
+        "bytes": 173434,
+        "sha256": "b52774cb777373a1330aeb81f11d46b45bc32d1f5f3227f8a5ce1f3a49a7908a",
+        "git_blob": "c3b2ec456bdd352394d9f841d17b0d668ee963f6",
+        "recorded_origin_blob": "36cdf95996bb3f324b63f914ce3f4f4681afcbf9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_ko.arb",
+        "bytes": 158549,
+        "sha256": "b355e07cfb676a0357af606cfcefc155362901ff20fea0ab9d9412a5268ac60c",
+        "git_blob": "66f151080dd61b12916658a33aa88d074f4cbe02",
+        "recorded_origin_blob": "13f66b855df07048da6de7fb37c99a35f87b72e6",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations.dart",
+        "bytes": 594030,
+        "sha256": "1022461946e2fddd2543d1dd7395ff2526e41a74d427dd83bb89ba0e8678df08",
+        "git_blob": "b451a519d20ce75ba9a817656eebbb82c8ebd3bb",
+        "recorded_origin_blob": "3b2f347ecf193d21ac9db3926ccc616421721879",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_ar.dart",
+        "bytes": 330021,
+        "sha256": "0209ef259eb21775446885dc6aa5e7d331c44eae45dcfda5efba68e1ef795617",
+        "git_blob": "4db82b971c7e7e86899fe53a0eee045f11f1ea95",
+        "recorded_origin_blob": "d0b63b8450b5a434ed1fd1b11738a1ffc5658319",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_bg.dart",
+        "bytes": 367723,
+        "sha256": "3b68a33b0c49066ccc5e9351e4b80d938668651c6a189b88089f1f4101a954a5",
+        "git_blob": "81b719856c0892fbc696b5aa2f11766a316fa2cd",
+        "recorded_origin_blob": "85ca5f086ccf7a22d399388318817ad7a98853e9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_ca.dart",
+        "bytes": 306187,
+        "sha256": "cb0e6921ba667b0c97e7d919f6e32c3d1d713f85dc27bc21f735935542ffff5e",
+        "git_blob": "91d6618db9b0c72af926992abe52fb4a50d95140",
+        "recorded_origin_blob": "80f5f278cf371bcd2846f119058b848f11b0e348",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_cs.dart",
+        "bytes": 302473,
+        "sha256": "a68d691c5dbd85c8c18086e7a8573c4b04e0451c34c85b719ed4fde62114833f",
+        "git_blob": "890dbc072f05eaaa91bfebd9724e2d7d5aadc0ba",
+        "recorded_origin_blob": "b6570ed5b32ce71d6a3cde805b28812998b45d4c",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_da.dart",
+        "bytes": 291044,
+        "sha256": "0790c3c8e31dd53703d930229f084857d7f1c7fb3d33abc225ddadf036aa0ee5",
+        "git_blob": "78f0102b07a080c4fcab2c39fb9e8ecc552d83de",
+        "recorded_origin_blob": "dc10104cd964364b67af932451787c7e3c324ecb",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_de.dart",
+        "bytes": 307927,
+        "sha256": "46f16d0da2b556f120140388ff3ebf14c5368b9681afa7041c3bb23b6fcc1516",
+        "git_blob": "15480d46b5c05c176b07fe091978d6cbbe21609d",
+        "recorded_origin_blob": "9d52fdedcbf7b87a7994e76c02fa4b521b5c7dea",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_el.dart",
+        "bytes": 376855,
+        "sha256": "997d67c5f2f9b166713819fcd52906cddf262c9362e186483bd20dac7bcb1db8",
+        "git_blob": "390ea78395a46e76ccf77ae31ad9a8777349b79f",
+        "recorded_origin_blob": "eee2054c8103530baeff066fb3dab1de2a2029ce",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_en.dart",
+        "bytes": 290749,
+        "sha256": "1e4249a38c4fb01c4dee5d9ec2be80cfd70a10b6b655f6a6632eaa2a1acc6a28",
+        "git_blob": "cc863b8be33de938c96e91bcf44779e9ee4565f7",
+        "recorded_origin_blob": "5efbe1c3c4748bdc192f1f1fa56fe66c29da48b0",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_es.dart",
+        "bytes": 301856,
+        "sha256": "17b8782ee41c29d36158e209c422e526ef48e8b083f8ca6a6b86c4c1aa7dcbd2",
+        "git_blob": "1fa71444c721b602ef623aef2b0db0d8a4c1238b",
+        "recorded_origin_blob": "b67f852a9e793e6f070ca6bdc9abd55e4358a409",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_et.dart",
+        "bytes": 296923,
+        "sha256": "35fb58bb0f60cdd5be50f7b8113c4eeafd7e2bfc9132f2e8c8c3f2aa4f5528ac",
+        "git_blob": "bf95d10f48050c45a3214169bd1190b3e2b8237a",
+        "recorded_origin_blob": "149e9fdb7f574b64dbc9fa09a5f11f7a6c5fd0a6",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_fi.dart",
+        "bytes": 299201,
+        "sha256": "06754c6cd2ac8b34c5cfd0a1de5f7f65ac9b539ac367a2b00908ed50354cdf94",
+        "git_blob": "05d5ebaed17a34727829d750ac6c22beda6e58e7",
+        "recorded_origin_blob": "97e9789dacdcc5ada01ee3e763cad477d7e6f7e9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_fr.dart",
+        "bytes": 313022,
+        "sha256": "3cab5586d2082073300b9992e3e060ea5817be69afbd6134815c619bc50ebcf0",
+        "git_blob": "3688284f7eaa116927a43679f9fa76963b1a8c07",
+        "recorded_origin_blob": "4d5d05bacdc298dd3fd1f71e1bba205c0d589b53",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_hi.dart",
+        "bytes": 400544,
+        "sha256": "7ce564c438aa85c9dd285207cd891a2c76fb5c59f6f23ad7137681dd93ea728d",
+        "git_blob": "7ff0e242bf27ecb3ce3103ed07b55f171f6f3b05",
+        "recorded_origin_blob": "eb5cc62e3a559065069f3d5b4a2cd67e7425ea1b",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_hu.dart",
+        "bytes": 310206,
+        "sha256": "b280e014168a1b0073fbe652003a5b0d4bc4c1df4a97f5cae004070f4774d283",
+        "git_blob": "8595deed52e3653bc93dd72c1d1ee88cddf495de",
+        "recorded_origin_blob": "6cf168e646fabac5381f46799ffc89694f2f1483",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_id.dart",
+        "bytes": 295396,
+        "sha256": "49b5118b4ac585f0b7fce6c58ac1e67a6ce459688426587ac06d8dc6c15eef58",
+        "git_blob": "6793300a1fe75cdf31ef148b36abf88270f01ae6",
+        "recorded_origin_blob": "c8e7444b4957071e6e5f2080862352feede83626",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_it.dart",
+        "bytes": 302701,
+        "sha256": "14714c5035bc67fb7f1ad89eb3bb85cf627dc4728118b03df1682daed3dcfd8c",
+        "git_blob": "46660aa89e4cfe99b13a73875d0b8c9a91bc12a6",
+        "recorded_origin_blob": "a78bd8473d5251656e5ebfcdef0c53eff467a17c",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_ja.dart",
+        "bytes": 318618,
+        "sha256": "ed5a8ddf1cf7ea51002b928bd0441be648b4aef691c5e038e2765294c26c8479",
+        "git_blob": "c4298836e1d42fb370e94f2985c9fa5ecd2cd4a2",
+        "recorded_origin_blob": "aabc5197c61fc86fe260ec44a1bbf7ec6843ebbd",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_ko.dart",
+        "bytes": 303984,
+        "sha256": "bea0af4cf1d83a8f5667487c69423da6ac8a33d48d66779e99f6ac0f1ceccdfb",
+        "git_blob": "924cee5189f52de1bb787bd90105a48f0b0393bb",
+        "recorded_origin_blob": "5970c8fefface61cfc1b0da7bf15501781d9487a",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_lt.dart",
+        "bytes": 302402,
+        "sha256": "8e097c1dc63885c8158a1836f88471634770b855725ea82924ae37f3965f7df2",
+        "git_blob": "0577bbc9540a0e677d75058fb92f10b4d74dafae",
+        "recorded_origin_blob": "eab9d05123a4bd244bdf9b1df0a4cbe77de52ab1",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_lv.dart",
+        "bytes": 303951,
+        "sha256": "fb074ae65a5f27290462da2c7de4b17d1ca847389b20b34ad163e999bfb7a920",
+        "git_blob": "3362db1620f32bcf0cf8638da4503cbd673e37d0",
+        "recorded_origin_blob": "772900bc46107b6036262d4e97faf6c52862e147",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_ms.dart",
+        "bytes": 297637,
+        "sha256": "03a2159b9b8c80b26dc91397fd17233b87d781616b05fba67d54b5080644068c",
+        "git_blob": "312d5bd644f47dcd69fc5f9dbe2023c655788936",
+        "recorded_origin_blob": "35f62b6ad2a7db961c77aceb2455a9bdaf71930e",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_nl.dart",
+        "bytes": 298808,
+        "sha256": "10b419b4eaff18202ebab7598ca3936b3918adf178b64d8bcbb76c50722f5896",
+        "git_blob": "0f5927fc0d033161205e088d270fc7d7eb4d5f0e",
+        "recorded_origin_blob": "d6ad9f10f6d1b9fe3ddef560f3761c9a56494818",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_no.dart",
+        "bytes": 294270,
+        "sha256": "a4f8d5f264baa9feaab8392f2612e710c16a44f3823b38040e4732ecb8dc586d",
+        "git_blob": "68e761614056d42ed9a3ac02a391b7f1923fe6bc",
+        "recorded_origin_blob": "a5256937a6b910a1e6d3d0b7fdbae1f8bf31baaf",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_pl.dart",
+        "bytes": 303142,
+        "sha256": "498f0e439a4328eef5042b3189fc847392251234aececac971b7bd825a8923b7",
+        "git_blob": "38410ce86e91799695ab7a95a571ed917b2415ea",
+        "recorded_origin_blob": "5d6cdccda8f6b31a1101eaaaba8d039537124a38",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_pt.dart",
+        "bytes": 299426,
+        "sha256": "8e1721eb08f3257c64cc92cff2419edf3d62c1b3c3760342ab17d4881e5b7de0",
+        "git_blob": "bc219083ed23f57b1a99ee1bc2ee8f4184570de4",
+        "recorded_origin_blob": "ada0c9ff57c7a3815786c4f0ab53a38553b73d51",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_ro.dart",
+        "bytes": 307037,
+        "sha256": "61b172cd1d17b99a9da2b8acab21cd94db1c678f822baa4f67aeb70aaf47c57e",
+        "git_blob": "99f204cdd3bcf580111e6c351cd81ce1820da3ee",
+        "recorded_origin_blob": "2fbb99cdda1d62bea6fcef2084aeb762646fd989",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_ru.dart",
+        "bytes": 363443,
+        "sha256": "9dfdf81df5f3872b4b2b248fccf00cf8898ac625e1a1031e12dd570236fe7965",
+        "git_blob": "81bb1e110115ef4e56c2210bc57308c79726d056",
+        "recorded_origin_blob": "eecb37578311534ffc5ef9afca1d0375e0dcc81b",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_sk.dart",
+        "bytes": 301012,
+        "sha256": "77d307bcc739342b2d4efd8fb4505d4eb6fe95a0e4cd45887473b6e68a10dcf3",
+        "git_blob": "032e64b3864d543d5831c543e6ffd2d85d5e10fa",
+        "recorded_origin_blob": "94532b3b6ccba1c8e81321da326c37f4c43eaa05",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_sv.dart",
+        "bytes": 296576,
+        "sha256": "dbc08c41d11f1790fab7cc8dff2b4857f860818c442f3b48086d1a6b3bf1a1b8",
+        "git_blob": "1112dddad9011075f9133be41d377dc176e92e29",
+        "recorded_origin_blob": "8734508c4c59f62c98f44808d8af1bda636ee38e",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_th.dart",
+        "bytes": 403628,
+        "sha256": "1d29d5270ecdeaccc2cde1b75df68d85f8c63daeb1560eca24031d5b8cbaac4c",
+        "git_blob": "6cb72bc310428acaffa4abdc65febe005329ff17",
+        "recorded_origin_blob": "c2929d39bbb1bdcd78442a6419ae78c5551401c5",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_tr.dart",
+        "bytes": 302656,
+        "sha256": "b9a8c99ce864c53170771d92d9cf949c645e20ddfc8d2f9ce69665d0f461c9a5",
+        "git_blob": "97981baafa3af38c984c8769fa4761d6b35d87f7",
+        "recorded_origin_blob": "d9f615723b4dbfbc760513ee3b2081dfcc496940",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_uk.dart",
+        "bytes": 360207,
+        "sha256": "12381a67d02a3e004c2efb3764509b19966ce6232c3fdb7a0dcc897d4522dcb5",
+        "git_blob": "2958415bc76a650c45839501e771e9092ed20cf1",
+        "recorded_origin_blob": "99cbf607337c5bbc32e37433e8379289b4441bdc",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_vi.dart",
+        "bytes": 318016,
+        "sha256": "9a2a86e9e752254fd07d3cdf83c116d927523624ce44dd0412f88258a945aad2",
+        "git_blob": "cd6f009c1346867f381fba41ab1fd6c8742a1d48",
+        "recorded_origin_blob": "f6342c9967168391a96e6279b3850870101ec541",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_localizations_zh.dart",
+        "bytes": 278500,
+        "sha256": "2459198d97e39f42aade009dd4e63de62c51e39f99076350bb2e64f9e78a646a",
+        "git_blob": "d1ccaaa965354d0d1879f3fda187a9af7c2ca79b",
+        "recorded_origin_blob": "e18a508075fb0fd1bb60550e331182e12ef88a84",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_lt.arb",
+        "bytes": 154543,
+        "sha256": "935248b369fbbfebcb27634605e2fa15e63ec2fd68b74f4706cae67a8aa69fe8",
+        "git_blob": "802e1588ce52757efc0737c55311b03955bcca0b",
+        "recorded_origin_blob": "7bbc7e86b14b47aae6f429ce860ac437729fbcc8",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_lv.arb",
+        "bytes": 156082,
+        "sha256": "ba3031aa1ee7959c2aaa2e5781d79d79e3fded8966ac1f6ab58ffff56e966328",
+        "git_blob": "a5a1dd32d467931d09513588fe135e0aa2070777",
+        "recorded_origin_blob": "63ace7936fc802ccc3d3a9c5005fb0a2f817b5e1",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_ms.arb",
+        "bytes": 149739,
+        "sha256": "b328abf87930ca0ed8a24ac657245f328fb38389ff69c1183387fea0fac511c1",
+        "git_blob": "26798a3d3e0bd2750fdf25e0a904f0c5e69aa76b",
+        "recorded_origin_blob": "cb5f67322e61fcdac370dae512e8b6e28b5a505b",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_nl.arb",
+        "bytes": 150840,
+        "sha256": "9566a2ebdad3e11a7d4eecdc9665074858f1b49b4e045f796be03d348dc18755",
+        "git_blob": "76ee0fd43fc94c289733657d5473e26973f99dfd",
+        "recorded_origin_blob": "3ce6a83d82656bab192bc8bb5e26a4a54c5f1069",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_no.arb",
+        "bytes": 146571,
+        "sha256": "3c388dd02714f212684b82568ae2e4de186a22107e90fd1836e60392113f29ee",
+        "git_blob": "34d362b9eb2a85fe75809db87a2378371ce74ec8",
+        "recorded_origin_blob": "4cc65fb7f29402b51edd7301f7859cfd68fe6d77",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_pl.arb",
+        "bytes": 155710,
+        "sha256": "5001b7e64dae411c583860a14c0215f8085e1b16c15084976d5415c9d1aa7cb6",
+        "git_blob": "9ff80ff8f2b738f5f171f5ae87137b918c8e1b82",
+        "recorded_origin_blob": "ae85c2ec94b692bf6ac7d9497b8e82dfda38a120",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_pt.arb",
+        "bytes": 152217,
+        "sha256": "3781ad9339cade03ba377ee44d8c437271786e59f2d3d248ef060a212a35b7ae",
+        "git_blob": "edd026d1df44eb7d0131c4ffb1871ea97e14b954",
+        "recorded_origin_blob": "4f525fea7d9effd8713d5041a87f96aa81b06c69",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_ro.arb",
+        "bytes": 158839,
+        "sha256": "dbe822e674fac7fe55869730cf3b62ce91e90b5da9c82ef4ff34ee33a634f41c",
+        "git_blob": "7aed30ecf8125239e8207fde479fd8701e327ac2",
+        "recorded_origin_blob": "031b3521739e213b5efa97f0f099d75ce3d157f8",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_ru.arb",
+        "bytes": 216448,
+        "sha256": "c437bb3b5d275e0572206fb638e48267b73c8b3024d1ff1613ae6721c438b991",
+        "git_blob": "a82e319407b2223150cf6be98de2aaa0ff861fb0",
+        "recorded_origin_blob": "e9467136d822bb5ed598c3bdf814ebd8a56a0465",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_sk.arb",
+        "bytes": 153622,
+        "sha256": "0e70fd09eec5201eaa5db0626971d9dc1cb3be85f954b1dfb10761077ee0f99d",
+        "git_blob": "2ac579441dffa8ae7637ac4aa60a140e4672d380",
+        "recorded_origin_blob": "157e313b910aa41017ad76784762d39505c7faef",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_sv.arb",
+        "bytes": 148888,
+        "sha256": "edcf01294d08ff97b807726182ba020d10e02d430aea2f993a429f35427a7095",
+        "git_blob": "dc9c91cd87542d40a1670e268ac270930923a201",
+        "recorded_origin_blob": "13e7a03682e4c2ec26431b690cb5267a7bdf8ed7",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_th.arb",
+        "bytes": 257370,
+        "sha256": "c90b00b9dbd5437e418444a80f0cbaddd03a52cac92af146018c963fb431fe5c",
+        "git_blob": "c0be5a2fbf9bc579bee85c0162828fab48bd1fab",
+        "recorded_origin_blob": "d5d5bba4db14fb893c02e589e569280974c836ee",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_tr.arb",
+        "bytes": 155165,
+        "sha256": "e8bca5f440d03a1af363c4d1d107c15b768428457001f36c0cdea74110a3cd25",
+        "git_blob": "3978cea4cdb3f959a127cb1be43652e86bff2ebd",
+        "recorded_origin_blob": "c6c64181b0b9a8e787529485c40a715a4702565f",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_uk.arb",
+        "bytes": 212650,
+        "sha256": "a578fe8b73533394fc2ce095ded987fe42065be2f0fba971653e36133ccb7e74",
+        "git_blob": "26f87054a31b046a008b63a915b13ee2b87ae3c3",
+        "recorded_origin_blob": "764092b32cce39ed0dbd6a3f53eb3044cfecf1d7",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_vi.arb",
+        "bytes": 170729,
+        "sha256": "ebe2b60a039726c1ace57959fd5d679766e0116c67a3664c9998d435a4a8dcbf",
+        "git_blob": "134d8c26c1fa8e16306958871afe6caca40e83e9",
+        "recorded_origin_blob": "3fb4dc9eb82d5ddc5e5ba3b8d55c1089adbb2c8f",
+        "status": "modified"
+      },
+      {
+        "path": "lib/l10n/app_zh.arb",
+        "bytes": 134426,
+        "sha256": "d62d3845660db6b6e472c6373d9ff1b22193a9309043f469ff0b76657629837b",
+        "git_blob": "ce536a05266fdc2c8a446388711ba7c62b9640fc",
+        "recorded_origin_blob": "1ba81f6b7e7531c5d267c9678041579a066be527",
+        "status": "modified"
+      },
+      {
+        "path": "lib/main.dart",
+        "bytes": 20342,
+        "sha256": "123e33f8d95ec2bac770282256d7aba7c593850f0c76dc09118060339369325e",
+        "git_blob": "3dde5dae4505c5f76d5dea1a09fb447d0af5ae6a",
+        "recorded_origin_blob": "d5c6bcf04dacc7354a985be6fb5d5a650ca9e850",
+        "status": "modified"
+      },
+      {
+        "path": "lib/main_upstream_capture.dart",
+        "bytes": 2744,
+        "sha256": "40450c82105949db766aac482e9fd3d317f6c20cc208a95f8765b4f45622be5a",
+        "git_blob": "9f463dc8d2c8b4212a59234d65cd0ac22bea74fa",
+        "recorded_origin_blob": "ecd0a8bca6b5586bd5c42894231a8c006c8da79b",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/chat/page.dart",
+        "bytes": 101486,
+        "sha256": "9ffc9feea9fe0f9f72e5fbc4f5c93d53b76869ad41d986b0a1430c2c4f1756e8",
+        "git_blob": "831e2b38cdf212dedf9f24e2e87ccafa644bd2cd",
+        "recorded_origin_blob": "8ebd70f283f549ede8cb028681071229d69fa896",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/chat/widgets/ai_message.dart",
+        "bytes": 47193,
+        "sha256": "a0fab1098d7f2dc3c0887edb9a64af5c216c5874f4fbaf75e798ca764981ab3c",
+        "git_blob": "68eb236fddcf7f8b38e1b4be43bd75d4dcf861d4",
+        "recorded_origin_blob": "d5e9ae0c1cfbed11c4213c6b544ffbe12609711c",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/chat/widgets/markdown_message_widget.dart",
+        "bytes": 2168,
+        "sha256": "4c43cd9ba436f324d8c8141103202fddd52de8a3e1a4b99f117dfbe7fbfb003c",
+        "git_blob": "a964bc96cd46c60f712d85dfc4854c4bb3492505",
+        "recorded_origin_blob": "bd8f52974ec2283168ea86209695dd27feeb3d67",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/chat/widgets/user_message.dart",
+        "bytes": 4512,
+        "sha256": "5ec68d3f36bc65910b31bb16cad563df10b52e9be5a6046891911fb60d1dafc3",
+        "git_blob": "254eab7cb839dec796a493538593fe90f9f9a826",
+        "recorded_origin_blob": "1b82fd59445889e4056fb77a0d96e97833cec305",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/conversation_detail/conversation_detail_provider.dart",
+        "bytes": 24051,
+        "sha256": "66119d879535dbb7a3775088731cfba301e596a35c958d6a21d92be036bf1814",
+        "git_blob": "c5e29556340aab4dcc7f32f2243d1e037c0c6f2a",
+        "recorded_origin_blob": "5b53a4698c397bb578d2b21d831f445e8c9501a9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/conversation_detail/page.dart",
+        "bytes": 92303,
+        "sha256": "67eb3825a9616c830c0d894482be31b95e165d42b92c1fa707f5a54072379aec",
+        "git_blob": "61b8c2a11568c67158665c20b84ddb9f14aba0e3",
+        "recorded_origin_blob": "b5e5a31b0019bebb4a9ef6860471f57450d244f9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/conversation_detail/widgets/conversation_markdown_widget.dart",
+        "bytes": 9846,
+        "sha256": "a728df2ac942be35d4c478d05432ad3b8b74f6029ba7e7e1cddbe9128ad17eb0",
+        "git_blob": "8826f7652c598ce1e8f25be70c6f295c7319466c",
+        "recorded_origin_blob": "7ddfc2bf9a033d5a452687c9616d3bce84d6a599",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/conversation_detail/widgets.dart",
+        "bytes": 84693,
+        "sha256": "23e6d7baaedf7d2284e6515e4bdb947df1d4c177175e4efbf9ef7350acda944c",
+        "git_blob": "75791c0ddf0b502ce8748cb58200f755b3018553",
+        "recorded_origin_blob": "b4195bd0db697ddfbfc9106f0809d19411d3812f",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/conversations/conversations_page.dart",
+        "bytes": 15834,
+        "sha256": "7ab5a1fe0a7153eb76750efdf5c541a6de1cfda9c66e320ec78427cdff747c63",
+        "git_blob": "11942a75e740826b280c0096876ba01404bcff21",
+        "recorded_origin_blob": "285a127e4c0250adb916b2933f6fd01b75a2755b",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/home/page.dart",
+        "bytes": 28594,
+        "sha256": "cb566ad7c58e199ec8668159f53be1543e64089b6fabf9ae6565d6a560521115",
+        "git_blob": "7bfba1061579a57c5f3e4f90b90db7c2b552a563",
+        "recorded_origin_blob": "c3adb648b181e4735487f9eabce86f4e5a191ba3",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/home/today_page.dart",
+        "bytes": 193269,
+        "sha256": "f72224eb706117c608ce4fcd7f7039d05d611d7c11f078aa30e03a1911a9318a",
+        "git_blob": "a9d12e971d01d3a0d9f18c75f4c330131946a69c",
+        "recorded_origin_blob": "869f9c34b01d0ad585e66cd488f4f84024fc017f",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/onboarding/device_onboarding/device_onboarding_page.dart",
+        "bytes": 9356,
+        "sha256": "64113f3c15e4320bf56dcd9840a9c4e29b779e58d495f022899f293f031b9154",
+        "git_blob": "a1320ae86cf7910bd010d5e82e7326a176667470",
+        "recorded_origin_blob": "4f33954c7bfad395bc5deb5b5f70084c8b756edc",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/onboarding/device_selection.dart",
+        "bytes": 7992,
+        "sha256": "2e775b0a5b78bc296ef8058b704b7eb4fd268f2166dd23e89ea8c08b8b543522",
+        "git_blob": "1bb04d167cd7b198f6004ce201c0792e323b6023",
+        "recorded_origin_blob": "6272c749217a6f1697e0ebc388052219f63c73a3",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/onboarding/ella/ella_welcome.dart",
+        "bytes": 12361,
+        "sha256": "33e92cfb00ad6fe7e1afda1fce3306c3e357b7dd53d2ec8cd7617a8b8c87995e",
+        "git_blob": "9bef0ae2fdbd3cf349557ae9f4cb6c045c3f4d4c",
+        "recorded_origin_blob": "a999e71edff1db215d97f4b15300e725c66f062b",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/onboarding/find_device/found_devices.dart",
+        "bytes": 15794,
+        "sha256": "3ce249f13ce16b2f94c4a30bc0f7ef7dea093a37afaa252eaccbc05277d8fb58",
+        "git_blob": "44897ebffb2d909e22ce207941abbf076768824e",
+        "recorded_origin_blob": "aaf8dee2433e889ff4cf2cfd1ef93659d7dbd594",
+        "status": "modified"
+      },
+      {
+        "path": "lib/pages/speech_profile/user_speech_samples.dart",
+        "bytes": 7089,
+        "sha256": "9feb863705cf4a27cc128e54ff1c3eb4fd469edd09a4ec6c983332a0971f7156",
+        "git_blob": "1b1074a3203e9a816b5017b82fa88ef9de95e10d",
+        "recorded_origin_blob": "fdbf06a9be177b8e10a99b1e94e1ae5ec3cce0f7",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/app_provider.dart",
+        "bytes": 26095,
+        "sha256": "40bd936b4e1e19accfd9b2068f45660d36c47fcd76541112c20f1babd16e8e59",
+        "git_blob": "c16ccdc52bfabfe15548b92c99cb4423100c912e",
+        "recorded_origin_blob": "62684485cc4f27b4220bfff6514088ded26104a9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/capture_provider.dart",
+        "bytes": 185000,
+        "sha256": "1976a4101a1c6408fe42c5b865c539c18ffce91bfacde4b4c1d2c0e15406713b",
+        "git_blob": "f288e6de9fc1bca9c6a3fb3748185d04a3108de1",
+        "recorded_origin_blob": "330d5f80dfc1753518946d3f27fc950639e6dcf8",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/conversation_provider.dart",
+        "bytes": 70640,
+        "sha256": "db6a728942c2aab7c18dbaea5e549d9899db5d95887774bcc7d53b2e1fafa585",
+        "git_blob": "36c478f39fc8637d0af440c4c1c9a4d5d12a35b9",
+        "recorded_origin_blob": "7d0f228f2acdd9c1b7790b370d0398f906d9b170",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/device_provider.dart",
+        "bytes": 86570,
+        "sha256": "ff25afe90a5bd3132609e0f7245a8c18b953d34a107333814e3d85f61c55f2cd",
+        "git_blob": "a198961aa625572d5d47f7bf9ceaa833eb7c490c",
+        "recorded_origin_blob": "81df4cc99dd8ff87f2464381d6ca84bec834233e",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/ella_provisioning_provider.dart",
+        "bytes": 18540,
+        "sha256": "e26d7015fa8f20530d9e3741b1597dd52e2651c330d7af404988abe4714b2e32",
+        "git_blob": "ceaa401d4c7ca2d8f95f79da9d1b5f922e8299ac",
+        "recorded_origin_blob": "c5aee788733c27f481e00e80f66a6d78d23d9297",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/home_provider.dart",
+        "bytes": 9446,
+        "sha256": "da77d240720271480857aa81225f275ec3fd6eb2f8bdfe9b5a3ed4d7f4459b4e",
+        "git_blob": "febc3b937a1f51b9183dc4365523a8dbea3805af",
+        "recorded_origin_blob": "e6dfbcbae6ba4a07f1530f970beaf28181b80587",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/message_provider.dart",
+        "bytes": 70978,
+        "sha256": "66710bfc7edc9116a22b4f7ed099bbbf904c79a2d2e323d2b0cc69b3e452a3f0",
+        "git_blob": "d45eb67b9f2a1643964f8275a71f339681ad7906",
+        "recorded_origin_blob": "53514aec826741d925825830fb45f8b146ef4181",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/onboarding_provider.dart",
+        "bytes": 36609,
+        "sha256": "5cf12bf0e5b313a2cc85dabbec10c54cf2fa72da0fae720dd7c9ca032cad905b",
+        "git_blob": "6df35992dbe446d8967f009f38c72ffb8939c0cc",
+        "recorded_origin_blob": "b1598439c6d48c663a3791ed6628d81509df53f3",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/people_provider.dart",
+        "bytes": 8668,
+        "sha256": "7ff8356b573ac53876c09b88cc93748a86a890131cc3416b70072c133948efb0",
+        "git_blob": "269bc501dc216c436a820f01c76cef37a7de61d2",
+        "recorded_origin_blob": "78f2036dc7c70186783938b781ed65f14fa194a6",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/speech_profile_provider.dart",
+        "bytes": 18867,
+        "sha256": "c4fe8b9fd6cfa651afaeef508ce4964a838b907d1f2ff2a9a7354df6f7b098fc",
+        "git_blob": "c62f045065b9db1be99cb66ac47bb76eb6f22daf",
+        "recorded_origin_blob": "afecc005861f39f089527b61ada39fb06ba463c0",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/user_speech_samples_provider.dart",
+        "bytes": 2180,
+        "sha256": "f42b5bae60720672c3f80d067bb129b653661408cf3db5ce2faae8900361664d",
+        "git_blob": "c3bb6a253efc785b57e486aa6392de420ea93fdd",
+        "recorded_origin_blob": "39e64fb97b57306c741d577061c4b6836282e1cf",
+        "status": "modified"
+      },
+      {
+        "path": "lib/providers/voice_recorder_provider.dart",
+        "bytes": 12977,
+        "sha256": "403b4f3877c73e47ecbb76d77b24c322b82cad845fefb2f3bb9259e31636ea68",
+        "git_blob": "5aff9361638aaa6d9c4b903be07f25e438c226bd",
+        "recorded_origin_blob": "79a9fdaa9d33c639b73f1ca588b2a10b3e5dbca4",
+        "status": "modified"
+      },
+      {
+        "path": "lib/services/capture/capture_operation_cancellation.dart",
+        "bytes": 1177,
+        "sha256": "f62d8c41535a99968d17eacf9fd2f8e8b0edffabfba5fdc39f6662fdacb9663f",
+        "git_blob": "5a43087778ef68b000d26f2be47548d464aab79c",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/audio_capture_ownership.dart",
+        "bytes": 9137,
+        "sha256": "ac4160ec063aacada9ced0bf545b5161028f223dd54dec9f658de04aec922f5b",
+        "git_blob": "3d3587d1c380a8201c6609c14a4c2106ff2520be",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/confirmed_mic_stop.dart",
+        "bytes": 218,
+        "sha256": "f4bf80629edb7bb8ea331460cf9f39dc45fec62e92fc137fca89266c1fec1319",
+        "git_blob": "9004e23ca1eb55120d7370296ffc8e150f351fb2",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/lease_scoped_owned_mic.dart",
+        "bytes": 556,
+        "sha256": "449d22c83d088ec1d904f75508d47df6a490a6f05b21fedb6b6059bee181babb",
+        "git_blob": "5ebb9fa80914d1b937161be77329bb20d7ac34d8",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/mic_capture_preflight.dart",
+        "bytes": 433,
+        "sha256": "921da54c10c9d8e7a973e0e4347663fd9a15ccf531042d4fd904c11b92137d6b",
+        "git_blob": "d2798bbbc82c2521a2f8fdc5d1f2cc387260e4b6",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/owned/owned_capture_contract.dart",
+        "bytes": 6326,
+        "sha256": "98ac07d41129407624a183d2817cb90385e6312c856b34faaab36fe3feea1630",
+        "git_blob": "7ef62e75a450053e4c5d14b7871cd1b942573014",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/owned/owned_capture_controller.dart",
+        "bytes": 23877,
+        "sha256": "0fb829be104a58642321a9aed95754e751a28676f58f8632f9afc76afab68401",
+        "git_blob": "e816aee0cfb1ac2c9e50292d7a42f2f662b46be3",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/owned/owned_phone_mic.dart",
+        "bytes": 4999,
+        "sha256": "cddd15e21e09ee0eb1d85fd42de15395b9b6d9d8ce5ce30059bf8bf65defe4f6",
+        "git_blob": "eba23f497862471d34b95a611dd42b6f1082754d",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/owned/owned_phone_mic.g.dart",
+        "bytes": 25367,
+        "sha256": "95e556aa684175244812b1b8e10798aeec3993fe6af72ca21a333a733fd0ea24",
+        "git_blob": "4a64927029105afc89bf39df13f4a2a8e15eec87",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/owned/owned_prepared_native_api.dart",
+        "bytes": 5813,
+        "sha256": "55b2de0f09f36ba9646a53ccc5f9fdbb76fe15a74e98e0f10f9efc7b5d8f2e0d",
+        "git_blob": "a1611186c7f29d19e5f76183a07f6b22e2d70845",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/owned/owned_private_store_transport.dart",
+        "bytes": 13916,
+        "sha256": "68ff3cc399d9e31696fcef33b2fcc32c7cefd93d78df630499213f8531478789",
+        "git_blob": "37f9caec17861b30d041721a6b368a6f57560cf6",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/mic/owned_legacy_mic.dart",
+        "bytes": 3099,
+        "sha256": "a14c78747ce999c528e3289a47597eae3734097994ffca9b6f4b84c31ac446e6",
+        "git_blob": "5539b9605e6d9ab42cda83730279160e1ff244aa",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/services/notifications/ella_notification_handler.dart",
+        "bytes": 7449,
+        "sha256": "1e641925f31485f2792e6168f90674320317a67c62ea68c566eb0e709a842d6b",
+        "git_blob": "009a477fbfc8af249806309bbd6e6d99d31299e0",
+        "recorded_origin_blob": "fc4759d750a03c8475db8680d83e5e7e88501343",
+        "status": "modified"
+      },
+      {
+        "path": "lib/stock_capture/SOURCE_PINS.json",
+        "bytes": 3666,
+        "sha256": "366826cad24492a43c906badad6e2175d5e631d23b12aff743210b30ece71567",
+        "git_blob": "f1e6f86c8b15eceaa5f9720dc2ac536f95878fc6",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/stock_capture/pages/conversations/widgets/live_capture_card.dart",
+        "bytes": 13280,
+        "sha256": "5996e4794976400af531c54e994522772c0833f5f0b7ac624f30d5feea2f6032",
+        "git_blob": "5bb2c62c63637da55c85e31ffeaacb692bab1c4d",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/stock_capture/ui/components/omi_button.dart",
+        "bytes": 10879,
+        "sha256": "3ed9486c34771d2421f864afd52af908246bdbc4733e83c1f8ace9b0c87ca189",
+        "git_blob": "f821969af588038118312b6077d28fa32f3c27ee",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/stock_capture/ui/components/omi_icon_button.dart",
+        "bytes": 3889,
+        "sha256": "d4a58d27c39c157058e3e90e9e6fe88303fc4c302509ec069593d8274d886523",
+        "git_blob": "451e9f50ba25e1ae41d5d816a4642524746be197",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/stock_capture/ui/components/omi_nav_buttons.dart",
+        "bytes": 3509,
+        "sha256": "7e3c280ba8961da790853dc06d2fa7d648e50d2511e8f050f635ef382178780d",
+        "git_blob": "9409cc945b2c2c3f208350944bbf12c3edf71f94",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/stock_capture/ui/components/omi_sheet.dart",
+        "bytes": 7418,
+        "sha256": "228c797e935e4cb44c7cd1501a4a8d6780a053bfcbb1da8e718bc541866d8ef5",
+        "git_blob": "b91ce6dd9afaa380deb188792fdc64575ec2616b",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/stock_capture/ui/components/omi_spinner.dart",
+        "bytes": 1799,
+        "sha256": "6d16e3b9c08169b4e0c7ef9d9a06c84dff07425c951aac0ae05f51ec33727396",
+        "git_blob": "741c70bcd6cfdfb7972fb3058a9adcbef5ef7064",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/stock_capture/ui/omi_tokens.dart",
+        "bytes": 11194,
+        "sha256": "a9c85baccd0aba0318ff1a1fdd7112fff95e7b07a915580b7c53b2d6666fe6a8",
+        "git_blob": "7f492c8fc1bd835f83dd1742b4a8368ea385f209",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/stock_capture/widgets/capture_sources.dart",
+        "bytes": 4020,
+        "sha256": "fca6c7d495231e184a875b0d4fb37fce56efaa65e97b10a786ccb17074e15a39",
+        "git_blob": "d25950a817fc6725f8dee9131a8e77c1be2a7695",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/upstream_capture/UPSTREAM_OWNED.txt",
+        "bytes": 35671,
+        "sha256": "ef56f3f158689970ce8b8c4cfc2aa12a2b30d8b291a400e8c2b5791c25f4355c",
+        "git_blob": "0aac4f37eddaeea487c2e20d64e165493b65cb2f",
+        "recorded_origin_blob": "fa0ff1d640b030e8f28c4ddad156c1184b25a5a4",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/UPSTREAM_PATCHES.md",
+        "bytes": 72664,
+        "sha256": "a63807d9a78a1c4fea0cd78f3aab305ce87e8ddce15fab8c3cdd556174f549f7",
+        "git_blob": "22391f41b9b386be9c2b3dad042f5f4fff7cb616",
+        "recorded_origin_blob": "c7eebda400bb90f66af4a4702051932dc4340ce5",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/backend/http/api/conversations.dart",
+        "bytes": 44950,
+        "sha256": "cdcfc74c6e0b2f4fc6456c5758e5969fd087714551444ca2243cbccf492eae04",
+        "git_blob": "0d2ca613f28c5c5dfbe3c34a49c1680c0aeec5d6",
+        "recorded_origin_blob": "f1e67a1958029050b9e6e34146b1e83727c00257",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/backend/http/http_pool_manager.dart",
+        "bytes": 5029,
+        "sha256": "202ef4f853c3dd197661deeb8b9680a48671f64857b299d2494d12c4b28150fe",
+        "git_blob": "704d4a0cdaea880201fbfecb1ba7fb6e446d2ee3",
+        "recorded_origin_blob": "eebfb213c689a833a22b364f9e6e4a52408a1f9e",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/backend/http/shared.dart",
+        "bytes": 36694,
+        "sha256": "aea693f22ce14e52278be277a43cd584ee3cd3219c59bc428e7aef80b6fc6c52",
+        "git_blob": "4208fd6872fac8508db7bbcd92bf19c1144abc0a",
+        "recorded_origin_blob": "cfc492807c411bf84b3228ca03fca84bbb1e2306",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/backend/preferences.dart",
+        "bytes": 52693,
+        "sha256": "45a6c3165424003e325c2fff4d8025f214af46d0f5eb75abb230e055b5cc63cb",
+        "git_blob": "5761f916cf402f000a2640498a9e91bd0586b6ec",
+        "recorded_origin_blob": "2c16f33da76a1f8389b4cac8afe0b698cb2eee5a",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/backend/schema/conversation.dart",
+        "bytes": 31978,
+        "sha256": "bd4142bc79b3475db7e0cb46a84a92864d56d6efd7d1376c3efcb496400014fc",
+        "git_blob": "ace3fe1f611a4840b5ee14f5fc5d67b488a7c964",
+        "recorded_origin_blob": "50c10d3f882781d0789ec014a02847c0fc684485",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/audio_sources/audio_source.dart",
+        "bytes": 2971,
+        "sha256": "24a1b34bd2bacbdd273f56fea5ef978859fa695f6f415aa16107bccd13c6e36e",
+        "git_blob": "7a0c1d98a407734aa712e9bce43a25f6a6f4dd5f",
+        "recorded_origin_blob": "f83b312cf6df973d8a5b904789030d68e2ccae5a",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/audio_sources/ble_device_source.dart",
+        "bytes": 1355,
+        "sha256": "e1e9e32d9d336bb8c9f6153dae50d63f29f8e8c30c1e0b54c9bd6b3c9fc6f53b",
+        "git_blob": "74100d4319233db084363a0f63aefa20636a3b77",
+        "recorded_origin_blob": "47592ed82e91ff46017b709aba795396db49cefc",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/audio_sources/phone_mic_source.dart",
+        "bytes": 2321,
+        "sha256": "49bb4cdb81361004ea621e20b1890880c5b2b07d63bc0436a5f2e8fc2b0fcf84",
+        "git_blob": "eb5a7667b2764d65d34d529f14b9db8a4ca25160",
+        "recorded_origin_blob": "5c539ac52b5ae4aa60abb4845476933a98457a71",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/capture/capture_controller.dart",
+        "bytes": 167372,
+        "sha256": "32b4e4a4439e31198813b47b1d6bbd547153deed5e60622320dce5833d482d54",
+        "git_blob": "a541e88dcfda15ac6f39eb8f5d23fff4f412c14c",
+        "recorded_origin_blob": "139ddbe23bbaa0a7d40f2fd43ae032423688d5ee",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/capture/capture_coordinator.dart",
+        "bytes": 115993,
+        "sha256": "bd289c4b3dbb729ccb1e6476d391a552727b91f6e852dedeff2258db48bad743",
+        "git_blob": "107eb342683523f801c2627f8ccb8bf4818ecdcd",
+        "recorded_origin_blob": "b0b79a5bd6acd748329bddb093ffe60c55b66765",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/devices/discovery/native_bluetooth_discoverer.dart",
+        "bytes": 13205,
+        "sha256": "33592f2a57f49d31e732928ca8ef3d4189412db1f8bb825ea750a09cc8a8870a",
+        "git_blob": "b2a450115f3a53f49b9a4f382f4ef2e150bfcaf0",
+        "recorded_origin_blob": "5136dde20405c645d0f3dc1d86231e674a401a77",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/devices/transports/native_ble_transport.dart",
+        "bytes": 16038,
+        "sha256": "c60a3cb26093279ab1a19f6d8cd79720deca8b986458c30363276a50e1cc46f3",
+        "git_blob": "1353a2b59668f2745aebde8bc8192f139950778d",
+        "recorded_origin_blob": "40ad3715da1010f39bf0e4ef27a9960c0637ff9c",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/devices.dart",
+        "bytes": 12638,
+        "sha256": "2d31e40c0dc41e42bf3639e3c4aa0ed7610470a96b2a1641fc79c1f5e7b421bd",
+        "git_blob": "f93847253693cea3a576ba4fcd7b3bfd0bb3f44e",
+        "recorded_origin_blob": "cea126a28abbd6c045dbedd698761999ef695450",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/mic/mic_arbiter.dart",
+        "bytes": 6790,
+        "sha256": "3a2502238c581a5feebf2bce4886f0c9c135ebc09cb073819dbb6baf8f829cc4",
+        "git_blob": "381c1c60e6a09afa3053a86c512e7f56efee0cd3",
+        "recorded_origin_blob": "fb49e4ceead7104612298f6fddc61668a877b778",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/mic/native_mic_recorder_service.dart",
+        "bytes": 16816,
+        "sha256": "f07d6b9e4db4880585f3afa183cdb911fae66510ebf95c04159a8ab230c84eed",
+        "git_blob": "fdd78fc9751346f479e9c1937f2e7b0c1d01c7bb",
+        "recorded_origin_blob": "8db1209857956b27519e78b29d16d64076147d38",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/sockets/pure_socket.dart",
+        "bytes": 8762,
+        "sha256": "be09ab3044e0ccf453820146dc3c196fb6fe700381e7264e37b787c0f6729bd4",
+        "git_blob": "c293423f1807d57411027ab663171dd7adaaed92",
+        "recorded_origin_blob": "e36d66800506f26452841bd7501563e53304a697",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/voice_playback/omi_voice_playback_service.dart",
+        "bytes": 33622,
+        "sha256": "a8ae99e8aff565d59ebd11197100fc90f11130447a34777f39207eef81d058a1",
+        "git_blob": "1380c5b3af56d562d11181fd0be08e28c6ba190a",
+        "recorded_origin_blob": "2583e82f83a0847c2790d91c798692c012b2485f",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/wals/local_wal_sync.dart",
+        "bytes": 75569,
+        "sha256": "5619aa9934918b8f37e6e09d5c4916f286c528be5fc6b817e528f59965a20b8f",
+        "git_blob": "797bb3c0b87df52813d513c9fa64d750d0ec5e20",
+        "recorded_origin_blob": "f71451c94b8369f66b5aa69284a521b3d9664537",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/wals/sync_upload_gate.dart",
+        "bytes": 17818,
+        "sha256": "53a4c8ae46426ecb54e823457dbd1c9d6706467d2b7336f52be3c3fa0d40a946",
+        "git_blob": "75d8bda5e391e717df7bd4a2ead61a83a332f878",
+        "recorded_origin_blob": "242da726a0bc7694e9636e002ed0c44d5e80eea8",
+        "status": "modified"
+      },
+      {
+        "path": "lib/upstream_capture/services/wals/wal.dart",
+        "bytes": 17729,
+        "sha256": "756ab6220e17862e75d757655223c01a277ed46fa654e9ff14d5a51e62cd3c83",
+        "git_blob": "4818053987ed53580fd236d7a57f993bdc7e73ff",
+        "recorded_origin_blob": "8bde409414b0911c0dd6261f1b26d2ae3a8f7ba9",
+        "status": "modified"
+      },
+      {
+        "path": "lib/utils/audio_player_utils.dart",
+        "bytes": 13826,
+        "sha256": "1f9fea7325200baa7a30dba58bc9020a94a6852d313db925b5ea7b64bc6b5115",
+        "git_blob": "4c891e029c78d2c71bc0918d19974e64e9aff58c",
+        "recorded_origin_blob": "e5fd0ca792487c62e961f966dd2a4b8af79b5b07",
+        "status": "modified"
+      },
+      {
+        "path": "lib/utils/auth/custom_post_auth_page.dart",
+        "bytes": 9082,
+        "sha256": "2f896bdd79c2dd15b990491037145abb056a01ccb3f9cc03db06d2c3bbbaa427",
+        "git_blob": "7dc16d2957b8aa8f7e3713cc0099abb8702e342d",
+        "recorded_origin_blob": "4496266e2a070acf00d03b80e6111042d6234048",
+        "status": "modified"
+      },
+      {
+        "path": "lib/utils/debug_log_manager.dart",
+        "bytes": 10731,
+        "sha256": "cff124e922cfb528c18c094a1dc46742c349d643f8f4f73bae7843b7f1355373",
+        "git_blob": "8b89d9ef6363b333256b55cca8e70970761ba0cf",
+        "recorded_origin_blob": "7c7861e354df7ccd9864d5c8860285151c845889",
+        "status": "modified"
+      },
+      {
+        "path": "lib/utils/discovery_provenance.dart",
+        "bytes": 6034,
+        "sha256": "3e83b233427528ed61580f3ab6d6791ba70e0c3a25463b82c7bd2f50ea4ae6ba",
+        "git_blob": "e1b28eabc1ec7cd2b7c790a2ef3708daaf1ec52e",
+        "recorded_origin_blob": null,
+        "status": "added"
+      },
+      {
+        "path": "lib/utils/display_text.dart",
+        "bytes": 1569,
+        "sha256": "3f01473747d3d4e64ccbc3e98c09e3a3fd7336ac64f26c759a7a7b343e9a625e",
+        "git_blob": "58c1c447009ce179d2b5503717e9367d933cb0e9",
+        "recorded_origin_blob": "19f9e43879235e2ffa0c0845ec0ecab734c9ae51",
+        "status": "modified"
+      },
+      {
+        "path": "lib/widgets/bottom_nav_bar.dart",
+        "bytes": 9829,
+        "sha256": "493ae20b4ec53a153f4e4202e0a9cdf862a26b03bdba0307c1c9a967b20a0246",
+        "git_blob": "77bc774c4b0c4380a67ba8b87d4a777f7847c1df",
+        "recorded_origin_blob": "2cc0804dbdb96e43c0509835114eea633c53bca4",
+        "status": "modified"
+      },
+      {
+        "path": "lib/widgets/conversation_audio_player_widget.dart",
+        "bytes": 15731,
+        "sha256": "730d4fef8c86a411e36274dbcc65aff4868ba30942e8ffed26e824d7f78c028e",
+        "git_blob": "2fd4ab2f44be482b017f30ce24bf3332c7008a27",
+        "recorded_origin_blob": "54a02837ca4351396459349cb123d06398671c56",
+        "status": "modified"
+      },
+      {
+        "path": "lib/widgets/conversation_bottom_bar.dart",
+        "bytes": 32358,
+        "sha256": "7a00d7adf1f1093a0315df42bd46cb59630b2c25591079fbeb2f952830728974",
+        "git_blob": "b3551408e2ad9b3db1837bc962ed2e78974b18d1",
+        "recorded_origin_blob": "e618beb1b64245144d49a7a545e3259d7f3974ac",
+        "status": "modified"
+      },
+      {
+        "path": "lib/widgets/transcript.dart",
+        "bytes": 31321,
+        "sha256": "0a1c41f56b51a99c02c6662a318a6093d6458999af2cff227d409186ba910c62",
+        "git_blob": "31925718e77c31e9af615a1ece702f565fa5da4e",
+        "recorded_origin_blob": "0c27fdc282bcdbe5f350c5c5edd2eade30afc243",
+        "status": "modified"
+      }
+    ]
+  },
+  "exact_baseline_absence_evidence": {
+    "stores_checked": [
+      "/Users/ellaai/dev/omi",
+      "/Users/ellaai/repos/omi",
+      "/Volumes/External T1/worktrees/omi-contract-sweep-jack.RgDcsa"
+    ],
+    "missing_in_all_three": [
+      "19e1cc4c3d7f9c23ee138d7d1f535737d08b039b",
+      "36f87995944b972ceba19ff8f40219e49e9272d1",
+      "107eb342683523f801c2627f8ccb8bf4818ecdcd"
+    ],
+    "checked_source_paths": [
+      "lib/ella/upstream_capture/ella_upstream_capture_runtime.dart",
+      "lib/ella/pages/ella_provisioning_gate_page.dart",
+      "lib/upstream_capture/services/capture/capture_coordinator.dart"
+    ],
+    "method": "cat-file --batch-check, GIT_NO_LAZY_FETCH=1, no network or local index writes",
+    "conclusion": "Missing blobs prove content unavailable in the inspected stores. They do not rule out commits referencing absent/promisor objects; no universal absence claim or fabricated exact source commit."
+  },
+  "smallest_honest_publication": {
+    "branch": "review/recovered-main966-baseline-20261024",
+    "parent_candidate": "736332e5e9e9c85b7ff9e5683f47e6176fcd5de2",
+    "parent_condition": "Verified historical assembly origin only; label commit as recovered snapshot with uncommitted overlay lineage, not as historical build commit. No invented extra parents or author dates.",
+    "two_commits": [
+      "Recover reviewed source-controlled Main966 app inputs and canonical per-file manifest, retaining historical origin and exact exclusions.",
+      "Apply already byte-verified Main966-to967 patch and configuration/version delta, compare declared source-input roots against preserved Main967."
+    ],
+    "input_roots_to_review": [
+      "app/lib",
+      "app/test",
+      "app/assets",
+      "app/ios/Runner",
+      "app/ios/Runner.xcodeproj",
+      "app/ios/Runner.xcworkspace",
+      "app/pubspec.yaml",
+      "app/pubspec.lock",
+      "app/l10n.yaml",
+      "app/shorebird.yaml",
+      "app/ios/Podfile",
+      "app/ios/Podfile.lock",
+      "review source-controlled app/ios/Flutter inputs individually"
+    ],
+    "never_copy": [
+      "Pods",
+      "build",
+      "DerivedData",
+      "module caches",
+      ".dart_tool",
+      "signing private keys or profiles",
+      "host-generated configs or credentials",
+      "private records/transcripts",
+      "unrelated dirty work"
+    ],
+    "do_not_hide_generated_sources": "l10n includes both ARB and generated Dart; any omitted or regenerated input must be labeled rather than claiming byte-exact equality. No generator run under storage STOP.",
+    "history": "New review branch only, preserve original branches and dirty work, no force push/merge/upstream write.",
+    "review_and_test_state": "Full import/source/privacy and transitive build closure review required. Existing patch qualification is not whole-baseline review; no SDK test admission or claim.",
+    "restore_scope": "Code publication alone does not qualify capture/enhancement/Whispers; physical acceptance and correct-agent writeback remain separate."
+  },
+  "current_blocker": "257 changed app/lib paths alone contain20,953,542 source bytes, plus tests/native/assets/config closure. This exceeds the currently allowed small publication envelope. No large import/copy/checkout/fetch/build is executed while external Atlas disk ownership is unresolved. Bounded source privacy/closure review may proceed independently.",
+  "current_effects": "Read-only source/control/local Git comparisons, one read-only existing-remote-ref verification and this small plan file only.",
+  "additional_bounded_tree_comparison": {
+    "snapshot_app_lib_git_tree": "c6ebce1451b1e9b91692e754f27c5477b176e2ef",
+    "snapshot_regular_files": 993,
+    "tree_algorithm": "Git raw tree encoding, sorted name bytes with directory slash; SHA1 blob/tree headers; executable mode preserved from snapshot. Pure in-memory computation, no object writes.",
+    "algorithm_validated_against_known_origin_app_lib_tree": "a1b614b460d9684ee7bcd54fde6aad717a510130",
+    "known_origin_commit": "736332e5e9e9c85b7ff9e5683f47e6176fcd5de2",
+    "existing_local_heads_remote_ref_tips_examined": 1424,
+    "matching_tip_lib_trees": [],
+    "missing_or_unavailable_app_lib_trees": 13,
+    "limits": "No all-history traversal, current-remote branch enumeration, lazy fetch, checkout/index/object write, SDK or source change. Nonmatching/missing ref-tip trees are not proof that no exact historical or remote commit exists."
+  },
+  "independent_review": "Established reviewer qualified recovered-baseline proposal as sound planning, verified four controls/all257 changed-file hashes and blob IDs/arithmetic/localization total. Reviewer required this promisor-content inference correction. No import approval, SDK or receipt file write.",
+  "preserved_prior_proposal_sha256": "e8cfc80c427a93c44e57449895b9a479c451f8840b95049559c9abb4e8f62c36"
+}
