@@ -1,0 +1,25 @@
+{
+  "state": "DEFENSIVE_SOURCE_REVIEW_PASS_NOT_DEPLOYED",
+  "independent_tests": 21,
+  "independent_verdict_sha256": "ac1da5fecbb2e06728f4a2c5b8f6cc56d208471a89c8ceb0c80c07c1f06e9b1b",
+  "scope": [
+    "reject non-null root and per-choice errors including malformed falsey values",
+    "require nonstream object chat.completion",
+    "add closed optional envelope/error metadata while accepting legacy13-field diagnostic shape"
+  ],
+  "unchanged": [
+    "finish_reason stop requirement",
+    "single integer-zero choice index",
+    "assistant/no-tool/no-refusal/validcompleteJSON rules",
+    "owner/route/model/credential/source/nonce/oneuse guards",
+    "1600 requested token cap and90-second provider deadline"
+  ],
+  "proof_boundary": "fake HTTP/snapshots and actual transport/projector code; no real inference or business-data changes",
+  "historical_failure_cause": "UNKNOWN; neither new predicate is established as the historical rejection cause",
+  "deployment_necessity": "not needed to diagnose old response; held for focused release review with the actual recovery fix. No live rollout or new request authorized by this package.",
+  "sources": [
+    "https://openrouter.ai/docs/api_reference/overview",
+    "https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion"
+  ],
+  "publication_path_adaptation": "Baseline suffix is .py.source to preserve exact historical bytes; public test differs only by this fixture path from independently reviewed private test."
+}

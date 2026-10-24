@@ -1,0 +1,50 @@
+{
+  "state": "UNDEPLOYED_DEFENSIVE_HARDENING",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "fc69765ac0bd1f1bb04e4fa4ecdc15c4bf65fec367b66559f82a6fba47ffdb3c",
+      "bytes": 1926
+    },
+    {
+      "path": "REVIEW.SUMMARY.json",
+      "sha256": "a4f5cc21fe6d745c94ea0c7553c0e8695fb75593546dba1a43f8e1b937c5e17f",
+      "bytes": 1490
+    },
+    {
+      "path": "baseline/semantic_openrouter_transport.py.source",
+      "sha256": "6cc479ad127e0e77cf8069dd974e3aa3430ad2e42673514ef5ad3336319a4a04",
+      "bytes": 13467
+    },
+    {
+      "path": "baseline/semantic_role_worker.py.source",
+      "sha256": "a8ddc5e343e63a36a2c5be4f737e19ac0900b44e5d5ce07b70427e26aaef4a9f",
+      "bytes": 22250
+    },
+    {
+      "path": "candidate/semantic_openrouter_transport.py",
+      "sha256": "bd31592bca4ece104745681eee8ec8d57810f03ef3702c8d810985357e0c49c2",
+      "bytes": 14049
+    },
+    {
+      "path": "candidate/semantic_role_worker.py",
+      "sha256": "8309bb2f761892fa48c80b8320e3111bc83741bd3d65357043f3ec679bbd632b",
+      "bytes": 22916
+    },
+    {
+      "path": "tests/test_choice_errors.py",
+      "sha256": "843c6b17250a37bfa73a6513b52977c5c99306286649b1324132d4d84362432a",
+      "bytes": 6067
+    },
+    {
+      "path": "tests/test_completion_metadata.py",
+      "sha256": "cc8976554dac3a38644516fc9cf3340a26444a208eb37cc5279593666df33b64",
+      "bytes": 6467
+    },
+    {
+      "path": "tests/test_transport_regressions.py",
+      "sha256": "20fe32255f3195a00ab0f5631ed908e0fb75a1929b63fbee09ad75abf865c3ef",
+      "bytes": 7929
+    }
+  ]
+}
