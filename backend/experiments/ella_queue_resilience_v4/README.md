@@ -33,7 +33,7 @@ These tests do **not** qualify real Firestore retries, complete application impo
 
 Independent integrated-source and private-control review passed. The exact serving Python snapshot is committed separately. Real SDK/import acceptance, genuine terminal-resource evidence, single-writer deployment and live qualification remain required. No inventory repair, quarantined replay, credential/access change, account remap or data deletion is part of this overlay.
 
-See [the master regression analysis](../../../../docs/engineering/ella-regression-analysis-2026-10-24.md). Live deployment belongs exclusively to the verified external Atlas writer after the exact handoff is delivered. Codex infrastructure coordination is a separate role.
+See [the master regression analysis](../../../docs/engineering/ella-regression-analysis-2026-10-24.md). Live deployment belongs exclusively to the verified external Atlas writer after the exact handoff is delivered. Codex infrastructure coordination is a separate role.
 
 `control/queue_policy_transition.py` contains private, non-executable-launcher migration, pristine rollback and resource-settlement primitives. They require independently reviewed original-route and terminal-resource evidence; a dataclass or receipt hash does not establish authenticity. Neither accounts, sources nor quarantined jobs are rewritten.
 

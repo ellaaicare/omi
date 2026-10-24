@@ -21,8 +21,13 @@
     },
     {
       "path": "README.md",
-      "sha256": "d98955cab7758d071ad5f0a35648d350f13c6ac89e7cd6823d10ad42c03acfc5",
-      "bytes": 4454
+      "sha256": "54d066e099e8210504fa3721f3d7961514d7554d2869c6ae4f61c92d9755728c",
+      "bytes": 4451
+    },
+    {
+      "path": "ROLLOUT.md",
+      "sha256": "cd99425c255049ed26b2a48b06854dbe6ac13269e7e29440476103aa7464380c",
+      "bytes": 7172
     },
     {
       "path": "baseline/ella/services/transcript_processing_hold.py",
