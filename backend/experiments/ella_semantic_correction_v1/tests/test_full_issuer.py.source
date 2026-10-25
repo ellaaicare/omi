@@ -1,0 +1,198 @@
+"""Actual strict v3, ledger reserve/complete/issuer and publication. Synthetic IO only."""
+import copy,importlib.util,sys,types,unittest
+from pathlib import Path
+from contextlib import nullcontext
+from unittest.mock import patch
+W=Path(__file__).resolve().parents[2];ROOT=W/'semantic-correction-loop-v1';BASE=W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend'
+def load(name,path):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+class FullRig:
+ def __init__(self):
+  mods={n:types.ModuleType(n) for n in ['ella','ella.services','models','database']}
+  mods['ella'].__path__=[str(BASE/'ella')];mods['ella.services'].__path__=[str(ROOT/'candidate/ella/services'),str(W/'quote-evidence-lf-v1/candidate/ella/services'),str(BASE/'ella/services')];mods['models'].__path__=[str(BASE/'models')]
+  self.patch=patch.dict(sys.modules,mods);self.patch.start()
+  self.can=load('ella.services.canonical_summary_source',BASE/'ella/services/canonical_summary_source.py')
+  self.budgetmod=load('ella.services.semantic_operation_budget',W/'deadline-v1/candidate/ella/services/semantic_operation_budget.py')
+  # Exact actual context policy function; v1 snapshots in this fixture do not
+  # claim captured-v2 import/HTTP validation. Source/budget checks below are real.
+  scope=types.ModuleType('ella.services.semantic_captured_context');ns={};import ast
+  tree=ast.parse((W/'captured-context-canonical-projection-v1/candidate/ella/services/semantic_captured_context.py').read_text());fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='require_policy')
+  scope.__dict__.update(POLICY_FIELD='semantic_publication_policy',reject=lambda c:(_ for _ in ()).throw(ValueError(c)))
+  exec(compile(ast.Module(body=[fn],type_ignores=[]),'actual_scope_policy','exec'),scope.__dict__);sys.modules[scope.__name__]=scope
+  timing=types.ModuleType('ella.services.enrichment_stage_timing');timing.stage=lambda *a:nullcontext()
+  async def await_stage(name,value):return await value
+  timing.await_stage=await_stage;sys.modules[timing.__name__]=timing
+  self.pub=load('ella.services.semantic_publication',ROOT/'candidate/ella/services/semantic_publication.py')
+  self.v3=load('ella.services.semantic_contextual_producer_v3',ROOT/'candidate/ella/services/semantic_contextual_producer_v3.py')
+  self.strict=sys.modules['ella.services.semantic_contract_v2'];self.original=sys.modules['ella.services.semantic_producer_v1']
+  self.ledgerModule=load('ella.services.semantic_producer_ledger',ROOT/'candidate/ella/services/semantic_producer_ledger.py')
+  self.uid='synthetic-owner';self.cid='synthetic-cid';self.clock=0.;self.allowed=True;self.calls=[];self.hook=None
+  self.doc={'uid':self.uid,'id':self.cid,'status':'completed','started_at':'2026-01-01T00:00:00Z','finished_at':'2026-01-01T00:01:00Z','active_summary_version_id':'synthetic-stock','transcript_segments':[{'speaker':'Other','text':'Mira stores a blue notebook. Mira plans to bring the notebook to the library Friday.'}],'structured':{'title':'Stock','overview':'Stock','emoji':'x','category':'other'}}
+  self.context={'owner_uid':self.uid,'revision':'synthetic-context','documents':{x:'' for x in self.original.CONTEXT_FIELDS}}
+  self.doc[self.pub.POLICY_FIELD]={'enabled':True,'admissions_open':True,'uid':self.uid,'conversation_id':self.cid,'revision':'synthetic-correction-contract-v1','contextual_schema_version':2,'semantic_contract_version':2,'generator_correction_contract':'ella-semantic-generator-correction-v1','context_contract_version':2,'captured_context_manifest_sha256':'a'*64,'captured_context_attempt_sha256':'b'*64,'companion_context_sha256':self.pub.digest(self.context),'companion_context_revision':self.context['revision']}
+  self.synthetic_scope=types.SimpleNamespace(admitted=True,budget=None,check=lambda:self.check(),require_policy=lambda doc:self.check())
+  scope.current_scope=lambda uid,cid:self.synthetic_scope if (uid,cid)==(self.uid,self.cid) else None
+  # Initial binding happens before budget setup; these temporary callbacks are pure fixture leaves.
+  self.synthetic_scope.check=lambda:None;self.synthetic_scope.require_policy=lambda doc:None
+  self.binding=self.pub.current_binding(self.doc,uid=self.uid,conversation_id=self.cid)
+  self.job={'uid':self.uid,'conversation_id':self.cid,'job_id':'synthetic-job','attempt_count':1,'lease_token':'lease'}
+  self.budget=self.budgetmod.OperationBudget(self.budgetmod.attempt_scope(self.job),clock=lambda:self.clock);self.token=self.budgetmod._CURRENT.set(self.budget);self.synthetic_scope.budget=self.budget;self.synthetic_scope.check=lambda:self.check();self.synthetic_scope.require_policy=lambda doc:self.check()
+  self.observations={};self.ledger=self.ledgerModule.DurableServerLedger(uid=self.uid,conversation_id=self.cid,read_conversation=self.read,update_conversation=self.update,read_companion_context=self.read_context,observations=self.observations,candidate_schema_version=2,semantic_contract_version=2)
+  transcript=self.can.canonical_source_from_conversation(uid=self.uid,conversation_id=self.cid,conversation=self.doc)['transcript']
+  self.good={'outcome':'candidate','title':'Notebook library plan','overview':'Mira stores a notebook and plans a library visit.','claims':[{'id':'c1','text':'Mira stores a notebook and plans a library visit.','evidence':[{'segment_id':'transcript','quote':transcript}]}],'schema_version':2,'contextual_additions':[]}
+  self.bad=copy.deepcopy(self.good);self.bad['overview']='She stores a notebook and plans a library visit.';self.bad['claims'][0]['text']=self.bad['overview']
+  self.verdict={'outcome':'supported','claim_verdicts':{'c1':'supported'},'dimensions':{x:'pass' for x in self.strict.DIMENSIONS},'all_assertions_covered':True,'contextual_verdicts':{},'contextual_relevance':{},'rejection_evidence':[],'verdict_schema_version':2}
+ def close(self):self.budgetmod._CURRENT.reset(self.token);self.patch.stop()
+ def check(self):
+  if not self.allowed:raise RuntimeError('consent_revoked')
+  if self.budgetmod.current_budget() is not self.budget:raise RuntimeError('attempt_changed')
+  self.budget.require_source(self.uid,self.cid)
+ def read(self,uid,cid):self.check();assert(uid,cid)==(self.uid,self.cid);return copy.deepcopy(self.doc)
+ def read_context(self,uid):self.check();assert uid==self.uid;return copy.deepcopy(self.context)
+ def update(self,uid,cid,builder):
+  self.check();assert(uid,cid)==(self.uid,self.cid)
+  updates,result=builder(copy.deepcopy(self.doc));self.check();self.doc.update(copy.deepcopy(updates));return {'result':copy.deepcopy(result)}
+ def args(self):
+  return dict(binding=self.original.PublicationBinding(**self.binding.__dict__),canonical_source=self.can.canonical_source_from_conversation(uid=self.uid,conversation_id=self.cid,conversation=self.doc),transcript_segments=self.doc['transcript_segments'],companion_context=self.context,generator_correction_contract='ella-semantic-generator-correction-v1')
+ def turn(self,role,request):
+  self.check();self.calls.append((role,copy.deepcopy(request)))
+  if self.hook:self.hook(role,request,len(self.calls))
+  result=(self.bad if len(self.calls)==1 else self.good) if role=='generator' else self.verdict
+  self.observations[(role,self.pub.digest(request))]=('interaction-'+str(len(self.calls)),'event-'+str(len(self.calls)))
+  return copy.deepcopy(result)
+ def produce(self):return self.v3.produce(**self.args(),current_binding=lambda:self.original.PublicationBinding(**self.pub.current_binding(self.read(self.uid,self.cid),uid=self.uid,conversation_id=self.cid).__dict__),ledger=self.ledger,generator_adapter=lambda p:self.turn('generator',p),verifier_adapter=lambda p:self.turn('verifier',p))
+class FullTests(unittest.TestCase):
+ def setUp(self):self.r=FullRig()
+ def tearDown(self):self.r.close()
+ def test_full_strict_correction_issuer_and_replay(self):
+  r=self.r
+  with self.assertRaisesRegex(r.strict.ContractError,'unsupported_gender_pronoun'):r.v3.generate_requests(**r.args(),candidate=r.bad)
+  out=r.produce();ops=copy.deepcopy(r.doc[r.ledgerModule.EXECUTIONS_FIELD]);self.assertEqual(len(ops),3);self.assertEqual(len(r.calls),3);self.assertIn(out['publication_receipt_id'],r.doc[r.pub.RECEIPTS_FIELD]);self.assertEqual(r.produce(),out);self.assertEqual(len(r.calls),3);self.assertEqual(ops,r.doc[r.ledgerModule.EXECUTIONS_FIELD])
+ def test_completed_bad_repair_never_verifier_or_receipt(self):
+  r=self.r;r.good=copy.deepcopy(r.bad)
+  with self.assertRaisesRegex(r.strict.ContractError,'unsupported_gender_pronoun'):r.produce()
+  self.assertEqual(len(r.calls),2);self.assertNotIn(r.pub.RECEIPTS_FIELD,r.doc);self.assertTrue(all(x['status']=='completed' for x in r.doc[r.ledgerModule.EXECUTIONS_FIELD].values()))
+ def test_verifier_rejection_no_publication(self):
+  r=self.r;r.verdict['dimensions']['speaker_attribution']='fail'
+  with self.assertRaises(r.strict.ContractError):r.produce()
+  self.assertNotIn(r.pub.RECEIPTS_FIELD,r.doc)
+ def test_revoked_consent_before_correction_no_more_turn(self):
+  r=self.r
+  def hook(role,p,n):
+   if n==1:r.allowed=False
+  r.hook=hook
+  with self.assertRaises(RuntimeError):r.produce()
+  self.assertEqual(len(r.calls),1)
+ def test_expired_budget_no_second_turn(self):
+  r=self.r
+  def hook(role,p,n):
+   if n==1:r.clock=601
+  r.hook=hook
+  with self.assertRaises(Exception):r.produce()
+  self.assertEqual(len(r.calls),1)
+ def test_source_edit_no_second_turn(self):
+  r=self.r
+  def hook(role,p,n):
+   if n==1:r.doc['transcript_segments'][0]['text']='Changed source.'
+  r.hook=hook
+  with self.assertRaises((r.pub.SemanticPublicationRejectedError,r.strict.ContractError)):r.produce()
+  self.assertEqual(len(r.calls),1)
+
+class IssuerNegatives(unittest.TestCase):
+ def setUp(self):self.r=FullRig()
+ def tearDown(self):self.r.close()
+ def reject_at_issue(self,change):
+  r=self.r;issue=r.ledger.issue_publication
+  def wrapped(**kw):change(r,kw);return issue(**kw)
+  r.ledger.issue_publication=wrapped
+  with self.assertRaises(Exception):r.produce()
+  self.assertNotIn(r.pub.RECEIPTS_FIELD,r.doc)
+ def parent(self,r):return next(op for op in r.doc[r.ledgerModule.EXECUTIONS_FIELD].values() if op['role']=='generator' and 'correction_lineage' not in op)
+ def corrected(self,r):return next(op for op in r.doc[r.ledgerModule.EXECUTIONS_FIELD].values() if 'correction_lineage' in op)
+ def test_issuer_rejects_parent_unknown(self):self.reject_at_issue(lambda r,k:self.parent(r).update(status='started'))
+ def test_issuer_rejects_foreign_parent(self):self.reject_at_issue(lambda r,k:self.parent(r)['binding'].update(uid='foreign'))
+ def test_issuer_rejects_repaired_parent(self):self.reject_at_issue(lambda r,k:self.parent(r).update(correction_lineage={'fake':True}))
+ def test_issuer_rejects_parent_request_drift(self):self.reject_at_issue(lambda r,k:self.parent(r).update(request_sha256='0'*64))
+ def test_issuer_rejects_parent_result_drift(self):self.reject_at_issue(lambda r,k:self.parent(r)['result'].update(overview='Different.'))
+ def test_issuer_rejects_lineage_removed(self):self.reject_at_issue(lambda r,k:self.corrected(r).pop('correction_lineage'))
+ def test_issuer_rejects_error_changed(self):self.reject_at_issue(lambda r,k:self.corrected(r)['correction_lineage'].update(error='evidence_quote'))
+ def test_issuer_rejects_current_consent_revoked(self):self.reject_at_issue(lambda r,k:setattr(r,'allowed',False))
+ def test_issuer_rejects_current_source_edit(self):self.reject_at_issue(lambda r,k:r.doc['transcript_segments'][0].update(text='Modified.'))
+ def test_issuer_rejects_current_context_edit(self):self.reject_at_issue(lambda r,k:r.context['documents'].update({'MEMORY.md':'Changed'}))
+ def test_issuer_rejects_foreign_current_scope(self):self.reject_at_issue(lambda r,k:r.budgetmod._CURRENT.set(None))
+
+class ReservationNegatives(unittest.TestCase):
+ def setUp(self):self.r=FullRig()
+ def tearDown(self):self.r.close()
+ def setup_parent(self,valid=False):
+  r=self.r;gp,_=r.v3.generate_requests(**r.args());authority={**r.binding.__dict__,'policy':r.strict.POLICY,'candidate_schema_version':2,'semantic_contract_version':2}
+  def adapter(p):
+   r.calls.append(('generator',copy.deepcopy(p)));r.observations[('generator',r.pub.digest(p))]=('interaction-parent','event-parent');return copy.deepcopy(r.good if valid else r.bad)
+  first=r.ledger.execute_once(binding=authority,role='generator',request=gp,adapter=adapter)
+  helper=sys.modules['ella.services.semantic_generator_correction']
+  req=helper.correction_request(gp,operation_id=first['operation_id'],result=first['result'],error='unsupported_gender_pronoun')
+  return authority,req,first
+ def reject(self,change,valid=False):
+  r=self.r;authority,req,first=self.setup_parent(valid=valid);change(r,req,first)
+  before=len(r.calls)
+  with self.assertRaises(Exception):r.ledger.execute_once(binding=authority,role='generator',request=req,adapter=lambda p:r.calls.append(('MUST_NOT_RUN',p)))
+  self.assertEqual(len(r.calls),before)
+ def test_valid_parent_rejected_before_paid_correction(self):self.reject(lambda *a:None,valid=True)
+ def test_altered_instruction_rejected_before_correction(self):self.reject(lambda r,q,f:q.update(instructions='different'+q['instructions']))
+ def test_altered_source_rejected_before_correction(self):self.reject(lambda r,q,f:q['authoritative_transcript'][0].update(text='Different source'))
+ def test_altered_context_rejected_before_correction(self):self.reject(lambda r,q,f:q['companion_context']['documents'].update({'MEMORY.md':'Different context'}))
+ def test_forged_error_rejected_before_correction(self):self.reject(lambda r,q,f:q['generator_correction']['lineage'].update(error='timeout'))
+ def test_unknown_parent_rejected_before_correction(self):self.reject(lambda r,q,f:r.doc[r.ledgerModule.EXECUTIONS_FIELD][f['operation_id']].update(status='started'))
+ def test_foreign_parent_rejected_before_correction(self):self.reject(lambda r,q,f:r.doc[r.ledgerModule.EXECUTIONS_FIELD][f['operation_id']]['binding'].update(uid='foreign'))
+ def test_repaired_parent_rejected_before_correction(self):self.reject(lambda r,q,f:r.doc[r.ledgerModule.EXECUTIONS_FIELD][f['operation_id']].update(correction_lineage={'old':True}))
+ def test_current_consent_rejected_before_correction(self):self.reject(lambda r,q,f:setattr(r,'allowed',False))
+ def test_current_attempt_replaced_before_correction(self):self.reject(lambda r,q,f:r.budgetmod._CURRENT.set(None))
+ def test_closed_deadline_rejected_before_correction(self):self.reject(lambda r,q,f:setattr(r,'clock',601))
+
+ def test_null_metadata_rejected_before_correction(self):self.reject(lambda r,q,f:q.update(generator_correction=None))
+
+class VersioningAndFactory(unittest.TestCase):
+ def setUp(self):self.r=FullRig()
+ def tearDown(self):self.r.close()
+ def test_old_policy_normal_request_byteexact_baseline_and_no_correction(self):
+  r=self.r;r.doc[r.pub.POLICY_FIELD].pop('generator_correction_contract');r.binding=r.pub.current_binding(r.doc,uid=r.uid,conversation_id=r.cid)
+  a=r.args();a.pop('generator_correction_contract');baseline=load('old_v3_for_correction_compat',W/'quote-evidence-lf-v1/candidate/ella/services/semantic_contextual_producer_v3.py')
+  self.assertEqual(r.v3.generate_requests(**a),baseline.generate_requests(**a))
+  with self.assertRaisesRegex(r.strict.ContractError,'unsupported_gender_pronoun'):
+   r.v3.produce(**a,current_binding=lambda:r.original.PublicationBinding(**r.binding.__dict__),ledger=r.ledger,generator_adapter=lambda p:r.turn('generator',p),verifier_adapter=lambda p:r.turn('verifier',p))
+  self.assertEqual(len(r.calls),1)
+ def test_old_binding_absent_marker_exact_baseline(self):
+  r=self.r;r.doc[r.pub.POLICY_FIELD].pop('generator_correction_contract');old=load('old_publication_for_correction_compat',W/'captured-context-transaction-v1/candidate/ella/services/semantic_publication.py');self.assertEqual(r.pub.current_binding(r.doc,uid=r.uid,conversation_id=r.cid).__dict__,old.current_binding(r.doc,uid=r.uid,conversation_id=r.cid).__dict__)
+ def test_unknown_or_null_policy_contract_rejected_before_roles(self):
+  r=self.r
+  for value in [None,'unknown',False]:
+   r.doc[r.pub.POLICY_FIELD]['generator_correction_contract']=value
+   with self.assertRaises(r.pub.SemanticPublicationRejectedError):r.pub.current_binding(r.doc,uid=r.uid,conversation_id=r.cid)
+  self.assertEqual(r.calls,[])
+ def test_retained_policy_actual_expression_factory_and_strict_issuer(self):
+  import ast,asyncio
+  from types import SimpleNamespace
+  r=self.r;tree=ast.parse((ROOT/'candidate/ella/services/retained_completion_enrichment.py').read_text());node=next(n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='policy' for t in n.targets) and isinstance(n.value,ast.Dict))
+  title=sys.modules['ella.services.summary_title_quality']
+  env={'uid':r.uid,'cid':r.cid,'fresh_title_revision':title.fresh_title_revision,'admission':r.pub,'key':'job-key','pin':'source-pin','identity':SimpleNamespace(digest='authority'),'context_hash':r.pub.digest(r.context),'EVIDENCE_QUOTE_CONTRACT':sys.modules['ella.services.semantic_quote_evidence_lf'].CONTRACT,'snapshot':r.context,'policy_fields':lambda *a:{'context_contract_version':2,'captured_context_manifest_sha256':'a'*64,'captured_context_attempt_sha256':'b'*64}}
+  for name in ['captured_fields','correction_policy']:
+   assignment=next(n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id==name for t in n.targets));exec(compile(ast.Module(body=[assignment],type_ignores=[]),'actual_retained_policy_setup','exec'),env)
+  policy=eval(compile(ast.Expression(node.value),'actual_retained_policy','eval'),env);self.assertEqual(policy['generator_correction_contract'],'ella-semantic-generator-correction-v1');r.doc[r.pub.POLICY_FIELD]=policy;r.binding=r.pub.current_binding(r.doc,uid=r.uid,conversation_id=r.cid)
+  async def backend_turn(*,role,request):
+   result=r.turn(role,request)
+   return r.ledgerModule.BackendTurn(result,'actual-adapter-interaction-'+str(len(r.calls)),'actual-adapter-event-'+str(len(r.calls)))
+  out=asyncio.run(r.ledgerModule.run_versioned_producer(uid=r.uid,conversation_id=r.cid,read_conversation=r.read,update_conversation=r.update,read_companion_context=r.read_context,run_backend_turn=backend_turn,candidate_schema_version=2,semantic_contract_version=2))
+  self.assertIn(out['publication_receipt_id'],r.doc[r.pub.RECEIPTS_FIELD]);self.assertEqual([x[0] for x in r.calls],['generator','generator','verifier']);self.assertEqual(r.calls[0][1]['generator_correction_contract'],'ella-semantic-generator-correction-v1');self.assertIn('ALL generated assertions',r.calls[0][1]['instructions'])
+
+ def test_new_legacy_policy_expression_matches_old_without_captured_scope(self):
+  import ast
+  from types import SimpleNamespace
+  r=self.r;title=sys.modules['ella.services.summary_title_quality'];env={'uid':r.uid,'cid':r.cid,'fresh_title_revision':title.fresh_title_revision,'admission':r.pub,'key':'job-key','pin':'source-pin','identity':SimpleNamespace(digest='authority'),'context_hash':r.pub.digest(r.context),'EVIDENCE_QUOTE_CONTRACT':sys.modules['ella.services.semantic_quote_evidence_lf'].CONTRACT,'snapshot':r.context,'policy_fields':lambda *a:{}}
+  def expression(path,new=False):
+   tree=ast.parse(path.read_text());local=dict(env)
+   if new:
+    for name in ['captured_fields','correction_policy']:
+     assignment=next(n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id==name for t in n.targets));exec(compile(ast.Module(body=[assignment],type_ignores=[]),'legacy_policy_setup','exec'),local)
+   node=next(n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='policy' for t in n.targets) and isinstance(n.value,ast.Dict))
+   return eval(compile(ast.Expression(node.value),'legacy_policy_expression','eval'),local)
+  new=expression(ROOT/'candidate/ella/services/retained_completion_enrichment.py',True);old=expression(W/'operation-budget-alignment-v1/candidate/ella/services/retained_completion_enrichment.py');self.assertEqual(new,old);self.assertNotIn('generator_correction_contract',new)

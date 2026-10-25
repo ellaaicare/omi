@@ -1,0 +1,48 @@
+"""Actual captured-v2 + strict producer/issuer + existing APPLY/SDK composition.
+Fake host/provider/storage/protection/consent/graph leaves are inherited explicitly.
+"""
+import copy,importlib.util,sys,types,unittest
+from pathlib import Path
+from contextlib import nullcontext
+W=Path(__file__).resolve().parents[2];ROOT=W/'semantic-correction-loop-v1';BASE=W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend'
+def load(name,path):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+class CapturedApply(unittest.TestCase):
+ def setUp(self):
+  self.app=load('actual_application_for_correction',W/'captured-context-transaction-v1/app-tests/test_application_transaction.py');self.f=self.app.Tests(methodName='test_accepted_proposal_persists_canonical_new_version');self.f.setUp()
+  f=self.f;r=f.r
+  self.pub=load('ella.services.semantic_publication',ROOT/'candidate/ella/services/semantic_publication.py');self.app.R.PUB=self.pub;f.pub=self.pub;r.modules['ella.services.semantic_publication']=self.pub
+  f.writer=load('ella.services.summary_writeback',W/'captured-context-transaction-v1/candidate/ella/services/summary_writeback.py')
+  f.apply=load('ella.services.semantic_retained_apply',W/'captured-context-transaction-v1/candidate/ella/services/semantic_retained_apply.py')
+  r.doc[self.pub.POLICY_FIELD]['generator_correction_contract']='ella-semantic-generator-correction-v1';f.db.put(f.key,r.doc)
+  load('ella.services.semantic_contract_v1',BASE/'ella/services/semantic_contract_v1.py');self.strict=load('ella.services.semantic_contract_v2',BASE/'ella/services/semantic_contract_v2.py');self.original=load('ella.services.semantic_producer_v1',BASE/'ella/services/semantic_producer_v1.py');load('ella.services.semantic_quote_evidence_lf',W/'quote-evidence-lf-v1/candidate/ella/services/semantic_quote_evidence_lf.py');load('ella.services.semantic_generator_correction',ROOT/'candidate/ella/services/semantic_generator_correction.py');self.v3=load('ella.services.semantic_contextual_producer_v3',ROOT/'candidate/ella/services/semantic_contextual_producer_v3.py')
+  timing=types.ModuleType('ella.services.enrichment_stage_timing');timing.stage=lambda *a:nullcontext();sys.modules[timing.__name__]=timing
+  self.lm=load('ella.services.semantic_producer_ledger',ROOT/'candidate/ella/services/semantic_producer_ledger.py');self.obs={};self.calls=[]
+  def read(uid,cid):f.io();r.scope.check();r.graph(uid,cid);return copy.deepcopy(f.db.rows[f.key])
+  def update(uid,cid,builder):
+   r.scope.check();r.graph(uid,cid)
+   return f.dbm.update_conversation_with_builder(uid,cid,builder,transaction_guard=lambda tx:r.graph(uid,cid))
+  self.ledger=self.lm.DurableServerLedger(uid=r.uid,conversation_id=r.cid,read_conversation=read,update_conversation=update,read_companion_context=lambda uid:r.scope.envelope()['snapshot'],observations=self.obs,candidate_schema_version=2,semantic_contract_version=2)
+  source=self.app.R.CAN.canonical_source_from_conversation(uid=r.uid,conversation_id=r.cid,conversation=r.doc)
+  self.args={'binding':self.original.PublicationBinding(**self.pub.current_binding(r.doc,uid=r.uid,conversation_id=r.cid).__dict__),'canonical_source':source,'transcript_segments':r.doc['transcript_segments'],'companion_context':r.scope.envelope()['snapshot'],'generator_correction_contract':'ella-semantic-generator-correction-v1'}
+  self.good={'outcome':'candidate','title':'Fictional source record','overview':'The fictional source contains the statement fictional exact source. This record preserves that fictional statement.','claims':[{'id':'c1','text':'Fictional exact source.','evidence':[{'segment_id':'transcript','quote':source['transcript']}]}],'schema_version':2,'contextual_additions':[]}
+  self.bad=copy.deepcopy(self.good);self.bad['overview']='He records fictional exact source.';self.bad['claims'][0]['text']=self.bad['overview']
+  self.verdict={'outcome':'supported','claim_verdicts':{'c1':'supported'},'dimensions':{x:'pass' for x in self.strict.DIMENSIONS},'all_assertions_covered':True,'contextual_verdicts':{},'contextual_relevance':{},'rejection_evidence':[],'verdict_schema_version':2}
+ def tearDown(self):self.f.tearDown()
+ def produce(self):
+  f=self.f;r=f.r
+  def adapter(role,p):
+   f.io();r.scope.check();r.read();self.calls.append((role,copy.deepcopy(p)));self.obs[(role,self.pub.digest(p))]=('interaction-'+str(len(self.calls)),'event-'+str(len(self.calls)))
+   return copy.deepcopy((self.bad if len(self.calls)==1 else self.good) if role=='generator' else self.verdict)
+  return self.v3.produce(**self.args,current_binding=lambda:self.original.PublicationBinding(**self.pub.current_binding(f.db.rows[f.key],uid=r.uid,conversation_id=r.cid).__dict__),ledger=self.ledger,generator_adapter=lambda p:adapter('generator',p),verifier_adapter=lambda p:adapter('verifier',p))
+ def test_captured_v2_correction_actual_issuer_then_actual_apply(self):
+  f=self.f;raw=copy.deepcopy(f.r.doc['transcript_segments']);out=self.produce();before=copy.deepcopy(f.db.rows[f.key][self.lm.EXECUTIONS_FIELD]);self.assertEqual(len(before),3);result=f.run_apply(out);self.assertEqual(result['status'],'completed');current=f.db.rows[f.key];self.assertEqual(current['transcript_segments'],raw);self.assertNotEqual(current['active_summary_version_id'],'stock');self.assertEqual(len(f.canonical),1);self.assertEqual(current['summary_writeback_receipt']['status'],'completed');self.assertEqual(current[self.lm.EXECUTIONS_FIELD],before)
+ def test_attempt_changed_before_correction_stops_actual_captured_scope(self):
+  r=self.f.r;orig=self.ledger.execute_once
+  def wrapped(**kw):
+   result=orig(**kw)
+   if len(self.calls)==1:r.job['lease_token']='foreign-attempt'
+   return result
+  self.ledger.execute_once=wrapped
+  with self.assertRaises(Exception):self.produce()
+  self.assertEqual(len(self.calls),1);self.assertNotIn(self.pub.RECEIPTS_FIELD,self.f.db.rows[self.f.key])

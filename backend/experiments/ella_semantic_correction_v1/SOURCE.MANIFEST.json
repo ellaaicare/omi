@@ -1,0 +1,27 @@
+{
+  "contract": "ella-semantic-correction-archive-v1",
+  "source_freeze_sha256": "61685282c7a9c6512f33b606aa9d998679f82e2e682ac8ccfdf79263edd9b0d2",
+  "independent_source_review_sha256": "eb0367a4525043bef5b2bf1f8349f1d8438403a8a94de9b8c1a6c684b766f316",
+  "files": {
+    "candidate/ella/services/retained_completion_enrichment.py.source": "13e41ec7c3a679268525ab5fee8a79fcf8cd20d2a46d4cf9e094f6eb8fcd5140",
+    "baseline/ella/services/retained_completion_enrichment.py.source": "73aef006bdad40b544b81559fe6e2ca2db6e16c26902c16e888154cad2c27be6",
+    "candidate/ella/services/semantic_contextual_producer_v3.py.source": "72fae2bf4006ac461bea83ef10ac6e3d965ab762192129119110b1eccc170a86",
+    "baseline/ella/services/semantic_contextual_producer_v3.py.source": "229145664fd96ea48e225bff748563d186fff7f35571981a9143ce315d20c0b3",
+    "candidate/ella/services/semantic_generator_correction.py.source": "d9058adb3a34f29f277aa574c02ccfe4f842dd3b78bab896e573d53e7b5ed74a",
+    "candidate/ella/services/semantic_producer_ledger.py.source": "7722f260c29d3a7197145d67424f24cc5a0581106dae088e54284401e3d562c6",
+    "baseline/ella/services/semantic_producer_ledger.py.source": "8725c30412130de96596b0779691454bb7e53cec2ee36267a20ce2f68049983d",
+    "candidate/ella/services/semantic_publication.py.source": "1203bd8b0476f4c25e637ae6402c073d4e9bb270ad0cd4c34ea491b7aaa9763e",
+    "baseline/ella/services/semantic_publication.py.source": "3992b86fa9c589fd7b59098d6e5754570b9afff4a037e850d0b2a117c3dc9463",
+    "tests/test_captured_apply.py.source": "41452e71993055191131ca7731cc449eb29366b16a06846d18b54a884193923f",
+    "tests/test_correction.py.source": "8d753c56e2191b6cd44f6d59ea2681009f70cf171392249cd3d6bd488e3d5a17",
+    "tests/test_full_issuer.py.source": "0ba32a26c2b1f22e4cd43c256b038138d1e6566112d85fe4d0869d5c050b3bf6",
+    "SOURCE.patch": "716aa38152fe9b42f65c22dcc6c77759fbff722d0ee7c5265cf501ac95009c0c",
+    "diagnostics/causal_diagnostics.py.source": "c45a05dd9265e35ba6714bafca12581d731976e6dd396a200a3ad0c400c623d3",
+    "diagnostics/test_transaction_diagnostics.py.source": "bdb57e768d589fc2ce2f8ee88243f36a7404a4e9e4a138afeab275fd6e3aa7d4"
+  },
+  "tests_actual": 55,
+  "service_imports_actual": 28,
+  "network_attempts": 0,
+  "deployed": false,
+  "live_enhanced_writeback_proven": false
+}

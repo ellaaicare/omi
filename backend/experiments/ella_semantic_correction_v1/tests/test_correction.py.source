@@ -1,0 +1,129 @@
+"""Pure synthetic protocol/actual producer and ledger methods; IO leaves doubled."""
+import ast,copy,importlib.util,json,sys,types,unittest
+from pathlib import Path
+from dataclasses import dataclass,asdict
+from contextlib import nullcontext
+from unittest.mock import patch
+ROOT=Path(__file__).resolve().parents[1];C=ROOT/'candidate/ella/services'
+spec=importlib.util.spec_from_file_location('ella.services.semantic_generator_correction',C/'semantic_generator_correction.py');helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+for name in ['ella','ella.services']:
+ if name not in sys.modules:sys.modules[name]=types.ModuleType(name)
+sys.modules[spec.name]=helper
+class ContractError(ValueError):pass
+@dataclass(frozen=True)
+class Binding: uid:str='owner';conversation_id:str='cid';policy_revision:str='revision'
+class Rig:
+ def __init__(self):
+  self.binding=Binding();self.uid='owner';self.cid='cid';self.state={'policy':{'generator_correction_contract':helper.CONTRACT}};self.observations={};self.calls=[];self.fresh=True
+  tree=ast.parse((C/'semantic_producer_ledger.py').read_text());cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='DurableServerLedger');method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='execute_once')
+  ns={'admission':types.SimpleNamespace(digest=helper.digest,SemanticPublicationRejectedError=ContractError,POLICY_FIELD='policy'),'_timing':types.SimpleNamespace(stage=lambda *a:nullcontext()),'copy':copy,'asdict':asdict,'json':json,'MAX_OPERATIONS':8,'MAX_RESULT_BYTES':65536,'EXECUTIONS_FIELD':'ops'}
+  exec(compile(ast.Module(body=[method],type_ignores=[]),'actual_ledger_execute_once','exec'),ns);self.execute_once=types.MethodType(ns['execute_once'],self);self.contract=2;self.role=None
+ def _binding(self,b):return Binding(**{k:b[k] for k in ['uid','conversation_id']})
+ def _fresh(self,conversation,binding):
+  if not self.fresh:raise ContractError('authority_changed')
+ def update(self,uid,cid,callback):
+  update,result=callback(copy.deepcopy(self.state));self.state.update(update);return {'result':result}
+ def call(self,request,result=None,fail=None):
+  def adapter(payload):
+   self.calls.append(copy.deepcopy(payload))
+   if fail:raise fail
+   self.observations[('generator',helper.digest(payload))]=('interaction-'+str(len(self.calls)),'event-'+str(len(self.calls)))
+   return copy.deepcopy(result)
+  def validate_parent(candidate,*a):
+   if candidate=={'schema_version':2,'text':'unsupported pronoun'}:raise ContractError('unsupported_gender_pronoun')
+  fake=types.SimpleNamespace(ContractError=ContractError,validate_contextual_candidate=validate_parent)
+  budget=types.SimpleNamespace(require_source=lambda *a:None)
+  scope=types.SimpleNamespace(admitted=True,budget=budget,check=lambda:None,require_policy=lambda doc:None)
+  with patch.dict(sys.modules,{'ella.services.semantic_contextual_producer_v3':fake,'ella.services.semantic_operation_budget':types.SimpleNamespace(current_budget=lambda:budget),'ella.services.semantic_captured_context':types.SimpleNamespace(current_scope=lambda *a:scope)}):
+   return self.execute_once(binding=asdict(self.binding),role='generator',request=request,adapter=adapter)
+class Tests(unittest.TestCase):
+ def setUp(self):self.r=Rig();self.base={'semantic_contract_version':2,'instructions':'strict original instructions','schema_version':2,'generator_correction_contract':helper.CONTRACT,'authoritative_transcript':[],'companion_context':{}};self.invalid={'schema_version':2,'text':'unsupported pronoun'}
+ def original(self):return self.r.call(self.base,self.invalid)
+ def correction(self):
+  first=self.original();return helper.correction_request(self.base,operation_id=first['operation_id'],result=first['result'],error='unsupported_gender_pronoun')
+ def test_first_immutable_distinct_operation_and_replay(self):
+  request=self.correction();before=copy.deepcopy(self.r.state);v=self.r.call(request,{'valid':True});self.assertEqual(len(self.r.calls),2);self.assertEqual(self.r.call(request,{'should_not':'run'}),v);self.assertEqual(len(self.r.calls),2)
+  for k,x in before['ops'].items():self.assertEqual(self.r.state['ops'][k],x)
+ def test_unknown_correction_never_adapter_retried(self):
+  request=self.correction()
+  with self.assertRaises(TimeoutError):self.r.call(request,fail=TimeoutError())
+  with self.assertRaises(ContractError):self.r.call(request,{'valid':True})
+  self.assertEqual(len(self.r.calls),2)
+ def test_unknown_parent_rejected(self):
+  with self.assertRaises(TimeoutError):self.r.call(self.base,fail=TimeoutError())
+  oid=next(iter(self.r.state['ops']));req=helper.correction_request(self.base,operation_id=oid,result=self.invalid,error='unsupported_gender_pronoun')
+  with self.assertRaises(ValueError):self.r.call(req,{})
+  self.assertEqual(len(self.r.calls),1)
+ def test_only_one_correction(self):
+  req=self.correction();self.r.call(req,{'still':'invalid'});req2=copy.deepcopy(req);req2['instructions']+=' altered'
+  with self.assertRaises(ValueError):self.r.call(req2,{})
+  self.assertEqual(len(self.r.calls),2)
+ def test_foreign_parent_binding(self):
+  req=self.correction();self.r.state['ops'][req['generator_correction']['lineage']['parent_operation_id']]['binding']['uid']='foreign'
+  with self.assertRaises(ValueError):self.r.call(req,{})
+ def test_parent_result_tampering(self):
+  req=self.correction();req['generator_correction']['rejected_candidate']['text']='tampered'
+  with self.assertRaises(ValueError):self.r.call(req,{})
+ def test_missing_actual_provenance(self):
+  req=self.correction();self.r.state['ops'][req['generator_correction']['lineage']['parent_operation_id']].pop('canonical_assistant_event_id')
+  with self.assertRaises(ValueError):self.r.call(req,{})
+ def test_authority_changed_no_correction_effect(self):
+  req=self.correction();self.r.fresh=False
+  with self.assertRaises(ContractError):self.r.call(req,{})
+  self.assertEqual(len(self.r.calls),1)
+ def test_no_recursive_corrected_request(self):
+  req=self.correction()
+  with self.assertRaises(ValueError):helper.correction_request(req,operation_id='x',result={},error='unsupported_gender_pronoun')
+ def test_closed_error_allowlist(self):
+  for error in ['evidence_quote','timeout','semantic_runtime_changed','unsupported_gender_pronoun secret']:
+   self.assertIsNone(helper.code(ContractError(error)))
+  self.assertEqual(helper.code(ContractError('unsupported_gender_pronoun')),'unsupported_gender_pronoun')
+ def test_request_preserves_original_and_labels_untrusted_result(self):
+  before=copy.deepcopy(self.base);req=self.correction();self.assertEqual(self.base,before);self.assertIn('untrusted',req['instructions']);self.assertEqual(req['generator_correction']['lineage']['ordinal'],1)
+ def test_request_capacity_fails_without_ledger(self):
+  with self.assertRaises(ValueError):helper.correction_request(self.base,operation_id='id',result={'text':'x'*196608},error='unsupported_gender_pronoun')
+
+class ProducerTests(unittest.TestCase):
+ def run_producer(self,first=None,second=None,fail=None,change=False):
+  binding=Binding();calls=[];issued=[];validations=[];base={'semantic_contract_version':2,'schema_version':2,'instructions':'strict','generator_correction_contract':helper.CONTRACT}
+  def requests(*,candidate=None,correction=None,**kw):
+   if candidate is not None and candidate.get('bad'):raise ContractError(candidate['bad'])
+   gp=copy.deepcopy(base)
+   if correction is not None:gp=helper.correction_request(gp,**correction)
+   return gp,({'candidate':copy.deepcopy(candidate),'semantic_contract_version':2} if candidate is not None else None)
+  class Ledger:
+   def execute_once(self,*,binding,role,request,adapter):
+    calls.append((role,copy.deepcopy(request)))
+    if fail:raise fail
+    if change and len(calls)>1:raise ContractError('authority_changed')
+    result=({'outcome':'candidate','bad':'unsupported_gender_pronoun'} if first is None else first) if len(calls)==1 else ({'outcome':'candidate'} if second is None else second)
+    if role=='verifier':result={'accepted':True}
+    return {'operation_id':'op-'+str(len(calls)),'result':copy.deepcopy(result)}
+   def issue_publication(self,**kw):issued.append(kw);return 'receipt'
+  tree=ast.parse((C/'semantic_contextual_producer_v3.py').read_text());fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='produce')
+  def stored(**kw):validations.append(kw);return {'title':'neutral','overview':'grounded','emoji':'x','category':'other'}
+  ns={'PublicationBinding':Binding,'deepcopy':copy.deepcopy,'ContractError':ContractError,'POLICY':'policy','digest':helper.digest,'generate_requests':requests,'validate_stored_review':stored}
+  exec(compile(ast.Module(body=[fn],type_ignores=[]),'actual_v3_produce','exec'),ns)
+  try:
+   value=ns['produce'](binding=binding,canonical_source={},transcript_segments=[],companion_context={},current_binding=lambda:binding,ledger=Ledger(),generator_adapter=lambda p:{},verifier_adapter=lambda p:{},generator_correction_contract=helper.CONTRACT)
+   return value,calls,issued,validations
+  finally:self.last=(calls,issued,validations)
+ def test_one_correction_then_strict_verifier_and_issuer(self):
+  _,calls,issued,validated=self.run_producer();self.assertEqual([r for r,_ in calls],['generator','generator','verifier']);self.assertEqual(len(issued),1);self.assertIsNotNone(validated[0]['correction'])
+ def test_valid_first_never_correction(self):
+  _,calls,_,_=self.run_producer(first={'outcome':'candidate'});self.assertEqual([r for r,_ in calls],['generator','verifier'])
+ def test_second_invalid_never_third_generator_or_verifier(self):
+  with self.assertRaises(ContractError):self.run_producer(second={'outcome':'candidate','bad':'unsupported_gender_pronoun'})
+  self.assertEqual(len(self.last[0]),2);self.assertEqual(self.last[1],[])
+ def test_other_validation_error_no_correction(self):
+  with self.assertRaises(ContractError):self.run_producer(first={'outcome':'candidate','bad':'evidence_quote'})
+  self.assertEqual(len(self.last[0]),1)
+ def test_provider_timeout_no_correction(self):
+  with self.assertRaises(TimeoutError):self.run_producer(fail=TimeoutError())
+  self.assertEqual(len(self.last[0]),1)
+ def test_ledger_authority_error_no_correction(self):
+  with self.assertRaises(ContractError):self.run_producer(fail=ContractError('authority_changed'))
+  self.assertEqual(len(self.last[0]),1)
+ def test_changed_binding_on_correction_no_more_effect(self):
+  with self.assertRaises(ContractError):self.run_producer(change=True)
+  self.assertEqual(self.last[1],[])
