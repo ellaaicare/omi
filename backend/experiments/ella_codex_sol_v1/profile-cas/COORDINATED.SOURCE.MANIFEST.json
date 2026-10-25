@@ -1,0 +1,13 @@
+{
+  "pins": {
+    "v3/profile_model_cas.py.source": "ea89f4d3e1c0fadb07fb7d2769f2345154dd71aad6ec160c70e8ef216456e7c1",
+    "v3/test_normal_ensure_stability.py.source": "7d57898b5f2debf5824fa2ceafb0e0ccede760368bf88c21fb1896f1b502ccd9",
+    "v4/profile_model_cas.py.source": "58ff955471ffc7f87586ce001577f204635dd8d0930157c656dc7486e050a158",
+    "v4/test_coordinated_policy.py.source": "001cf6c16363fe13ac33df1dd12d8db47d073a792a46a49ae03bbd5f8041ce1f",
+    "v5/profile_model_cas.py.source": "94feb8bf0d02fef68f681edf22f96496fbc7d1021aa392272153c80606219e9c",
+    "v5/test_coordinated_policy.py.source": "abd0fcce1d28884b4798dc94b1a5c5b268259840f90afdc765dd235563e7dc4e"
+  },
+  "qualification": "Actual retained runtime policy/projectors with disposable fake profiles; deployment lifecycle is separately reviewed. Historical dependency references retained, not a standalone environment. No operational user packets or credentials included.",
+  "state": "REVIEWED_SOURCE_ARCHIVE_NOT_MODEL_ACCEPTANCE",
+  "v5_actual_cases": 31
+}

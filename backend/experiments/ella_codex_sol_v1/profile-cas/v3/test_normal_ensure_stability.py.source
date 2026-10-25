@@ -1,0 +1,39 @@
+"""Actual managed apply helper in disposable T3 fixture, synthetic key only; no live effects."""
+import copy, hashlib, importlib.util, json, sys, tempfile, unittest
+from pathlib import Path
+import yaml
+F=Path(__file__).resolve().parents[2];V=F/'profile-cas-v3';sys.path[:0]=[str(F/'profile-cas-v2/tests'),str(F/'tests')]
+import test_profile_model_cas_v2 as previous
+
+def load(name,path):
+ spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m
+class Regression(previous.Tests):
+ def rig(self):
+  super().rig();self.p=load('pure_profile_model_cas_v3',V/'candidate/profile_model_cas.py');return self
+ def test_unknown_model_key_not_silently_removed(self):
+  self.rig();self.c['model']['unknown_model_setting']='must-not-drop'
+  with self.assertRaises(self.p.PlanRejected):self.plan()
+ def test_target_model_normalform_omits_base_url_but_selected_routes_keep_canonical(self):
+  self.rig();plan=self.plan();after=self.reconcile(plan,self.c);self.assertEqual(after['model'],{'default':'gpt-6.1-sol','provider':'openai-codex'});self.assertTrue(all(after['model_routes'][k]['base_url']==self.p.BASE for k in plan.route_keys));self.assertIsNone(self.a.project_config(after,self.selected['agent_id'])[0]['base_url'])
+class ActualManagedProfile(Regression):
+ # Only this one test runs real filesystem writes, inside an owned disposable T3 directory.
+ def test_actual_apply_and_repeat_are_projection_and_raw_yaml_stable(self):
+  self.rig();control=load('actual_runtime_control_cas_v3',F/'provision-policy-migration-v1/baseline/hermes_runtime_control.py')
+  old=control.RuntimeProfilePolicy(version='synthetic-policy-v1',provider='openrouter',model='deepseek/deepseek-v4-flash',credential_env='OPENROUTER_API_KEY',credential_value='SYNTHETIC_NOT_A_REAL_KEY',reasoning_effort='none')
+  new=control.RuntimeProfilePolicy(version=old.version,provider='openai-codex',model='gpt-6.1-sol',credential_env='',credential_value='',reasoning_effort='medium',fallback_models=old.fallback_models,fallback_routes=old.fallback_routes,api_toolsets=old.api_toolsets,isolation_posture=old.isolation_posture)
+  with tempfile.TemporaryDirectory(prefix='synthetic-managed-profile-',dir=V/'test-temp') as directory:
+   profile=Path(directory)/'fictional-personal-profile';workspace=profile/'workspace';workspace.mkdir(parents=True)
+   initial={'owner':{'uid':'fictional-owner'},'session':{'id':'fictional-original'},'model_routes':{'fictional-agent':{'model':old.model,'provider':old.provider,'base_url':'https://openrouter.ai/api/v1'},'fictional-personal-profile':{'model':old.model,'provider':old.provider},'unrelated-route':{'provider':'unrelated-provider','model':'unrelated-model'}},'agent':{'max_iterations':7,'disabled_toolsets':['fictional-disabled-tool']},'other':{'preserve':'unchanged'}}
+   (profile/'config.yaml').write_text(yaml.safe_dump(initial,sort_keys=False,allow_unicode=False))
+   # Exact current managed normal form comes from unchanged actual provisioning helper.
+   control.apply_runtime_profile_policy(profile,workspace,old);self.c=yaml.safe_load((profile/'config.yaml').read_text());original=copy.deepcopy(self.c);env_before=(profile/'.env').read_bytes();plan=self.plan();after=self.reconcile(plan,self.c)
+   rendered=yaml.safe_dump(after,sort_keys=False,allow_unicode=False).encode();(profile/'config.yaml').write_bytes(rendered);projection_before=self.a.project_config(after,self.selected['agent_id'])[0]
+   first=control.apply_runtime_profile_policy(profile,workspace,new);raw_first=(profile/'config.yaml').read_bytes();parsed_first=yaml.safe_load(raw_first)
+   second=control.apply_runtime_profile_policy(profile,workspace,new);raw_second=(profile/'config.yaml').read_bytes();parsed_second=yaml.safe_load(raw_second)
+   self.assertEqual(first['status'],'APPLIED');self.assertEqual(second['status'],'APPLIED');self.assertEqual(first['version'],old.version);self.assertEqual(first['digest'],after['ella_runtime_policy']['digest']);self.assertEqual(rendered,raw_first);self.assertEqual(raw_first,raw_second);self.assertEqual(after,parsed_first);self.assertEqual(parsed_first,parsed_second);self.assertEqual(self.a.project_config(parsed_second,self.selected['agent_id'])[0],projection_before);self.assertEqual(self.resolve_reasoning(parsed_second,'gpt-6.1-sol'),{'enabled':True,'effort':'medium'});self.assertEqual((profile/'.env').read_bytes(),env_before);self.assertEqual(parsed_second['owner'],original['owner']);self.assertEqual(parsed_second['session'],original['session']);self.assertEqual(parsed_second['agent']['max_iterations'],7);self.assertEqual(parsed_second['agent']['disabled_toolsets'],['fictional-disabled-tool']);self.assertEqual(parsed_second['model_routes']['unrelated-route'],original['model_routes']['unrelated-route']);self.assertEqual(self.reconcile(plan,parsed_second,rollback=True),original)
+   # A mismatched global policy STILL rejects before any config rewrite.
+   with self.assertRaises(control.RuntimeControlError) as caught:control.apply_runtime_profile_policy(profile,workspace,old)
+   self.assertEqual(caught.exception.code,'runtime_policy_conflict');self.assertEqual((profile/'config.yaml').read_bytes(),raw_second)
+def load_tests(loader,tests,pattern):
+ return unittest.TestSuite([loader.loadTestsFromTestCase(Regression),ActualManagedProfile('test_actual_apply_and_repeat_are_projection_and_raw_yaml_stable')])
+if __name__=='__main__':unittest.main()

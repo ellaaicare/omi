@@ -1,0 +1,13 @@
+{
+  "actual_controller_fault_cases": 8,
+  "actual_network_blocked_import_pass": true,
+  "actual_service_python": "3.11.0rc1",
+  "actual_typed_budget_and_composition_cases": 19,
+  "pins": {
+    "candidate/ella/services/retained_completion_enrichment.py.source": "73aef006bdad40b544b81559fe6e2ca2db6e16c26902c16e888154cad2c27be6",
+    "candidate/ella/services/semantic_host_context.py.source": "7633d972f432040b076db202f0cd82fb9b19bd0b5a91d04c32e6a6384238987b",
+    "tests/test_attempt_aligned_host_budget.py.source": "98187d09869b6b2fe61f5e30654a8af740b7c82feeb65793ab52f723ec93cb6f",
+    "tests/test_coordinator_budget_composition.py.source": "217cb1852995d4d5e81c5320d9ee6b124b48c109ca29ca182ec8efa4d6e58c5c"
+  },
+  "state": "DEPLOYED_BUDGET_CORRECTION_NOT_ENRICHMENT_ACCEPTANCE"
+}

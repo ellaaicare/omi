@@ -1,0 +1,77 @@
+"""Actual global factory/apply, disposable T3 profiles for BOTH retained baseline policies."""
+import ast, copy, hashlib, importlib.util, json, sys, tempfile, unittest
+from pathlib import Path
+import yaml
+F=Path(__file__).resolve().parents[2];V=F/'profile-cas-v5';sys.path[:0]=[str(F/'profile-cas-v3/tests'),str(F/'profile-cas-v2/tests'),str(F/'tests')]
+import test_normal_ensure_stability as previous
+
+def load(name,path):
+ spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m
+class Regression(previous.Regression):
+ def rig(self):
+  super().rig();self.p=load('pure_profile_model_cas_v5',V/'candidate/profile_model_cas.py');self.c['ella_runtime_policy'].update(apiToolsets=['memory','no_mcp'],isolationPosture='restricted-inprocess-no-unsafe-tools');self.redigest();return self
+ def redigest(self):
+  p=self.c['ella_runtime_policy'];p['digest']=hashlib.sha256(json.dumps({k:v for k,v in p.items() if k!='digest'},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+ def test_pure_plan_actual_projectors_and_one_profile_commit_reconcile(self):
+  self.rig();before=copy.deepcopy(self.c);plan=self.plan();after=self.reconcile(plan,self.c);self.assertEqual(self.c,before);self.assertEqual(after['ella_runtime_policy']['version'],'frontier-codex-5.6-v1');self.assertEqual({k:v for k,v in after['ella_runtime_policy'].items() if k!='digest'},self.p.TARGET_PUBLIC_POLICY);self.assertEqual(after['fallback_providers'],[]);self.assertEqual(after['model_routes']['unrelated-route'],before['model_routes']['unrelated-route']);self.assertEqual(after['session'],before['session']);self.assertEqual(after['owner'],before['owner']);self.assertEqual(after['workspace'],before['workspace']);self.assertEqual(after['other'],before['other']);self.assertEqual(after['ella_runtime_policy']['apiToolsets'],before['ella_runtime_policy']['apiToolsets']);self.assertEqual(after['ella_runtime_policy']['isolationPosture'],before['ella_runtime_policy']['isolationPosture']);self.assertTrue(plan.receipt()['raw_file_cas_required'])
+ def test_fallback_addition_and_wrong_target_version_rejected(self):
+  from dataclasses import replace
+  for field,value in [('version','another-version'),('fallbackModels',['new-model']),('fallbackRoutes',[{'provider':'openrouter','model':'openai/new-model'}])]:
+   self.rig();plan=self.plan();after=json.loads(plan.after_json);after['ella_runtime_policy'][field]=value;public={k:v for k,v in after['ella_runtime_policy'].items() if k!='digest'};after['ella_runtime_policy']['digest']=hashlib.sha256(json.dumps(public,sort_keys=True,separators=(',',':')).encode()).hexdigest();fake=replace(plan,after_json=json.dumps(after),after_digest=self.p.digest(after))
+   with self.subTest(field=field),self.assertRaises(self.p.PlanRejected):self.reconcile(fake,self.c)
+ def test_fallback_config_must_match_original_policy_before_removal(self):
+  self.rig();self.c['fallback_providers']=[{'provider':'openrouter','model':'unexpected'}]
+  with self.assertRaises(self.p.PlanRejected):self.plan()
+ def test_security_tools_or_isolation_cannot_normalize_to_global_silently(self):
+  for field,value in [('apiToolsets',['memory']),('isolationPosture','other-isolation')]:
+   self.rig();self.c['ella_runtime_policy'][field]=value;self.redigest()
+   with self.subTest(field=field),self.assertRaises(self.p.PlanRejected):self.plan()
+ def test_only_two_original_model_families_accepted(self):
+  self.rig();self.c['model']['default']='other-model';self.c['ella_runtime_policy']['model']='other-model';self.redigest()
+  # Actual public projection may reject before the planner model-family guard.
+  with self.assertRaises((self.p.PlanRejected,self.a.SemanticRoleHold)):self.plan()
+ def test_stale_personal_fallbacks_still_reject_without_operator_pin(self):
+  self.rig();self.c['fallback_providers']=copy.deepcopy(self.p.KNOWN_LEGACY_FALLBACKS)
+  with self.assertRaises(self.p.PlanRejected):self.plan()
+ def test_exact_observed_legacy_pair_retires_only_with_matching_raw_semantic_cas(self):
+  self.rig();self.c['fallback_providers']=copy.deepcopy(self.p.KNOWN_LEGACY_FALLBACKS);expected=copy.deepcopy(self.p.KNOWN_LEGACY_FALLBACKS);before=copy.deepcopy(self.c);plan=self.plan(expected_original_fallback_providers=expected);after=self.reconcile(plan,self.c,expected_original_fallback_providers=expected);self.assertTrue(plan.receipt()['fallback_projection_drift']);self.assertTrue(plan.receipt()['operator_pinned_fallback_projection']);self.assertEqual(after['fallback_providers'],[]);self.assertEqual(self.reconcile(plan,after,rollback=True,expected_original_fallback_providers=expected),before)
+  with self.assertRaises(self.p.PlanRejected):self.plan(expected_config_digest='b'*64,expected_original_fallback_providers=expected)
+ def test_unpinned_unknown_extra_or_reordered_projection_rejected(self):
+  for variant in [[{'provider':'openai-codex','model':'unknown'}],list(reversed([{'provider':'openai-codex','model':'gpt-5.6-terra'},{'provider':'openrouter','model':'openai/gpt-5.6-terra'}])),[{'provider':'openai-codex','model':'gpt-5.6-terra','api_key':'synthetic'},{'provider':'openrouter','model':'openai/gpt-5.6-terra'}]]:
+   self.rig();self.c['fallback_providers']=copy.deepcopy(variant)
+   with self.subTest(variant=variant),self.assertRaises(self.p.PlanRejected):self.plan(expected_original_fallback_providers=variant)
+ def test_plan_cannot_drop_or_change_pinned_projection_on_reconcile(self):
+  self.rig();self.c['fallback_providers']=copy.deepcopy(self.p.KNOWN_LEGACY_FALLBACKS);expected=copy.deepcopy(self.p.KNOWN_LEGACY_FALLBACKS);plan=self.plan(expected_original_fallback_providers=expected)
+  for provided in [None,[],list(reversed(expected))]:
+   with self.subTest(provided=provided),self.assertRaises(self.p.PlanRejected):self.reconcile(plan,self.c,expected_original_fallback_providers=provided)
+ def test_operator_pin_does_not_allow_actual_before_or_after_addition(self):
+  from dataclasses import replace
+  self.rig();expected=copy.deepcopy(self.p.KNOWN_LEGACY_FALLBACKS)
+  with self.assertRaises(self.p.PlanRejected):self.plan(expected_original_fallback_providers=expected)
+  self.c['fallback_providers']=copy.deepcopy(expected);plan=self.plan(expected_original_fallback_providers=expected);after=json.loads(plan.after_json);after['fallback_providers']=expected;fake=replace(plan,after_json=json.dumps(after),after_digest=self.p.digest(after))
+  with self.assertRaises(self.p.PlanRejected):self.reconcile(fake,self.c,expected_original_fallback_providers=expected)
+class ActualDualBaseline(Regression):
+ def factory(self,control):
+  tree=ast.parse((F/'provision-policy-migration-v1/baseline/hermes_provision_shim.py').read_text());wanted={'_json_string_list','_json_fallback_route_list','_runtime_profile_policy'};nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in wanted]
+  ns={'json':json,'RuntimeProfilePolicy':control.RuntimeProfilePolicy,'RuntimeControlError':control.RuntimeControlError,'RUNTIME_MODEL_POLICY_VERSION':'frontier-codex-5.6-v1','RUNTIME_MODEL_PROVIDER':'openai-codex','RUNTIME_MODEL_ID':'gpt-6.1-sol','RUNTIME_MODEL_CREDENTIAL_ENV':'','RUNTIME_MODEL_CREDENTIAL_VALUE':'','RUNTIME_FALLBACK_MODELS_JSON':'[]','RUNTIME_FALLBACK_ROUTES_JSON':'[]','RUNTIME_REASONING_EFFORT':'medium','RUNTIME_API_TOOLSETS_JSON':'["memory","no_mcp"]','RUNTIME_ISOLATION_POSTURE':'restricted-inprocess-no-unsafe-tools'}
+  exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual_global_policy_factory_no_env_read','exec'),ns);return ns['_runtime_profile_policy']()
+ def test_both_existing_baselines_reach_same_factory_policy_and_repeat_ensure_stable(self):
+  self.rig();control=load('actual_runtime_control_v4',F/'provision-policy-migration-v1/baseline/hermes_runtime_control.py');target=self.factory(control);self.assertEqual(target.public_payload(),self.p.TARGET_PUBLIC_POLICY)
+  old_policies=[control.RuntimeProfilePolicy(version='economy-openrouter-deepseek-v4-flash-v1',provider='openrouter',model='deepseek/deepseek-v4-flash',credential_env='OPENROUTER_API_KEY',credential_value='SYNTHETIC_NOT_A_REAL_KEY',reasoning_effort='xhigh'),control.RuntimeProfilePolicy(version='frontier-codex-5.6-v1',provider='openai-codex',model='gpt-5.6-sol',credential_env='',credential_value='',fallback_models=('gpt-5.6-terra',),fallback_routes=(('openrouter','openai/gpt-5.6-terra'),),reasoning_effort='xhigh')]
+  targets=[]
+  for index,old in enumerate(old_policies):
+   with self.subTest(baseline=old.provider),tempfile.TemporaryDirectory(prefix='synthetic-managed-',dir=V/'test-temp') as directory:
+    profile=Path(directory)/'fictional-personal-profile';workspace=profile/'workspace';workspace.mkdir(parents=True);initial={'owner':{'uid':'fictional-owner'},'session':{'id':'fictional-original'},'model_routes':{'fictional-agent':{'model':old.model,'provider':old.provider},'fictional-personal-profile':{'model':old.model,'provider':old.provider},'unrelated-route':{'provider':'unrelated-provider','model':'unrelated-model'}},'agent':{'max_iterations':7,'disabled_toolsets':['fictional-disabled-tool']},'other':{'preserve':'unchanged'}};(profile/'config.yaml').write_text(yaml.safe_dump(initial,sort_keys=False,allow_unicode=False))
+    control.apply_runtime_profile_policy(profile,workspace,old);self.c=yaml.safe_load((profile/'config.yaml').read_text());
+    if old.provider=='openrouter':
+     self.c['fallback_providers']=copy.deepcopy(self.p.KNOWN_LEGACY_FALLBACKS);(profile/'config.yaml').write_text(yaml.safe_dump(self.c,sort_keys=False,allow_unicode=False))
+    original=copy.deepcopy(self.c);env_before=(profile/'.env').read_bytes() if (profile/'.env').exists() else None;observed=copy.deepcopy(self.p.KNOWN_LEGACY_FALLBACKS);plan=self.plan(expected_original_fallback_providers=observed);after=self.reconcile(plan,self.c,expected_original_fallback_providers=observed);self.assertEqual(plan.receipt()['fallback_projection_drift'],old.provider=='openrouter');rendered=yaml.safe_dump(after,sort_keys=False,allow_unicode=False).encode();(profile/'config.yaml').write_bytes(rendered);projection_before=self.a.project_config(after,self.selected['agent_id'])[0]
+    first=control.apply_runtime_profile_policy(profile,workspace,target);raw_first=(profile/'config.yaml').read_bytes();second=control.apply_runtime_profile_policy(profile,workspace,target);raw_second=(profile/'config.yaml').read_bytes();parsed=yaml.safe_load(raw_second)
+    self.assertEqual(first['status'],'APPLIED');self.assertEqual(second['status'],'APPLIED');self.assertEqual(first['version'],'frontier-codex-5.6-v1');self.assertEqual(first['digest'],after['ella_runtime_policy']['digest']);self.assertEqual(rendered,raw_first);self.assertEqual(raw_first,raw_second);self.assertEqual(parsed,after);self.assertEqual(self.a.project_config(parsed,self.selected['agent_id'])[0],projection_before);self.assertEqual(parsed['fallback_providers'],[]);self.assertEqual(parsed['ella_runtime_policy']['fallbackModels'],[]);self.assertNotIn('fallbackRoutes',parsed['ella_runtime_policy']);self.assertEqual(parsed['ella_runtime_policy']['apiToolsets'],original['ella_runtime_policy']['apiToolsets']);self.assertEqual(parsed['ella_runtime_policy']['isolationPosture'],original['ella_runtime_policy']['isolationPosture']);self.assertEqual(parsed['owner'],original['owner']);self.assertEqual(parsed['session'],original['session']);self.assertEqual(parsed['agent']['max_iterations'],7);self.assertEqual(self.resolve_reasoning(parsed,'gpt-6.1-sol'),{'enabled':True,'effort':'medium'});self.assertEqual((profile/'.env').read_bytes() if (profile/'.env').exists() else None,env_before);self.assertEqual(self.reconcile(plan,parsed,rollback=True,expected_original_fallback_providers=observed),original)
+    targets.append(parsed['ella_runtime_policy'])
+    with self.assertRaises(control.RuntimeControlError) as caught:control.apply_runtime_profile_policy(profile,workspace,old)
+    self.assertEqual(caught.exception.code,'runtime_policy_conflict');self.assertEqual((profile/'config.yaml').read_bytes(),raw_second)
+  self.assertEqual(targets[0],targets[1])
+def load_tests(loader,tests,pattern):
+ return unittest.TestSuite([loader.loadTestsFromTestCase(Regression),ActualDualBaseline('test_both_existing_baselines_reach_same_factory_policy_and_repeat_ensure_stable')])
+if __name__=='__main__':unittest.main()

@@ -1,0 +1,124 @@
+"""Pure one-profile model plan. Does no file/auth/network/process/DB I/O.
+
+The operator must separately compare the exact authorized raw file inode/hash and
+server selection before applying. A plan or projection is not an access grant.
+Only supplied existing selected routes are changed; no profile list or mapping
+is discovered here. Private configuration bytes are never a public receipt.
+"""
+from copy import deepcopy
+from dataclasses import dataclass, field
+import hashlib
+import json
+
+MODEL='gpt-6.1-sol'
+BASE='https://chatgpt.com/backend-api/codex'
+TARGET_VERSION='frontier-codex-5.6-v1'
+TARGET_PUBLIC_POLICY={'version':TARGET_VERSION,'provider':'openai-codex','model':MODEL,'credentialRef':'global-auth:openai-codex','fallbackModels':[],'reasoningEffort':'medium','apiToolsets':['memory','no_mcp'],'isolationPosture':'restricted-inprocess-no-unsafe-tools'}
+SELECTION_KEYS={'uid','agent_id','profile_name','workspace_root','account_user_id','registered_agent_id'}
+RUNTIME_KEYS={'version','uid','agent_id','account_user_id','profile_name','workspace_root','legacy_runtime_identity_sha256','provider','model','policy_version','policy_sha256','config_projection_sha256','registry_revision'}
+class PlanRejected(ValueError):pass
+
+def require(value,code):
+ if not value:raise PlanRejected(code)
+def encoded(value):
+ try:return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
+ except (TypeError,ValueError):raise PlanRejected('configuration_not_json_value') from None
+def digest(value):return hashlib.sha256(encoded(value).encode()).hexdigest()
+def selection_check(selection,expected):
+ require(type(selection) is dict and set(selection)==SELECTION_KEYS and selection==expected,'selected_owner_changed')
+ require(all(isinstance(selection[k],str) and selection[k] for k in SELECTION_KEYS),'selected_owner_invalid')
+ return deepcopy(selection)
+
+def check_runtime_join(runtime,selection,config,*,project_config,require_policy,legacy_identity):
+ """Compare the real authority endpoint's metadata against the exact projection."""
+ require(type(runtime) is dict and set(runtime)==RUNTIME_KEYS,'runtime_projection_shape')
+ projection,policy=project_config(config,selection['agent_id']);require_policy(config,config['model'])
+ expected={'version':2,**{k:selection[k] for k in ['uid','agent_id','account_user_id','profile_name','workspace_root']},'legacy_runtime_identity_sha256':legacy_identity,'provider':projection['provider'],'model':projection['model'],'policy_version':policy['version'],'policy_sha256':policy['digest'],'config_projection_sha256':digest(projection),'registry_revision':digest(selection)}
+ require(runtime==expected,'runtime_projection_mismatch')
+ return projection
+
+def route_selection(config,selection,route_keys):
+ require(type(route_keys) is tuple and len(route_keys)==len(set(route_keys)),'selected_routes_invalid')
+ allowed={selection[k] for k in ['agent_id','profile_name','registered_agent_id']}
+ require(set(route_keys)<=allowed,'foreign_route_selected')
+ routes=config.get('model_routes',{});require(type(routes) is dict,'routes_invalid')
+ # Existing selected aliases cannot be silently omitted and remain on another model.
+ require(set(route_keys)==set(routes)&allowed,'selected_routes_incomplete')
+ model=config['model'];base=BASE if model['provider']=='openai-codex' else 'https://openrouter.ai/api/v1'
+ for name in route_keys:
+  row=routes[name]
+  require(type(row) is dict and row.get('model')==model['default'] and row.get('provider',model['provider'])==model['provider'] and row.get('base_url') in (None,'',base),'selected_route_mismatch')
+ for row in [model,*[routes[name] for name in route_keys]]:
+  require(not any(row.get(k) for k in ['api_key','access_token','refresh_token','token','password','authorization']),'embedded_credential_forbidden')
+ return routes
+
+def changed_paths(before,after,path=()):
+ if type(before) is dict and type(after) is dict:
+  result=set()
+  for key in set(before)|set(after):
+   if key not in before or key not in after:result.add(path+(key,))
+   else:result|=changed_paths(before[key],after[key],path+(key,))
+  return result
+ return set() if before==after and type(before) is type(after) else {path}
+
+def validate_delta(before,after,selection,route_keys,resolve_reasoning_config):
+ route_selection(before,selection,route_keys);route_selection(after,selection,route_keys)
+ allowed={('model',k) for k in ['provider','default','base_url']}|{('ella_runtime_policy',k) for k in ['version','provider','model','credentialRef','reasoningEffort','digest','fallbackModels','fallbackRoutes']}|{('model_routes',name,k) for name in route_keys for k in ['provider','model','base_url']}|{('agent','reasoning_effort'),('fallback_providers',)}
+ if 'agent' not in before:
+  require(after.get('agent')=={'reasoning_effort':'medium'},'unexpected_agent_section');allowed.add(('agent',))
+ require(type(after.get('agent')) is dict and after['agent'].get('reasoning_effort')=='medium','target_agent_reasoning_mismatch')
+ require(callable(resolve_reasoning_config) and resolve_reasoning_config(after,MODEL)=={'enabled':True,'effort':'medium'},'target_reasoning_override_conflict')
+ require(changed_paths(before,after)<=allowed,'unexpected_configuration_delta')
+ require(after['model']=={'default':MODEL,'provider':'openai-codex'},'target_model_mismatch')
+ p=after['ella_runtime_policy'];require({k:v for k,v in p.items() if k!='digest'}==TARGET_PUBLIC_POLICY,'target_policy_mismatch')
+ require(after.get('fallback_providers')==[],'target_fallback_addition_forbidden')
+ require(before['ella_runtime_policy']['apiToolsets']==p['apiToolsets'] and before['ella_runtime_policy']['isolationPosture']==p['isolationPosture'],'security_policy_change_forbidden')
+
+@dataclass(frozen=True)
+class Plan:
+ before_json:str=field(repr=False)
+ after_json:str=field(repr=False)
+ selection_json:str=field(repr=False)
+ route_keys:tuple
+ before_digest:str
+ after_digest:str
+ before_projection_digest:str
+ after_projection_digest:str
+ legacy_identity:str
+ def receipt(self):
+  return {'contract':'ella-one-profile-model-cas-plan-v4','before_digest':self.before_digest,'after_digest':self.after_digest,'before_projection_digest':self.before_projection_digest,'after_projection_digest':self.after_projection_digest,'selected_identity_digest':hashlib.sha256(self.selection_json.encode()).hexdigest(),'selected_route_count':len(self.route_keys),'provider':'openai-codex','model':MODEL,'reasoning_effort':'medium','raw_file_cas_required':True,'runtime_rejoin_required':True,'writes':0,'grants_created':0}
+
+def plan_switch(config,*,selection,expected_selection,expected_config_digest,current_runtime,legacy_identity,route_keys,project_config,require_policy,resolve_reasoning_config):
+ selected=selection_check(selection,expected_selection);require(digest(config)==expected_config_digest,'configuration_cas_mismatch')
+ before=deepcopy(config);before_projection=check_runtime_join(current_runtime,selected,before,project_config=project_config,require_policy=require_policy,legacy_identity=legacy_identity)
+ route_selection(before,selected,route_keys)
+ require((before['model']['provider'],before['model']['default']) in {('openrouter','deepseek/deepseek-v4-flash'),('openai-codex','gpt-5.6-sol')},'original_provider_not_expected')
+ original_policy=before['ella_runtime_policy']
+ require(original_policy['apiToolsets']==TARGET_PUBLIC_POLICY['apiToolsets'] and original_policy['isolationPosture']==TARGET_PUBLIC_POLICY['isolationPosture'],'security_policy_change_forbidden')
+ require(type(original_policy['fallbackModels']) is list and all(type(x) is str and x for x in original_policy['fallbackModels']),'original_fallback_shape')
+ routes=original_policy.get('fallbackRoutes',[]);require(type(routes) is list and all(type(x) is dict and set(x)=={'provider','model'} and all(type(v) is str and v for v in x.values()) for x in routes),'original_fallback_shape')
+ expected_fallbacks=[{'provider':before['model']['provider'],'model':m} for m in original_policy['fallbackModels']]+routes
+ require(before.get('fallback_providers',[])==expected_fallbacks,'original_fallback_projection_mismatch')
+ # Match the unchanged managed provisioner's actual normal form. Unknown
+ # extra model keys are not silently dropped: validate_delta rejects them.
+ after=deepcopy(before);after['model']={'default':MODEL,'provider':'openai-codex'}
+ require('agent' not in before or type(before['agent']) is dict,'agent_section_invalid')
+ after.setdefault('agent',{})['reasoning_effort']='medium'
+ for key in route_keys:after['model_routes'][key].update(provider='openai-codex',model=MODEL,base_url=BASE)
+ # One exact global policy, actual public_payload order and empty fallback normal form.
+ p=deepcopy(TARGET_PUBLIC_POLICY);p['digest']=hashlib.sha256(json.dumps(p,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+ after['ella_runtime_policy']=p;after['fallback_providers']=[]
+ validate_delta(before,after,selected,route_keys,resolve_reasoning_config);after_projection,_=project_config(after,selected['agent_id']);require_policy(after,after['model'])
+ # Keep mapping insertion order for deterministic managed YAML rendering;
+ # canonical digests remain order-independent and raw-file CAS stays external.
+ return Plan(json.dumps(before,ensure_ascii=False,separators=(',',':'),allow_nan=False),json.dumps(after,ensure_ascii=False,separators=(',',':'),allow_nan=False),encoded(selected),route_keys,digest(before),digest(after),digest(before_projection),digest(after_projection),legacy_identity)
+
+def reconcile(plan,current,*,selection,expected_selection,current_runtime,project_config,require_policy,resolve_reasoning_config,rollback=False):
+ """Return exact planned bytes as data only, after current-CAS/runtime rejoin."""
+ selected=selection_check(selection,expected_selection);require(encoded(selected)==plan.selection_json,'plan_owner_changed')
+ before=json.loads(plan.before_json);after=json.loads(plan.after_json)
+ require(digest(before)==plan.before_digest and digest(after)==plan.after_digest,'plan_bytes_changed');validate_delta(before,after,selected,plan.route_keys,resolve_reasoning_config)
+ expected=after if rollback else before;require(digest(current)==digest(expected),'configuration_cas_mismatch')
+ projection=check_runtime_join(current_runtime,selected,current,project_config=project_config,require_policy=require_policy,legacy_identity=plan.legacy_identity)
+ require(digest(projection)==(plan.after_projection_digest if rollback else plan.before_projection_digest),'plan_projection_changed')
+ return deepcopy(before if rollback else after)

@@ -1,0 +1,67 @@
+"""Actual host class AST + actual typed OperationBudget; no service startup or I/O."""
+import ast,importlib.util,math,sys,threading,time,unittest
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[1];W=ROOT.parent
+spec=importlib.util.spec_from_file_location('real_operation_budget_alignment',W/'deadline-v1/candidate/ella/services/semantic_operation_budget.py')
+operation=importlib.util.module_from_spec(spec);sys.modules[spec.name]=operation;spec.loader.exec_module(operation)
+class ContextUnavailable(RuntimeError):pass
+class Clock:
+ def __init__(self):self.value=0
+ def __call__(self):return self.value
+
+def load(path):
+ tree=ast.parse(path.read_text());cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='HostReadBudget')
+ ns=dict(time=time,threading=threading,math=math,CompanionContextUnavailable=ContextUnavailable,OperationBudget=operation.OperationBudget,current_budget=operation.current_budget,remaining_timeout=operation.remaining_timeout)
+ exec(compile(ast.Module(body=[cls],type_ignores=[]),str(path),'exec'),ns);return ns['HostReadBudget']
+Host=load(ROOT/'candidate/ella/services/semantic_host_context.py')
+Baseline=load(W/'captured-context-canonical-projection-v1/candidate/ella/services/semantic_host_context.py')
+SCOPE=('job','owner','cid',1,'lease')
+class Tests(unittest.TestCase):
+ def setUp(self):self.clock=Clock();self.budget=operation.OperationBudget(SCOPE,600,clock=self.clock);self.token=operation._CURRENT.set(self.budget)
+ def tearDown(self):operation._CURRENT.reset(self.token)
+ def test_reproduces_old_480_expiry_with_119_global_remaining(self):
+  old=Baseline(clock=self.clock);self.clock.value=481;self.assertEqual(self.budget.remaining(),119)
+  with self.assertRaisesRegex(ContextUnavailable,'semantic_host_read_budget_exhausted'):old.reserve('context_snapshot')
+ def test_new_481_valid_but_global_600_fails(self):
+  h=Host.for_current_attempt('owner','cid');self.assertIs(h._attempt_budget,self.budget);self.assertEqual(h.deadline,600)
+  self.clock.value=481;self.assertEqual(h.reserve('context_snapshot'),60)
+  self.clock.value=599;self.assertEqual(h.reserve('sync'),1)
+  self.clock.value=600
+  with self.assertRaises(TimeoutError):h.reserve('sync')
+ def test_shorter_existing_job_deadline_caps_and_never_renews(self):
+  shorter=operation.OperationBudget(SCOPE,90,clock=self.clock);operation._CURRENT.set(shorter);self.clock.value=20
+  h=Host.for_current_attempt('owner','cid');self.assertEqual(h.deadline,90);self.clock.value=89;self.assertEqual(h.reserve('context_snapshot'),1)
+ def test_foreign_source_or_owner_cannot_bind(self):
+  for uid,cid in [('foreign','cid'),('owner','foreign')]:
+   with self.subTest(uid=uid,cid=cid),self.assertRaises(ValueError):Host.for_current_attempt(uid,cid)
+ def test_equal_scope_replacement_not_reusable(self):
+  h=Host.for_current_attempt('owner','cid');operation._CURRENT.set(operation.OperationBudget(SCOPE,600,clock=self.clock))
+  with self.assertRaisesRegex(ContextUnavailable,'semantic_host_attempt_budget_changed'):h.reserve('sync')
+  self.assertEqual(h.calls,0)
+ def test_closed_or_cleared_context_not_reusable(self):
+  h=Host.for_current_attempt('owner','cid');operation._CURRENT.set(None)
+  with self.assertRaisesRegex(ContextUnavailable,'semantic_host_attempt_budget_changed'):h.reserve('snapshot')
+ def test_same_object_changed_source_rejects(self):
+  h=Host.for_current_attempt('owner','cid');object.__setattr__(self.budget,'scope',('job','owner','other',1,'lease'))
+  with self.assertRaises(ValueError):h.reserve('sync')
+ def test_default_and_no_budget_factory_remain_480(self):
+  operation._CURRENT.set(None);h=Host(clock=self.clock);self.assertEqual(h.deadline,480)
+  self.clock.value=481
+  with self.assertRaises(ContextUnavailable):h.reserve('context_snapshot')
+  unbound=Host.for_current_attempt('owner','cid');self.assertIsNone(unbound._attempt_budget);self.assertLessEqual(unbound.deadline-unbound.clock(),480)
+ def test_per_hop_and_call_caps_unchanged(self):
+  h=Host.for_current_attempt('owner','cid');self.assertEqual(h.reserve('sync'),90);self.assertEqual(h.reserve('context_snapshot'),60);self.assertEqual(h.reserve('other'),5)
+  for _ in range(125):h.reserve('other')
+  with self.assertRaises(ContextUnavailable):h.reserve('other')
+  self.assertEqual(h.calls,128)
+ def test_explicit_constructor_ceiling_is_only_600(self):
+  self.assertEqual(Host(wall_seconds=600,clock=self.clock).deadline,600)
+  for v in [601,float('nan'),float('inf'),True,0,-1]:
+   with self.subTest(v=v),self.assertRaises(ContextUnavailable):Host(wall_seconds=v,clock=self.clock)
+ def test_attempt_must_be_actual_typed_budget(self):
+  operation._CURRENT.set(object())
+  with self.assertRaises(ValueError):Host.for_current_attempt('owner','cid')
+ def test_retained_change_is_only_budget_construction(self):
+  new=(ROOT/'candidate/ella/services/retained_completion_enrichment.py').read_text();old=(W/'captured-context-latency-v2-prelude-quote/candidate/ella/services/retained_completion_enrichment.py').read_text()
+  self.assertEqual(new.replace('HostReadBudget.for_current_attempt(uid, cid)','HostReadBudget()'),old)
+if __name__=='__main__':unittest.main()
