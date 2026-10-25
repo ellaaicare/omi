@@ -1,0 +1,75 @@
+--- a/ella/services/semantic_context_authority.py
++++ b/ella/services/semantic_context_authority.py
+@@ -27,9 +27,11 @@
+     raise ContextAuthorityRejected(code)
+ 
+ 
+-async def read_context_authority(*, uid, conversation_id, read_conversation,
+-                                 consent, resolve, identity, repository=None):
++async def _read_context_authority_samples(*, uid, conversation_id, read_conversation,
++                                 consent, resolve, identity, repository=None, _sample_count=2):
+     """Two current backend samples; the host must repeat this around its own work."""
++    if type(_sample_count) is not int or _sample_count not in (1, 2):
++        reject('context_authority_sampling_invalid')
+     if (not isinstance(uid, str) or not uid or len(uid) > 256
+             or not isinstance(conversation_id, str) or not conversation_id or len(conversation_id) > 256):
+         reject('context_authority_identity_invalid')
+@@ -75,10 +77,30 @@
+         encoded = json.dumps(first, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+         if len(encoded) > MAX_RESPONSE_BYTES:
+             reject('context_authority_response_too_large')
+-        if await sample() != first:
++        if _sample_count == 2 and await sample() != first:
+             reject('context_authority_changed')
+         # Consent can change during the second source read, so check once more.
+         if await asyncio.to_thread(consent, uid) != uid:
+             reject('context_authority_consent_changed')
+         await require_transcript_processing_active(uid)
+         return first
++
++
++async def read_context_authority(*, uid, conversation_id, read_conversation,
++                                 consent, resolve, identity, repository=None):
++    """Normal double-sample authority contract."""
++    return await _read_context_authority_samples(
++        uid=uid, conversation_id=conversation_id, read_conversation=read_conversation,
++        consent=consent, resolve=resolve, identity=identity, repository=repository,
++        _sample_count=2,
++    )
++
++
++async def read_context_authority_sample(*, uid, conversation_id, read_conversation,
++                                        consent, resolve, identity, repository=None):
++    """Internal single complete authority sample; ONLY for records caller that brackets its work with two samples. No API/body flag."""
++    return await _read_context_authority_samples(
++        uid=uid, conversation_id=conversation_id, read_conversation=read_conversation,
++        consent=consent, resolve=resolve, identity=identity, repository=repository,
++        _sample_count=1,
++    )
+--- a/ella/services/semantic_runtime_authority.py
++++ b/ella/services/semantic_runtime_authority.py
+@@ -97,11 +97,12 @@
+ 
+ 
+ async def _augment(runtime,*,repository,host_read_budget):
++    """Private immediate continuation of resolve_semantic_runtime: initial runtime is the before-model sample; no intervening awaited work. After-model revalidation remains mandatory."""
+     from ella.services.runtime_resolver import runtime_authority_identity,revalidate_runtime_authority,CloudRuntimeAuthorityIdentity
+     if runtime is None or runtime.provider!='hermes' or runtime.status!='active':reject('semantic_owned_retained_runtime_required')
+     original=runtime_authority_identity(runtime)
+     # Never pass the augmented identity into the ordinary legacy revalidator.
+-    current=await revalidate_runtime_authority(original,repository=repository)
++    current=runtime
+     if runtime_authority_identity(current)!=original:reject('semantic_legacy_runtime_changed')
+     snapshot=await read_model_authority(runtime=current,legacy_identity=original,host_read_budget=host_read_budget)
+     after=await revalidate_runtime_authority(original,repository=repository)
+--- a/ella/services/semantic_context_records_v2.py
++++ b/ella/services/semantic_context_records_v2.py
+@@ -53,7 +53,7 @@
+ def _production(db):
+  from database import conversations,normal_enrichment_activation as activation,normal_account_lifecycle as lifecycle,enrichment_job_isolation as isolation,enrichment_attempt_fence as fence
+ 
+- from ella.services.semantic_context_authority import read_context_authority
++ from ella.services.semantic_context_authority import read_context_authority_sample as read_context_authority
+  from ella.services.semantic_runtime_authority import resolve_semantic_runtime,semantic_runtime_authority_identity
+  from ella.services.ai_consent import assert_current_ai_consent
+  from models.hermes_cloud_enrichment_contract import build_enrichment_identity

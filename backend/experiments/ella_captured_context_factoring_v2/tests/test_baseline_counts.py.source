@@ -1,0 +1,15 @@
+"""Run the same orchestration against retained baseline functions, not arithmetic."""
+import unittest
+from unittest.mock import patch
+import test_factoring as f
+class BaselineCounts(unittest.IsolatedAsyncioTestCase):
+ async def test_actual_retained_baseline_counts(self):
+  original=f.load_selected
+  def baseline(path,names,ns):
+   result=original(f.P/'baseline'/path.name,names,ns)
+   if path.name=='semantic_context_authority.py':result['read_context_authority_sample']=result['read_context_authority']
+   return result
+  with patch.object(f,'load_selected',baseline):
+   r=f.Rig();await r.validate_sequence()
+  self.assertEqual(r.count['semantic'],8);self.assertEqual(r.count['ordinary'],24);self.assertEqual(r.count['model'],8);self.assertEqual(r.count['attempt'],2);self.assertEqual(r.count['records'],1)
+if __name__=='__main__':unittest.main()

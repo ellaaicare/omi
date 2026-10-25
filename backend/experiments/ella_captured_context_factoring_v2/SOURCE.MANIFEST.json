@@ -1,0 +1,28 @@
+{
+  "actual_import_network_attempts": 0,
+  "actual_runtime_boundary_and_count_cases": 13,
+  "actual_service_python": "3.11.0rc1",
+  "baseline_composed_samples": {
+    "model_authority_rpc": 8,
+    "ordinary": 24,
+    "semantic": 8
+  },
+  "candidate_composed_samples": {
+    "model_authority_rpc": 6,
+    "ordinary": 12,
+    "semantic": 6
+  },
+  "live_latency": "NOT_YET_MEASURED",
+  "pins": {
+    "baseline/ella/services/semantic_context_authority.py.source": "b876a94e1eb71e04e5887774c2db54b998ca19272f07232f8a0b8e52a05fede9",
+    "baseline/ella/services/semantic_context_records_v2.py.source": "2bcc52532c518d7d9fa173ce161a66c777230ef110583568a5c50f0c79b09e62",
+    "baseline/ella/services/semantic_runtime_authority.py.source": "6b32949cecefcb359308f3db6e19dc6eeb67bc303333a513c4879d83c66e2c5c",
+    "candidate/ella/services/semantic_context_authority.py.source": "77de910a88aac4abc31a8c368f6ab5f00c3f491304621133ad71905652339d46",
+    "candidate/ella/services/semantic_context_records_v2.py.source": "b0ddf7e68b423679d897bbea76bc3292c355a236b10c520669d76a972b6b3eca",
+    "candidate/ella/services/semantic_runtime_authority.py.source": "f9d4092db23ee9696787edb47e180bb7f3e9b836ed9a713b2999dac21cdae736",
+    "tests/test_baseline_counts.py.source": "32a4ccc59a2656afd5353348d9cf7f45c4fb6a45ad2f47993c0d7e25e9f3b592",
+    "tests/test_factoring.py.source": "40cb98a640e71b02d5c7cae14d6026725c3934a04925241391a53ac385030bde"
+  },
+  "private_batch_alias_and_public_double_wrapper": "PASS",
+  "state": "SOURCE_REVIEWED_REAL_SERVICE_IMPORT_PASS_NOT_DEPLOYED"
+}

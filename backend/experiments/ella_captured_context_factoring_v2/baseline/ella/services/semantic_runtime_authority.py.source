@@ -1,0 +1,125 @@
+"""Semantic-only configured-model authority; ordinary legacy resolver unchanged.
+
+The owned agent alias selects a gateway route, not an upstream model. A separate
+existing provision-auth readonly snapshot proves current profile/config model
+and policy. No model value is inferred from an alias or gateway response echo.
+"""
+from __future__ import annotations
+import asyncio,copy,json,re
+from dataclasses import dataclass
+from types import MappingProxyType
+from urllib.parse import quote
+from uuid import UUID
+import httpx
+from ella.services.semantic_publication import digest,SemanticPublicationRejectedError
+from ella.services.semantic_host_context import HostReadBudget,unique_pairs
+from ella.utils.provision_authority import hermes_provision_authority
+
+FIELDS={'version','uid','agent_id','account_user_id','profile_name','workspace_root','legacy_runtime_identity_sha256',
+        'provider','model','policy_version','policy_sha256','config_projection_sha256','registry_revision'}
+SHA=re.compile(r'^[a-f0-9]{64}$')
+MAX_BYTES=16384
+
+def reject(code):raise SemanticPublicationRejectedError(code)
+
+@dataclass(frozen=True)
+class SemanticRuntime:
+    legacy_runtime:object
+    authority:dict
+    identity:object
+    def __post_init__(self):
+        object.__setattr__(self,'authority',MappingProxyType(copy.deepcopy(self.authority)))
+    @property
+    def expected_model(self):return self.authority['model']
+    @property
+    def semantic_policy_sha256(self):return self.authority['policy_sha256']
+    @property
+    def model_policy_version(self):return self.authority['policy_version']
+    def __getattr__(self,name):return getattr(self.legacy_runtime,name)
+
+
+def canonical_account(runtime):
+    account=getattr(runtime,'account_user_id',None)
+    try:
+        if not isinstance(account,str) or str(UUID(account))!=account or getattr(runtime,'profile_user_id',None)!=account:reject('semantic_canonical_account_required')
+    except ValueError:reject('semantic_canonical_account_required')
+    return account
+
+
+def validate_model_authority(value,*,runtime,legacy_identity):
+    if (not isinstance(value,dict) or set(value)!=FIELDS or type(value['version']) is not int or value['version']!=2
+            or value['account_user_id']!=canonical_account(runtime) or value['uid']!=runtime.uid or value['agent_id']!=runtime.agent_id
+            or value['profile_name']!=runtime.profile_name or value['workspace_root']!=runtime.workspace_root
+            or value['legacy_runtime_identity_sha256']!=legacy_identity.digest
+            or value['provider'] not in ('openai-codex','openrouter')
+            or (value['provider']=='openrouter' and value['model']!='deepseek/deepseek-v4-flash')
+            or value['policy_version']!=runtime.model_policy_version):reject('semantic_configured_model_authority_changed')
+    for key in ('legacy_runtime_identity_sha256','policy_sha256','config_projection_sha256','registry_revision'):
+        if not isinstance(value[key],str) or not SHA.fullmatch(value[key]):reject('semantic_configured_model_authority_invalid')
+    for key in ('model','policy_version'):
+        if (not isinstance(value[key],str) or not value[key] or len(value[key])>256
+                or any(ord(c)<33 or ord(c)>126 for c in value[key])):reject('semantic_configured_model_authority_invalid')
+    return copy.deepcopy(value)
+
+
+async def read_model_authority(*,runtime,legacy_identity,host_read_budget,client_factory=None,
+                               authority_reader=None):
+    """One existing internal readonly host request, shared5s/budget, no redirects."""
+    client_factory=client_factory or httpx.AsyncClient
+    authority_reader=authority_reader or hermes_provision_authority
+    account=canonical_account(runtime)
+    seconds=host_read_budget.reserve('snapshot')
+    authority=authority_reader();captured=authority.snapshot();authority_reader(expected_snapshot=captured)
+    url=authority.base_url+'/workspace/'+quote(runtime.agent_id,safe='')+'/semantic-runtime-authority'
+    body={'uid':runtime.uid,'agent_id':runtime.agent_id,'account_user_id':account,'legacy_runtime_identity_sha256':legacy_identity.digest}
+    try:
+        async with asyncio.timeout(seconds):
+            async with client_factory(timeout=httpx.Timeout(seconds,connect=min(2,seconds)),follow_redirects=False,trust_env=False) as client:
+                async with client.stream('POST',url,json=body,headers={'Authorization':'Bearer '+authority.token,
+                        'X-Ella-Owner-Uid':runtime.uid,'Accept':'application/json'}) as response:
+                    if response.status_code!=200:reject('semantic_configured_model_authority_rejected')
+                    chunks=[];size=0
+                    async for chunk in response.aiter_bytes():
+                        size+=len(chunk)
+                        if size>MAX_BYTES:reject('semantic_configured_model_authority_capacity')
+                        chunks.append(chunk)
+        authority_reader(expected_snapshot=captured)
+        value=json.loads(b''.join(chunks),object_pairs_hook=unique_pairs,
+                        parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+        return validate_model_authority(value,runtime=runtime,legacy_identity=legacy_identity)
+    except SemanticPublicationRejectedError:raise
+    except Exception:reject('semantic_configured_model_authority_unavailable')
+
+
+def semantic_runtime_authority_identity(runtime):
+    if not isinstance(runtime,SemanticRuntime):reject('semantic_configured_model_runtime_required')
+    return runtime.identity
+
+
+async def _augment(runtime,*,repository,host_read_budget):
+    from ella.services.runtime_resolver import runtime_authority_identity,revalidate_runtime_authority,CloudRuntimeAuthorityIdentity
+    if runtime is None or runtime.provider!='hermes' or runtime.status!='active':reject('semantic_owned_retained_runtime_required')
+    original=runtime_authority_identity(runtime)
+    # Never pass the augmented identity into the ordinary legacy revalidator.
+    current=await revalidate_runtime_authority(original,repository=repository)
+    if runtime_authority_identity(current)!=original:reject('semantic_legacy_runtime_changed')
+    snapshot=await read_model_authority(runtime=current,legacy_identity=original,host_read_budget=host_read_budget)
+    after=await revalidate_runtime_authority(original,repository=repository)
+    if runtime_authority_identity(after)!=original:reject('semantic_legacy_runtime_changed')
+    identity=CloudRuntimeAuthorityIdentity(uid=original.uid,target_mode=original.target_mode,
+        digest=digest({'contract':'ella-semantic-runtime-authority-v1','legacy':original.digest,'configured_model':snapshot}))
+    return SemanticRuntime(after,snapshot,identity)
+
+
+async def resolve_semantic_runtime(uid,*,repository=None,target_mode='hermes-cloud-transcript',host_read_budget=None):
+    from ella.services.runtime_resolver import resolve_isolated_runtime
+    budget=host_read_budget or HostReadBudget()
+    runtime=await resolve_isolated_runtime(uid,repository=repository,target_mode=target_mode)
+    return await _augment(runtime,repository=repository,host_read_budget=budget)
+
+
+async def revalidate_semantic_runtime(identity,*,repository=None,host_read_budget=None):
+    runtime=await resolve_semantic_runtime(identity.uid,repository=repository,
+        target_mode=identity.target_mode,host_read_budget=host_read_budget)
+    if semantic_runtime_authority_identity(runtime)!=identity:reject('semantic_configured_model_authority_changed')
+    return runtime

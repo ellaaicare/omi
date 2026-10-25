@@ -1,0 +1,110 @@
+"""Real boundary functions; fake IO leaves, no network/auth/DB/provider."""
+import ast,asyncio,copy,dataclasses,hashlib,importlib.util,json,sys,types,unittest
+from pathlib import Path
+from unittest.mock import patch
+P=Path(__file__).resolve().parents[1];W=P.parent
+
+def load_selected(path,names,ns):
+ tree=ast.parse(path.read_text());nodes=[n for n in tree.body if getattr(n,'name',None) in names];exec(compile(ast.fix_missing_locations(ast.Module(body=ast.parse('from __future__ import annotations').body+nodes,type_ignores=[])),str(path),'exec'),ns);return ns
+
+def fixture_module():
+ path=W/'captured-context-canonical-projection-v1/tests/test_context_records_v21.py';spec=importlib.util.spec_from_file_location('old_records_fixture',path);m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m);return m
+F=fixture_module()
+class Rig:
+ def __init__(self,mutation=None):
+  self.count={'ordinary':0,'model':0,'semantic':0,'source':0,'consent':0,'attempt':0,'records':0};self.mutation=mutation;self.version=1;self.revoked=False;self.consent_revoked=False
+  self.doc=F.document(F.TARGET);self.runtime=types.SimpleNamespace(uid=F.UID,provider='hermes',status='active',revision=1,binding_id='binding',profile_name='profile',agent_id='agent',workspace_root='/synthetic',account_user_id='account',profile_user_id='account')
+  @dataclasses.dataclass(frozen=True)
+  class Identity:uid:str;target_mode:str='hermes-cloud-transcript';digest:str='a'*64
+  self.Identity=Identity
+  async def ordinary(uid,**kw):self.count['ordinary']+=1;return copy.deepcopy(self.runtime)
+  def identity(r):return Identity(r.uid,digest=str(r.revision)*64)
+  async def revalidate(i,**kw):
+   r=await ordinary(i.uid,**kw)
+   if identity(r)!=i:raise ValueError('legacy_identity_changed')
+   return r
+  async def model(**kw):
+   self.count['model']+=1
+   if self.mutation=='during_model':self.runtime.revision+=1
+   return {'policy':'current'}
+  self.ident=identity
+  rr=types.ModuleType('ella.services.runtime_resolver');rr.resolve_isolated_runtime=ordinary;rr.runtime_authority_identity=identity;rr.revalidate_runtime_authority=revalidate;rr.CloudRuntimeAuthorityIdentity=Identity
+  ns={'digest':lambda v:hashlib.sha256(json.dumps(v,sort_keys=True).encode()).hexdigest(),'HostReadBudget':object,'reject':lambda code:(_ for _ in ()).throw(ValueError(code)),'read_model_authority':model,'SemanticRuntime':lambda after,snapshot,i:types.SimpleNamespace(**vars(after),identity=i)}
+  load_selected(P/'candidate/ella/services/semantic_runtime_authority.py',{'_augment','resolve_semantic_runtime'},ns);self.semantic=ns['resolve_semantic_runtime']
+  lifecycle=types.ModuleType('database.normal_account_lifecycle');lifecycle.assert_existing_mapping=lambda *a:None;lifecycle.require_callback_source=lambda *a:None
+  db=types.ModuleType('database._client');db.db=object();budget=types.ModuleType('ella.services.semantic_host_context');budget.HostReadBudget=object
+  self.modules={'ella':types.ModuleType('ella'),'ella.services':types.ModuleType('ella.services'),'ella.services.runtime_resolver':rr,'ella.services.semantic_host_context':budget,'database':types.ModuleType('database'),'database._client':db,'database.normal_account_lifecycle':lifecycle}
+  async def processing(uid):
+   if self.revoked:raise ValueError('processing_revoked')
+  def consent(uid):self.count['consent']+=1;return 'revoked' if self.revoked or self.consent_revoked else uid
+  async def resolve(uid,**kw):self.count['semantic']+=1;return await self.semantic(uid,**kw)
+  def read(uid,cid):
+   self.count['source']+=1
+   if self.mutation=='late_consent':self.consent_revoked=True
+   return {k:self.doc[k] for k in ['id','uid','deleted'] if k in self.doc} if self.doc.get('deleted') else copy.deepcopy(self.doc)
+  ans={'asyncio':asyncio,'json':json,'asdict':dataclasses.asdict,'require_transcript_processing_active':processing,'CONTRACT':'ella-semantic-context-authority-v1','MAX_RESPONSE_BYTES':196608,'RUNTIME_FIELDS':('uid','provider','status','binding_id','revision','profile_name','agent_id','workspace_root','account_user_id','profile_user_id'),'canonical_source_from_conversation':F.CANONICAL.canonical_source_from_conversation,'canonical_source_sha256':F.CANONICAL.canonical_source_sha256,'transcript_source':F.IDENTITY.transcript_source}
+  load_selected(P/'candidate/ella/services/semantic_context_authority.py',{'ContextAuthorityRejected','reject','_read_context_authority_samples','read_context_authority','read_context_authority_sample'},ans)
+  self.kw={'uid':F.UID,'conversation_id':F.TARGET,'read_conversation':read,'consent':consent,'resolve':resolve,'identity':lambda r:r.identity}
+  self.authority_ns=ans
+  self.expected=F.CANONICAL.canonical_source_sha256(F.CANONICAL.canonical_source_from_conversation(uid=F.UID,conversation_id=F.TARGET,conversation=self.doc))
+  self.arguments={'expected_target_source_sha256':self.expected,'expected_runtime_authority_sha256':None,'conversation_ids':[F.OTHER]}
+ async def authority(self,single=True):return await self.authority_ns['read_context_authority_sample' if single else 'read_context_authority'](**self.kw)
+ async def exercise(self):
+  with patch.dict(sys.modules,self.modules):return await self.authority()
+ async def validate_sequence(self,mutation=None):
+  # Real public two-sample authority calls bracket real batch service with its
+  # two single complete authority samples and separate attempt checks.
+  with patch.dict(sys.modules,self.modules):
+   before=await self.authority(single=False);self.arguments['expected_runtime_authority_sha256']=before['runtime_identity']['digest']
+   records={F.OTHER:F.document()};attempt=[1]
+   async def auth(uid,cid):return await self.authority()
+   def att(uid,cid):self.count['attempt']+=1;return str(attempt[0])*64
+   def rec(uid,cids):
+    self.count['records']+=1
+    if mutation=='source':self.doc['structured']['title']='changed'
+    if mutation=='version':self.doc['active_summary_version_id']='changed'
+    if mutation=='owner':self.doc['uid']='foreign'
+    if mutation=='delete':self.doc['deleted']=True
+    if mutation=='consent':self.revoked=True
+    if mutation=='runtime':self.runtime.revision+=1
+    if mutation=='attempt':attempt[0]+=1
+    if mutation=='referenced_owner':records[F.OTHER]['uid']='foreign'
+    if mutation=='referenced_delete':records[F.OTHER]['deleted']=True
+    return records
+   ns={**F.MOD.__dict__};load_selected(P/'candidate/ella/services/semantic_context_records_v2.py',{'read_context_records'},ns)
+   value=await ns['read_context_records'](db=None,uid=F.UID,target_cid=F.TARGET,arguments=self.arguments,dependencies=F.MOD.Dependencies(auth,att,rec))
+   after=await self.authority(single=False)
+   if before!=after:raise ValueError('outer_authority_changed')
+   return value
+class Tests(unittest.IsolatedAsyncioTestCase):
+ async def test_single_complete_sample_count(self):
+  r=Rig();await r.exercise();self.assertEqual(r.count['semantic'],1);self.assertEqual(r.count['ordinary'],2);self.assertEqual(r.count['model'],1)
+ async def test_public_double_sample_contract_retained(self):
+  r=Rig()
+  with patch.dict(sys.modules,r.modules):await r.authority(single=False)
+  self.assertEqual(r.count['semantic'],2);self.assertEqual(r.count['ordinary'],4);self.assertEqual(r.count['model'],2)
+ async def test_actual_composed_batch_counts_and_metadata(self):
+  r=Rig();value=await r.validate_sequence();self.assertEqual(r.count['semantic'],6);self.assertEqual(r.count['ordinary'],12);self.assertEqual(r.count['model'],6);self.assertEqual(r.count['attempt'],2);self.assertEqual(r.count['records'],1);self.assertFalse(value['records'][F.OTHER]['deleted'])
+ async def test_mutation_at_each_boundary_fails(self):
+  for mutation in ['source','version','owner','delete','consent','runtime','attempt','referenced_owner']:
+   with self.subTest(mutation=mutation):
+    r=Rig()
+    with self.assertRaises((ValueError,RuntimeError)):await r.validate_sequence(mutation)
+ async def test_referenced_deletion_stays_explicit_unavailable(self):
+  r=Rig();value=await r.validate_sequence('referenced_delete');self.assertTrue(value['records'][F.OTHER]['deleted'])
+ async def test_during_model_runtime_change_rejected(self):
+  r=Rig('during_model')
+  with self.assertRaisesRegex(ValueError,'legacy_identity_changed'):await r.exercise()
+ async def test_late_consent_after_source_read_rejected(self):
+  r=Rig('late_consent')
+  with self.assertRaisesRegex(ValueError,'context_authority_consent_changed'):await r.exercise()
+ async def test_no_cache_between_calls(self):
+  r=Rig();first=await r.exercise();r.runtime.revision+=1;second=await r.exercise();self.assertNotEqual(first['runtime_identity'],second['runtime_identity']);self.assertEqual(r.count['model'],2)
+ def test_records_only_import_change_no_guard_delta(self):
+  a=ast.parse((P/'baseline/semantic_context_records_v2.py').read_text());b=ast.parse((P/'candidate/ella/services/semantic_context_records_v2.py').read_text())
+  for n in ast.walk(b):
+   if isinstance(n,ast.ImportFrom) and n.module=='ella.services.semantic_context_authority':n.names=[ast.alias(name='read_context_authority')]
+  self.assertEqual(ast.dump(a),ast.dump(b))
+ def test_only_immediate_resolve_calls_private_augment(self):
+  tree=ast.parse((P/'candidate/ella/services/semantic_runtime_authority.py').read_text());f=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='resolve_semantic_runtime');self.assertIsInstance(f.body[-2].value,ast.Await);self.assertEqual(ast.unparse(f.body[-2].value.value.func),'resolve_isolated_runtime');self.assertEqual(ast.unparse(f.body[-1].value.value.func),'_augment')
+if __name__=='__main__':unittest.main()
