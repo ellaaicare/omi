@@ -2,7 +2,7 @@
 Only a source-pinned private reviewed certificate enables this separate branch.
 No import I/O, endpoint, credential access, model call or ordinary-path change.
 """
-from datetime import datetime,timezone
+from datetime import datetime,timezone,timedelta
 from hashlib import sha256
 from google.cloud.firestore_v1 import transactional
 from database import normal_enrichment_activation as activation,normal_account_lifecycle as lifecycle,enrichment_job_isolation as isolation
@@ -45,6 +45,30 @@ def certificate():
 def approved_parent(parent_job_id):
  record=certificate()['record'];need(parent_job_id==record['parent_job_id'],'pregen_parent_not_reviewed')
  return {'cid':record['cid'],'job_sha256':record['job_sha256'],'source_created_at':record['source_created_at']}
+
+def stock_fingerprint(value):
+ """PREGEN-only exact typed DECODED-stock fingerprint; no legacy digest migration.
+ Retains all fractional digits PROVIDED by the existing public SDK/decoder.
+ This does not recover submicroseconds discarded by SDK snapshot copying.
+ Closed scalar/container
+ tags prevent a timestamp being replaced by a lookalike string or dictionary.
+ """
+ from google.api_core.datetime_helpers import DatetimeWithNanoseconds
+ def pack(item):
+  if type(item) is DatetimeWithNanoseconds:
+   need(item.utcoffset()==timedelta(0),'stock_timestamp_utc_required');return ['firestore_timestamp',item.rfc3339()]
+  if type(item) is datetime:
+   need(item.utcoffset()==timedelta(0),'stock_timestamp_utc_required');return ['datetime',item.isoformat(timespec='microseconds')]
+  if item is None:return ['null']
+  if type(item) is bool:return ['bool',item]
+  if type(item) is int:return ['int',item]
+  if type(item) is float:return ['float',item]
+  if type(item) is str:return ['str',item]
+  if type(item) is list:return ['list',[pack(v) for v in item]]
+  if type(item) is dict:
+   need(all(type(k) is str for k in item),'stock_mapping_key');return ['dict',[[k,pack(item[k])] for k in sorted(item)]]
+  need(False,'stock_storage_type')
+ return ns.digest({'contract':'ella-pregen-exact-stock-storage-v1','value':pack(value)})
 
 def need_pregen_source(raw,parent,record):
  need(type(raw) is dict and not any(k in raw for k in ABSENT_FIELDS),'pregen_prior_or_unknown_effect')
@@ -96,7 +120,7 @@ def admit_pregen(tx,db,*,proof,parent_job_id,expected,reviewed_detachment_sha256
  need(lifecycle.digest(tomb)==cert['record']['tombstone_sha256'],'pregen_tombstone_changed')
  stock_id=doc.get('active_summary_version_id');stock=[v for v in doc.get('summary_versions',[]) if type(v) is dict and v.get('id')==stock_id]
  need(len(stock)==1 and stock[0].get('is_active') is True and stock[0].get('source')=='omi' and stock[0].get('kind')=='generated','not_generic_stock')
- stock_sha=ns.digest({k:v for k,v in stock[0].items() if k!='is_active'});need(stock_sha==expected['stock_content']==cert['record']['stock_content_sha256'] and stock_id==cert['record']['stock_version'],'stock_changed')
+ stock_sha=stock_fingerprint({k:v for k,v in stock[0].items() if k!='is_active'});need(stock_sha==expected['stock_content']==cert['record']['stock_content_sha256'] and stock_id==cert['record']['stock_version'],'stock_changed')
  tag=ns.identity(uid=uid,cid=cid,parent_job_id=parent_job_id,parent_job_sha256=pin['job_sha256'],parent_tombstone_sha256=expected['parent_tombstone'],transcript_sha256=transcript,stock_version=stock_id,stock_content_sha256=stock_sha,canonical_source_sha256=source_sha,source_version=source_version,account_epoch=account['epoch'],route_sha256=account['route_sha256'],policy_epoch=policy['epoch'],protocol_revision=protocol_revision)
  _parent(tx,db,tag);_source(tx,db,tag,allow_accepted=False);_current_consent(tx,db,uid)
  jr=db.collection(activation.JOBS).document(tag['job_id']);mr=marker_ref(db,tag);lock=source_lock_ref(db,tag)

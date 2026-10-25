@@ -1,40 +1,31 @@
 {
-  "state": "SOURCE_QUALIFIED_DISABLED_OFFLINE_CANDIDATE_NOT_DEPLOYED",
+  "state": "SOURCE_QUALIFIED_DECODED_STOCK_CANDIDATE_UNBOUND_REPOSITORY_NOT_ACTIVATED",
   "exact_source_sha256": {
-    "candidate/database/saved_source_recovery.py.source": "98c533d96441684e187b3248744b5352c2f5d0d9bee7620f20dd2a9a868867f2",
-    "candidate/database/saved_source_pregen_recovery.py.source": "97605ed07bb90ce3d4d9dfc421dc3bf736f9a66647aca9c78ace631f5a1acd6e",
-    "tests/test_pregen_successor.py.source": "1c5a3c448019ae29b7c1011d958db7b86bf851680e8ae02f0dee105a42f88ea3",
+    "candidate/database/saved_source_recovery.py.source": "eb01a089fe5ba61b06d9ae2703288626e180456799f4d451308e352b3481eb46",
+    "candidate/database/saved_source_pregen_recovery.py.source": "2de3f52cb4385720dea4e88053757e5c5427ee2350c753d1232be01a78e6bae9",
+    "tests/test_pregen_successor.py.source": "6865151e7cd4a84c05cd25a58677b3d517c2e5be2d06ddaac0f64b18bd6e5365",
     "tests/test_pregen_apply_composition.py.source": "9ce5790e1113ad185af2731e9f665dc6d97b6ac1f498fa02f80890d2251677f9",
     "reviewer-tests/test_certificate_loader.py.source": "f980895651335302da532c8c9c2466b33ebd285d0e74579d35801ed6fe157d7c",
     "baseline/database/saved_source_recovery.py.source": "9dffabb2e5bec222673ed0115d971b09eceb82a8f74f89e87878f0c75bde7ea7"
   },
-  "source_freeze_sha256": "b4be08792552d20ac2189c44b76d144e668956259e2cedcdce54a19300a69313",
-  "independent_review_sha256": "6d1ad8d8f21df423387cf01f0d365d4b3a27b7894c2d832ba8dbfbf0b9f581f1",
-  "author_cases": 31,
-  "independently_repeated_cases": 31,
+  "source_freeze_sha256": "7f92e4a0cecfd9b4b45960069083f82f17c4705995dad3b2996344a193739cf7",
+  "independent_review_sha256": "b77efdb24b327440bcc322f31e54129a4da6a70dcf41f9f87458003831eef8e2",
+  "author_cases": 42,
+  "independently_repeated_cases": 42,
   "additional_independent_loader_cases": 5,
   "independent_checks": [
     {
       "command": "python3 -B tests/test_pregen_successor.py",
-      "count": 23,
-      "seconds": 0.086,
+      "count": 34,
       "exit": 0
     },
     {
       "command": "python3 -B tests/test_pregen_apply_composition.py",
       "count": 8,
-      "seconds": 1.523,
       "exit": 0
-    },
-    {
-      "command": "python3 -B reviewer-tests/test_certificate_loader.py -q",
-      "count": 5,
-      "seconds": 0.024,
-      "exit": 0,
-      "scope": "Actual loader functions with disposable synthetic cert and explicit root-stat/spec doubles; not actual root/private-config acceptance."
     }
   ],
-  "private_certificate_created": false,
+  "private_certificate_created": "Not included; repository algorithm remains UNBOUND",
   "certificate_digest": "UNBOUND",
   "live_admissions": 0,
   "model_calls": 0,

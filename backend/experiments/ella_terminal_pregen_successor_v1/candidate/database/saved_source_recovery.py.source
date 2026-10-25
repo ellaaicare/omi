@@ -84,6 +84,12 @@ def _parent(tx,db,tag):
  need(bool(tomb) and lifecycle.digest(tomb)==tag['parent_tombstone_sha256'],'parent_tombstone_changed')
  return p
 
+def _stock_fingerprint(tag,value):
+ if tag.get('protocol_revision')=='ella-terminal-pregen-successor-v1':
+  from database.saved_source_pregen_recovery import stock_fingerprint
+  return stock_fingerprint(value)
+ return ns.digest(value)
+
 def original_source_matches(doc,tag):
  from copy import deepcopy
  from models.hermes_cloud_enrichment_contract import transcript_source
@@ -95,7 +101,7 @@ def original_source_matches(doc,tag):
   if stamp is not None and (not lifecycle.aware(stamp) or stamp>datetime.now(timezone.utc)):return False
  if transcript_source(doc)[1]!=tag['transcript_sha256']:return False
  versions=[v for v in doc.get('summary_versions',[]) if type(v) is dict and v.get('id')==tag['stock_version']]
- if len(versions)!=1 or ns.digest({k:v for k,v in versions[0].items() if k!='is_active'})!=tag['stock_content_sha256']:return False
+ if len(versions)!=1 or _stock_fingerprint(tag,{k:v for k,v in versions[0].items() if k!='is_active'})!=tag['stock_content_sha256']:return False
  original=deepcopy(doc);original['structured']={k:versions[0].get(k) for k in ('title','overview','emoji','category')}
  source=canonical_source_from_conversation(uid=tag['uid'],conversation_id=tag['conversation_id'],conversation=original)
  return canonical_source_sha256(source)==tag['canonical_source_sha256'] and str(source.get('finished_at') or source.get('started_at') or '')==tag['source_version']

@@ -3,7 +3,11 @@ Serialized fake Firestore; source decryption and consent predicate are explicit
 existing harness leaves. No provider, real DB, credentials or live config.
 """
 import ast,copy,hashlib,importlib.util,pathlib,sys,unittest
-W=pathlib.Path(__file__).resolve().parents[3];ROOT=W/'quarantine-recovery-v1/no-completion-successor-v1'
+from google.api_core.datetime_helpers import DatetimeWithNanoseconds
+from google.cloud.firestore_v1.base_document import DocumentSnapshot
+from datetime import timezone,timedelta
+from types import SimpleNamespace
+W=pathlib.Path(__file__).resolve().parents[4];ROOT=W/'quarantine-recovery-v1/no-completion-successor-v1/decoded-stock-v3'
 def load(name,path):
  s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
 M=load('pregen_existing_integration',W/'quarantine-recovery-v1/integration-v3/tests/test_admission_worker.py')
@@ -23,9 +27,10 @@ class Cases(unittest.TestCase):
   attempt=self.h.isolation.attempt(self.parent);fence=self.h.fence.reserve(attempt,claims_open=True,previously_quarantined=False);fence=self.h.fence.begin(fence,attempt,claims_open=True);self.parent[self.h.isolation.FENCE_FIELD]=self.h.fence.finish(fence,attempt,outcome='unknown_quarantined');self.parent['lease_token']=None
   self.db.put((self.h.activation.JOBS,'parent-Q'),self.parent);self.db.put(self.key,self.doc)
   source=self.can.canonical_source_from_conversation(uid='u',conversation_id='c',conversation=self.doc)
-  self.record={'parent_job_id':'parent-Q','cid':'c','job_sha256':self.h.lifecycle.digest(self.parent),'tombstone_sha256':self.h.lifecycle.digest(self.tomb),'source_created_at':str(self.db.collection('users').document('u').collection('conversations').document('c').get().create_time),'canonical_source_sha256':self.can.canonical_source_sha256(source),'source_version':str(source['finished_at']),'transcript_sha256':self.parent['transcript_sha256'],'stock_version':'stock','stock_content_sha256':self.expected['stock_content'],'original_semantic_sha256':self.ns.digest({k:self.doc.get(k) for k in self.ns.FIELDS}),'resource_settlement_receipt_sha256':'9'*64,'original_attempt_sha256':self.ns.digest(self.h.fence._key(attempt)),'reviewed_detachment_sha256':'f'*64,'reviewed_sync_receipts':{'sync_start_receipt_sha256':'a'*64,'sync_completed_receipt_sha256':'b'*64}}
+  self.record={'parent_job_id':'parent-Q','cid':'c','job_sha256':self.h.lifecycle.digest(self.parent),'tombstone_sha256':self.h.lifecycle.digest(self.tomb),'source_created_at':str(self.db.collection('users').document('u').collection('conversations').document('c').get().create_time),'canonical_source_sha256':self.can.canonical_source_sha256(source),'source_version':str(source['finished_at']),'transcript_sha256':self.parent['transcript_sha256'],'stock_version':'stock','stock_content_sha256':self.pregen.stock_fingerprint({k:v for k,v in self.doc['summary_versions'][0].items() if k!='is_active'}),'original_semantic_sha256':self.ns.digest({k:self.doc.get(k) for k in self.ns.FIELDS}),'resource_settlement_receipt_sha256':'9'*64,'original_attempt_sha256':self.ns.digest(self.h.fence._key(attempt)),'reviewed_detachment_sha256':'f'*64,'reviewed_sync_receipts':{'sync_start_receipt_sha256':'a'*64,'sync_completed_receipt_sha256':'b'*64}}
   self.cert={'contract':self.pregen.PROTOCOL,'owner_sha256':hashlib.sha256(b'u').hexdigest(),'record':self.record}
   self.pregen.certificate=lambda:copy.deepcopy(self.cert)
+  self.expected['stock_content']=self.record['stock_content_sha256']
   self.expected.update(source=self.h.lifecycle.digest(self.doc),parent_job=self.record['job_sha256'])
  def admit(self):return self.pregen.admit_pregen(self.db.transaction(),self.db,proof=self.proof,parent_job_id='parent-Q',expected=self.expected,reviewed_detachment_sha256='f'*64,protocol_revision=self.pregen.PROTOCOL,now=M.H.h.NOW,reviewed_sync_receipts=self.record['reviewed_sync_receipts'])
  def mutate(self,fn):
@@ -132,6 +137,7 @@ class Cases(unittest.TestCase):
   self.db.put(self.key,doc);self.expected['source']=self.h.lifecycle.digest(doc)
   self.r.approved_parents=lambda:{'parent-Q':{'cid':'c','job_sha256':self.record['job_sha256'],'source_created_at':self.record['source_created_at']}}
   self.pregen.certificate=self.original_certificate
+  self.expected['stock_content']=self.ns.digest({k:v for k,v in self.doc['summary_versions'][0].items() if k!='is_active'})
   result=self.r.admit(self.db.transaction(),self.db,proof=self.proof,parent_job_id='parent-Q',expected=self.expected,reviewed_detachment_sha256='f'*64,protocol_revision='existing-completed-protocol',now=M.H.h.NOW,reviewed_sync_receipts=self.record['reviewed_sync_receipts'])
   self.assertTrue(result['parent_preserved'])
  def test_unchanged_resource_settlement_once_then_repeat_rejects(self):
@@ -145,6 +151,48 @@ class Cases(unittest.TestCase):
   self.assertEqual(result['job_writes'],0);self.assertEqual(h.db.rows[(h.activation.JOBS,job['job_id'])],before);after=copy.deepcopy(h.db.rows)
   with self.assertRaises(Exception):h.transition.settle_resource(h.db.transaction(),h.db,proof=proof,expected_policy_sha256=h.lifecycle.digest(h.activation.read_policy(h.db)),now=M.H.h.NOW)
   self.assertEqual(h.db.rows,after)
+ def timestamp_stock(self):
+  self.doc['summary_versions'][0]['created_at']=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T13:30:22.123456000Z')
+  self.db.put(self.key,self.doc);self.expected['source']=self.h.lifecycle.digest(self.doc)
+  value={k:v for k,v in self.doc['summary_versions'][0].items() if k!='is_active'};self.record['stock_content_sha256']=self.pregen.stock_fingerprint(value);self.expected['stock_content']=self.record['stock_content_sha256']
+ def test_actual_sdk_stock_timestamp_admit_claim_callback(self):
+  self.timestamp_stock();job=self.start();self.assertEqual(self.r.current_host_context(self.db,'u','c')['job_id'],job['job_id'])
+ def test_baseline_strict_ns_rejects_real_sdk_timestamp(self):
+  self.timestamp_stock();value={k:v for k,v in self.doc['summary_versions'][0].items() if k!='is_active'}
+  with self.assertRaises(TypeError):self.ns.digest(value)
+ def test_decoded_stock_timestamp_edit_rejected_after_begin(self):
+  self.timestamp_stock();self.start();raw=self.db.rows[self.key];old=raw['summary_versions'][0]['created_at'];new=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T13:30:22.123457000Z');self.assertNotEqual(str(old),str(new));raw['summary_versions'][0]['created_at']=new;self.db.put(self.key,raw)
+  with self.assertRaises(Exception):self.r.current_host_context(self.db,'u','c')
+ def test_precise_nested_stock_timestamp_deterministic(self):
+  a={'nested':{'created_at':DatetimeWithNanoseconds.from_rfc3339('2026-10-25T13:30:22.123456789Z')},'text':'fictional Ω'};b=copy.deepcopy(a)
+  self.assertEqual(self.pregen.stock_fingerprint(a),self.pregen.stock_fingerprint(a));self.assertNotEqual(a['nested']['created_at'].rfc3339(),b['nested']['created_at'].rfc3339());b['nested']['created_at']=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T13:30:22.123456788Z');self.assertNotEqual(self.pregen.stock_fingerprint(a),self.pregen.stock_fingerprint(b))
+ def test_timestamp_string_or_dictionary_cannot_impersonate_type(self):
+  value=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T13:30:22.123456789Z')
+  for other in [value.rfc3339(),['firestore_timestamp',value.rfc3339()],{'timestamp':value.rfc3339()}]:self.assertNotEqual(self.pregen.stock_fingerprint(value),self.pregen.stock_fingerprint(other))
+ def test_legacy_stock_fingerprints_are_unchanged(self):
+  value={'title':'fictional Ω','emoji':'🌱'};self.assertEqual(self.r._stock_fingerprint({'protocol_revision':'old-completed'},value),self.ns.digest(value));self.assertNotEqual(self.r._stock_fingerprint({'protocol_revision':self.pregen.PROTOCOL},value),self.ns.digest(value))
+ def test_unknown_storage_types_or_naive_datetime_rejected(self):
+  from datetime import datetime
+  for value in [object(),b'unknown',datetime(2026,10,25)]:
+   with self.assertRaises(ValueError):self.pregen.stock_fingerprint(value)
+ def test_nested_retained_timestamp_stays_strictly_unsupported_not_lossy(self):
+  raw=copy.deepcopy(self.doc);raw['semantic_retained_completion_jobs_v1']['old-start']['canonical_user']['timestamp']=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T13:30:22.123456789Z')
+  with self.assertRaises(TypeError):self.pregen.need_pregen_source(raw,self.parent,self.record)
+ def test_readback_stock_active_flag_change_preserves_exact_fingerprint(self):
+  value={'created_at':DatetimeWithNanoseconds.from_rfc3339('2026-10-25T13:30:22.123456789Z'),'overview':'fictional Ω','is_active':True}
+  before=self.pregen.stock_fingerprint({k:v for k,v in value.items() if k!='is_active'});value['is_active']=False;self.assertEqual(before,self.pregen.stock_fingerprint({k:v for k,v in value.items() if k!='is_active'}));value['created_at']=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T13:30:22.123456788Z');self.assertNotEqual(before,self.pregen.stock_fingerprint({k:v for k,v in value.items() if k!='is_active'}))
+ def test_offset_collision_is_rejected_before_fingerprinting(self):
+  utc=DatetimeWithNanoseconds(2026,10,25,13,30,22,nanosecond=123456789,tzinfo=timezone.utc)
+  offset=DatetimeWithNanoseconds(2026,10,25,13,30,22,nanosecond=123456789,tzinfo=timezone(timedelta(hours=1)))
+  self.assertEqual(utc.rfc3339(),offset.rfc3339());self.assertNotEqual(utc.timestamp(),offset.timestamp())
+  with self.assertRaisesRegex(ValueError,'stock_timestamp_utc_required'):self.pregen.stock_fingerprint(offset)
+  self.assertEqual(self.pregen.stock_fingerprint(utc),self.pregen.stock_fingerprint(utc))
+ def test_actual_sdk_snapshot_precision_loss_is_an_explicit_limit(self):
+  # This observes an existing public SDK limit, NOT a raw-storage freshness pass.
+  original=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T13:30:22.123456789Z')
+  snapshot=DocumentSnapshot(reference=SimpleNamespace(path='synthetic/source'),data={'created_at':original},exists=True,read_time=None,create_time=None,update_time=None)
+  provided=snapshot.to_dict()['created_at'];self.assertNotEqual(original.rfc3339(),provided.rfc3339());self.assertEqual(provided.nanosecond,0)
+  self.assertNotEqual(self.pregen.stock_fingerprint(original),self.pregen.stock_fingerprint(provided))
  def test_original_completed_admission_function_unchanged(self):
   original=ast.parse((W/'quarantine-recovery-v1/integration-v3/candidate/database/saved_source_recovery.py').read_text());candidate=ast.parse((ROOT/'candidate/database/saved_source_recovery.py').read_text())
   for name in ['admit','approved_parents','eligible','tag_of','_current_host_context']:
