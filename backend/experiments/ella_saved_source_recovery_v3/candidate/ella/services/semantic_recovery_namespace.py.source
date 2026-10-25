@@ -1,0 +1,142 @@
+"""Private recovery-state isolation; only selected by the trusted worker hook.
+The DB callback must prove the real admission+worker attempt in the SAME transaction.
+No fallback to normal state is permitted for a malformed recovery selection.
+"""
+from copy import deepcopy
+import hashlib,json,re
+CONTRACT='ella-saved-source-recovery-v1'
+ROOT='semantic_saved_source_recoveries_v1'
+FIELDS=frozenset({'semantic_publication_policy','semantic_producer_executions_v1','semantic_publication_operations','semantic_publication_receipts','semantic_retained_completion_jobs_v1','semantic_learning_policy_v3','semantic_learning_operations_v3','semantic_learning_receipts_v3'})
+IDENTITY=frozenset({'contract','recovery_id','job_id','parent_job_id','parent_job_sha256','parent_tombstone_sha256','uid','conversation_id','transcript_sha256','stock_version','stock_content_sha256','canonical_source_sha256','source_version','account_epoch','route_sha256','policy_epoch','protocol_revision'})
+def digest(value):return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+def need(value,code):
+ if not value:raise ValueError('recovery_'+code)
+def identity(*,uid,cid,parent_job_id,parent_job_sha256,parent_tombstone_sha256,transcript_sha256,stock_version,stock_content_sha256,canonical_source_sha256,source_version,account_epoch,route_sha256,policy_epoch,protocol_revision):
+ value={'contract':CONTRACT,'uid':uid,'conversation_id':cid,'parent_job_id':parent_job_id,'parent_job_sha256':parent_job_sha256,'parent_tombstone_sha256':parent_tombstone_sha256,'transcript_sha256':transcript_sha256,'stock_version':stock_version,'stock_content_sha256':stock_content_sha256,'canonical_source_sha256':canonical_source_sha256,'source_version':source_version,'account_epoch':account_epoch,'route_sha256':route_sha256,'policy_epoch':policy_epoch,'protocol_revision':protocol_revision}
+ need(all(type(v) is str and v and len(v)<=512 for v in value.values()),'identity_shape')
+ for k in ['parent_job_sha256','parent_tombstone_sha256','transcript_sha256','stock_content_sha256','canonical_source_sha256','route_sha256']:need(re.fullmatch('[0-9a-f]{64}',value[k]),'identity_hash')
+ rid=digest({'domain':CONTRACT,'binding':value});value.update(recovery_id=rid,job_id='hcer_'+rid)
+ return value
+
+def validate_identity(value):
+ need(type(value) is dict and set(value)==IDENTITY,'identity_shape')
+ wanted=identity(**{'cid' if k=='conversation_id' else k:v for k,v in value.items() if k not in {'contract','recovery_id','job_id'}})
+ need(value==wanted,'identity_changed')
+ return value
+
+def validate_selection(conversation,*,admission,worker_job,attempt_key):
+ """Structural cross-binding only; never substitutes for live DB graph/consent proof."""
+ validate_identity(admission)
+ need(type(worker_job) is dict and type(attempt_key) is dict,'worker_required')
+ need(worker_job.get('saved_source_recovery_admission')==admission,'worker_admission_changed')
+ for k in ['uid','conversation_id','job_id','transcript_sha256']:need(worker_job.get(k)==admission[k] and attempt_key.get(k)==admission[k],'worker_identity_changed')
+ need(type(worker_job.get('client_interaction_id')) is str and bool(worker_job['client_interaction_id']) and attempt_key.get('client_interaction_id')==worker_job['client_interaction_id'],'client_interaction_changed')
+ need(worker_job.get('admission_epoch')==admission['policy_epoch'],'policy_epoch_changed')
+ need(type(attempt_key.get('attempt')) is int and type(worker_job.get('attempt_count')) is int and worker_job['attempt_count']>=1 and attempt_key.get('attempt')==worker_job['attempt_count'],'attempt_changed')
+ lease=worker_job.get('lease_token');need(type(lease) is str and bool(lease) and attempt_key.get('lease_sha256')==hashlib.sha256(lease.encode()).hexdigest(),'lease_changed')
+ need(attempt_key.get('route_sha256')==admission['route_sha256'],'route_changed')
+ need(type(conversation) is dict and conversation.get('uid')==admission['uid'] and conversation.get('id')==admission['conversation_id'] and conversation.get('status')=='completed' and not any(conversation.get(k) for k in ['deleted','discarded','is_locked']),'source_unavailable')
+ need(conversation.get('active_summary_version_id')==admission['stock_version'] or accepted_postimage(conversation,admission=admission),'stock_version_changed')
+ # Semantic stock/source hashes require existing canonical and transcript helpers
+ # in the actual admission/transaction guard; this pure core does not invent them.
+ spaces=conversation.get(ROOT,{});need(type(spaces) is dict and len(spaces)<=16,'namespace_map_invalid')
+ record=spaces.get(admission['recovery_id']);need(type(record) is dict and set(record)=={'identity','state'} and record.get('identity')==admission and type(record.get('state')) is dict and set(record['state'])<=FIELDS,'namespace_unavailable')
+ return record
+
+def fresh_namespace(conversation,*,admission):
+ """Plan an additive namespace only; no DB write or dispatch occurs here."""
+ validate_identity(admission);need(conversation.get('uid')==admission['uid'] and conversation.get('id')==admission['conversation_id'],'source_owner_changed')
+ spaces=conversation.get(ROOT,{});need(type(spaces) is dict and len(spaces)<16,'namespace_capacity')
+ need(admission['recovery_id'] not in spaces,'already_admitted_no_rearm')
+ return {'identity':deepcopy(admission),'state':{}}
+
+def view(conversation,*,admission,worker_job,attempt_key):
+ selected=validate_selection(conversation,admission=admission,worker_job=worker_job,attempt_key=attempt_key)
+ result=deepcopy(conversation)
+ for key in FIELDS:result.pop(key,None)
+ result.update(deepcopy(selected['state']))
+ return result
+
+def semantic_update(conversation,update,*,admission,worker_job,attempt_key):
+ """Translate closed semantic-field updates to ONE namespace; never root CAS writes.
+Actual final summary/version/accepted-CAS effects stay with the existing writer.
+"""
+ record=validate_selection(conversation,admission=admission,worker_job=worker_job,attempt_key=attempt_key)
+ need(type(update) is dict and bool(update) and set(update)<=FIELDS,'nonsemantic_update_forbidden')
+ need(all(type(k) is str and '.' not in k for k in update),'field_path_forbidden')
+ state={**deepcopy(record['state']),**deepcopy(update)}
+ # Return one exact field path. The actual DB adapter must use transaction.update
+ # and must revalidate admission/attempt/raw preimages in that same callback.
+ return {ROOT+'.'+admission['recovery_id']+'.state':state}
+
+
+def accepted_postimage(conversation,*,admission):
+ """Recognize exact namespace request, not authorize a new CAS or reconciliation.
+ The actual existing writer replay classifier must still validate its postimage.
+ """
+ spaces=conversation.get(ROOT,{})
+ if type(spaces) is not dict:return False
+ record=spaces.get(admission['recovery_id'])
+ if type(record) is not dict or record.get('identity')!=admission:return False
+ state=record.get('state');accepted=conversation.get('summary_writeback_receipt')
+ if type(state) is not dict or type(accepted) is not dict:return False
+ if accepted.get('status') not in {'pending_reconciliation','completed'}:return False
+ if accepted.get('source_sha256')!=admission['canonical_source_sha256'] or accepted.get('source_version')!=admission['source_version']:return False
+ if accepted.get('active_summary_version_id')!=conversation.get('active_summary_version_id') or not accepted.get('active_summary_version_id') or accepted['active_summary_version_id']==admission['stock_version']:return False
+ pubs=state.get('semantic_publication_receipts',{});entries=state.get('semantic_retained_completion_jobs_v1',{})
+ if type(pubs) is not dict or type(entries) is not dict:return False
+ receipt_id=accepted.get('semantic_publication_receipt_id');publication=pubs.get(receipt_id)
+ if type(publication) is not dict or publication.get('contract')!='ella-semantic-publication-v1':return False
+ binding=publication.get('binding')
+ if type(binding) is not dict or any(binding.get(k)!=v for k,v in {'uid':admission['uid'],'conversation_id':admission['conversation_id'],'transcript_sha256':admission['transcript_sha256'],'active_summary_version_id':admission['stock_version'],'source_sha256':admission['canonical_source_sha256'],'source_version':admission['source_version']}.items()):return False
+ proposals=[v.get('proposal') for v in entries.values() if type(v) is dict and v.get('status') in {'proposed','completed'} and v.get('transcript')==admission['transcript_sha256'] and type(v.get('proposal')) is dict and v['proposal'].get('publication_receipt_id')==receipt_id]
+ if len(proposals)!=1:return False
+ proposal=proposals[0];base={'publication_receipt_id','policy','policy_revision','candidate_schema_version','summary','candidate_sha256'}
+ if set(proposal)!=base|{'semantic_contract_version'} or type(proposal.get('semantic_contract_version')) is not int or proposal['semantic_contract_version']!=2 or type(proposal.get('candidate_schema_version')) is not int or proposal['candidate_schema_version']!=2:return False
+ raw=proposal.get('summary')
+ if proposal.get('policy')!='ella-semantic-summary-v1' or proposal.get('policy_revision')!=binding.get('policy_revision') or type(raw) is not dict or set(raw)!={'title','overview','emoji','category'} or any(type(v) is not str for v in raw.values()):return False
+ if digest(raw)!=proposal.get('candidate_sha256') or digest(raw)!=publication.get('candidate_sha256'):return False
+ payload={'domain':'ella-retained-semantic-apply-v1','binding':deepcopy(binding),'receipt_id':receipt_id,'candidate':deepcopy(raw),'schema_version':2,'semantic_contract_version':2}
+ ph=digest(payload)
+ return accepted.get('payload_sha256')==ph and accepted.get('token')=='semantic-apply-'+ph
+
+
+ROOT_WRITE_FIELDS=frozenset({'structured.title','structured.overview','structured.emoji','structured.category','summary_versions','active_summary_version_id','summary_writeback_receipt','enrichment_state','internal_assessment','ella_tags','ella_signal','canonical_summary_publication_sequence','canonical_summary_publication_sha256'})
+def current_job(uid,cid):
+ from database.normal_future_source_disposition import _worker_job
+ from database.saved_source_recovery import TAG,tag_of
+ job=_worker_job.get()
+ if type(job) is not dict or TAG not in job:return None
+ tag=tag_of(job)
+ if (uid,cid)!=(tag['uid'],tag['conversation_id']):return None
+ return job
+
+def project_if_recovery(conversation,uid):
+ if type(conversation) is not dict:return conversation
+ job=current_job(uid,conversation.get('id'))
+ if job is None:return conversation
+ from database import enrichment_job_isolation as isolation,enrichment_attempt_fence as fence
+ tag=job['saved_source_recovery_admission'];key=fence._key(isolation.attempt(job))
+ return view(conversation,admission=tag,worker_job=job,attempt_key=key)
+
+def translate_if_recovery(raw,update,uid,cid):
+ job=current_job(uid,cid)
+ if job is None:return update
+ from database import enrichment_job_isolation as isolation,enrichment_attempt_fence as fence
+ tag=job['saved_source_recovery_admission'];key=fence._key(isolation.attempt(job))
+ validate_selection(raw,admission=tag,worker_job=job,attempt_key=key)
+ need(type(update) is dict and set(update)<=FIELDS|ROOT_WRITE_FIELDS,'write_field_forbidden')
+ semantic={k:v for k,v in update.items() if k in FIELDS};root={k:deepcopy(v) for k,v in update.items() if k not in FIELDS}
+ if semantic:root.update(semantic_update(raw,semantic,admission=tag,worker_job=job,attempt_key=key))
+ return root
+
+def accepted_readback_view(conversation,*,uid,cid,recovery_id):
+ """Read-only explicit current accepted namespace. Caller retains scoped auth."""
+ need(type(conversation) is dict and conversation.get('uid')==uid and conversation.get('id')==cid,'readback_owner_changed')
+ spaces=conversation.get(ROOT,{});need(type(spaces) is dict,'namespace_map_invalid')
+ record=spaces.get(recovery_id);need(type(record) is dict,'namespace_unavailable');tag=record.get('identity');validate_identity(tag)
+ need((tag['uid'],tag['conversation_id'],tag['recovery_id'])==(uid,cid,recovery_id) and accepted_postimage(conversation,admission=tag),'accepted_namespace_unproved')
+ result=deepcopy(conversation)
+ for k in FIELDS:result.pop(k,None)
+ result.update(deepcopy(record['state']))
+ return result

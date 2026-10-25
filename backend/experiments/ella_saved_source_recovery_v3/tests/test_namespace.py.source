@@ -1,0 +1,55 @@
+import copy,hashlib,importlib.util,unittest
+from pathlib import Path
+p=Path(__file__).resolve().parents[1]/'candidate/ella/services/semantic_recovery_namespace.py';s=importlib.util.spec_from_file_location('namespace_core',p);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+class Cases(unittest.TestCase):
+ def setUp(self):
+  self.a=m.identity(uid='u',cid='c',parent_job_id='Q',parent_job_sha256='a'*64,parent_tombstone_sha256='b'*64,transcript_sha256='c'*64,stock_version='stock',stock_content_sha256='d'*64,canonical_source_sha256='e'*64,source_version='sourceversion',account_epoch='account',route_sha256='f'*64,policy_epoch='policy',protocol_revision='reviewed-revision')
+  self.doc={'uid':'u','id':'c','status':'completed','active_summary_version_id':'stock','structured':{'title':'original'},'semantic_producer_executions_v1':{'oldQ':{'result':'preserved'}},'semantic_publication_policy':{'old':'preserved'}}
+  self.doc[m.ROOT]={self.a['recovery_id']:m.fresh_namespace(self.doc,admission=self.a)}
+  self.job={'uid':'u','conversation_id':'c','job_id':self.a['job_id'],'transcript_sha256':'c'*64,'admission_epoch':'policy','saved_source_recovery_admission':copy.deepcopy(self.a),'client_interaction_id':'client','attempt_count':1,'lease_token':'lease'}
+  self.key={k:self.job[k] for k in ['uid','conversation_id','job_id','transcript_sha256','client_interaction_id']};self.key.update(attempt=1,lease_sha256=hashlib.sha256(b'lease').hexdigest(),route_sha256='f'*64)
+ def args(self):return {'admission':self.a,'worker_job':self.job,'attempt_key':self.key}
+ def test_fresh_view_preserves_originals(self):
+  before=copy.deepcopy(self.doc);v=m.view(self.doc,**self.args());self.assertNotIn('semantic_publication_policy',v);self.assertNotIn('semantic_producer_executions_v1',v);self.assertEqual(v['structured'],before['structured']);self.assertEqual(self.doc,before)
+ def test_update_only_new_namespace(self):
+  before=copy.deepcopy(self.doc);u=m.semantic_update(self.doc,{'semantic_producer_executions_v1':{'new':{'status':'started'}}},**self.args());self.assertEqual(set(u),{m.ROOT+'.'+self.a['recovery_id']+'.state'});self.assertEqual(self.doc,before)
+ def test_idempotent_identity_distinct_from_parent(self):self.assertNotEqual(self.a['job_id'],'Q');self.assertEqual(m.validate_identity(copy.deepcopy(self.a)),self.a)
+ def test_cross_owner_source_worker_rejected(self):
+  for k in ['uid','conversation_id','job_id','transcript_sha256','client_interaction_id']:
+   old=self.job[k];self.job[k]='foreign'
+   with self.assertRaises(ValueError):m.view(self.doc,**self.args())
+   self.job[k]=old
+ def test_stale_lease_or_attempt_rejected(self):
+  for k in ['lease_sha256','attempt','route_sha256']:
+   old=self.key[k];self.key[k]='foreign'
+   with self.assertRaises(ValueError):m.view(self.doc,**self.args())
+   self.key[k]=old
+ def test_body_selected_namespace_fails_exact_worker_join(self):
+  a=copy.deepcopy(self.a);a['recovery_id']='a'*64
+  with self.assertRaises(ValueError):m.view(self.doc,admission=a,worker_job=self.job,attempt_key=self.key)
+ def test_deleted_edited_stock_rejects(self):
+  for k,v in [('deleted',True),('active_summary_version_id','other'),('uid','foreign')]:
+   old=copy.deepcopy(self.doc);self.doc[k]=v
+   with self.assertRaises(ValueError):m.view(self.doc,**self.args())
+   self.doc=old
+ def test_duplicate_namespace_does_not_rearm(self):
+  with self.assertRaisesRegex(ValueError,'already_admitted'):m.fresh_namespace(self.doc,admission=self.a)
+ def test_original_map_write_or_summary_cas_forbidden(self):
+  for k in ['uid','structured','summary_writeback_receipt',m.ROOT,'semantic_publication_policy.unsafe']:
+   with self.assertRaises(ValueError):m.semantic_update(self.doc,{k:{}},**self.args())
+ def test_foreign_namespace_identity_rejected(self):
+  self.doc[m.ROOT][self.a['recovery_id']]['identity']['parent_job_sha256']='f'*64
+  with self.assertRaises(ValueError):m.view(self.doc,**self.args())
+ def test_existing_state_projected_exactly(self):
+  self.doc[m.ROOT][self.a['recovery_id']]['state']={'semantic_publication_policy':{'new':'policy'}};self.assertEqual(m.view(self.doc,**self.args())['semantic_publication_policy'],{'new':'policy'});self.assertEqual(self.doc['semantic_publication_policy'],{'old':'preserved'})
+ def test_client_interaction_mismatch_rejects(self):
+  self.key['client_interaction_id']='foreign'
+  with self.assertRaisesRegex(ValueError,'client_interaction_changed'):m.view(self.doc,**self.args())
+ def test_boolean_attempt_rejects(self):
+  self.key['attempt']=True
+  with self.assertRaisesRegex(ValueError,'attempt_changed'):m.view(self.doc,**self.args())
+ def test_explicit_malformed_namespace_not_absence(self):
+  for value in [None,[],False]:
+   self.doc[m.ROOT]=value
+   with self.assertRaises(ValueError):m.fresh_namespace(self.doc,admission=self.a)
+if __name__=='__main__':unittest.main()

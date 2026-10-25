@@ -1,0 +1,45 @@
+"""Actual async authority sampler; authenticated registry/DB/RPC leaves synthetic."""
+import asyncio,copy,importlib.util,sys,types,unittest
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+D=Path(__file__).resolve().parents[1];W=D.parents[1]
+def module(name,**kw):
+ m=types.ModuleType(name);m.__dict__.update(kw);return m
+def load(name,p):
+ s=importlib.util.spec_from_file_location(name,p);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+@dataclass
+class Identity:uid:str;target_mode:str;digest:str
+class Tests(unittest.TestCase):
+ def setUp(self):
+  self.uid='fictional-owner';self.cid='fictional-source';self.calls=0;self.value=None
+  can=load('ella.services.canonical_summary_source',W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/ella/services/canonical_summary_source.py')
+  model=load('models.hermes_cloud_enrichment_contract',W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/models/hermes_cloud_enrichment_contract.py')
+  self.doc={'uid':self.uid,'id':self.cid,'status':'completed','active_summary_version_id':'stock','started_at':'2026-01-01T00:00:00Z','finished_at':'2026-01-01T00:01:00Z','structured':{'title':'fictional','overview':'fictional','emoji':'x','category':'other'},'transcript_segments':[{'text':'fictional source'}]}
+  self.can=can
+  async def nohold(uid):return None
+  def callback(db,uid,cid,doc):self.calls+=1;return copy.deepcopy(self.value)
+  self.mods={'database._client':module('database._client',db=object()),'database.normal_account_lifecycle':module('database.normal_account_lifecycle',assert_existing_mapping=lambda *a:None,require_callback_source=callback),'ella.services.transcript_processing_hold':module('ella.services.transcript_processing_hold',require_transcript_processing_active=nohold),'ella.services.semantic_host_context':module('ella.services.semantic_host_context',HostReadBudget=type('Budget',(),{}))}
+  self.p=patch.dict(sys.modules,self.mods);self.p.start();self.addCleanup(self.p.stop)
+  self.authority=load('actual_recovery_authority_sampler',D/'candidate/ella/services/semantic_context_authority.py')
+  self.runtime=SimpleNamespace(uid=self.uid,provider='hermes',status='active',binding_id='binding',revision=2,profile_name='profile',agent_id='agent',workspace_root='/synthetic',account_user_id='account',profile_user_id='account')
+ async def resolve(self,*a,**kw):return self.runtime
+ def read(self):return asyncio.run(self.authority.read_context_authority(uid=self.uid,conversation_id=self.cid,read_conversation=lambda *a:copy.deepcopy(self.doc),consent=lambda uid:uid,resolve=self.resolve,identity=lambda runtime:Identity(self.uid,'hermes-cloud-transcript','a'*64)))
+ def descriptor(self):
+  source=self.can.canonical_source_from_conversation(uid=self.uid,conversation_id=self.cid,conversation=self.doc)
+  return {'source_sha256':self.can.canonical_source_sha256(source),'stock_version':'stock','source_version':str(source['finished_at']),'contract':'ella-server-recovery-context-v1','uid':self.uid,'conversation_id':self.cid,'recovery_id':'1'*64,'job_id':'hcer_'+'1'*64,'parent_job_sha256':'2'*64,'attempt_scope_sha256':'3'*64,'reviewed_detachment_sha256':'4'*64,'sync_start_receipt_sha256':'5'*64,'sync_completed_receipt_sha256':'6'*64}
+ def test_normal_response_exact_original_closed_keys(self):
+  out=self.read();self.assertEqual(set(out),{'contract','uid','conversation_id','canonical_source','source_sha256','transcript_sha256','source_version','active_summary_version_id','runtime','runtime_identity'});self.assertEqual(self.calls,2)
+ def test_server_callback_descriptor_sampled_twice_not_body_flag(self):
+  self.value=self.descriptor();out=self.read();self.assertEqual(out['recovery_context'],self.value);self.assertEqual(self.calls,2)
+ def test_source_version_mismatch_rejects(self):
+  self.value=self.descriptor();self.value['source_version']='changed'
+  with self.assertRaises(self.authority.ContextAuthorityRejected):self.read()
+ def test_stock_version_mismatch_rejects(self):
+  self.value=self.descriptor();self.value['stock_version']='changed'
+  with self.assertRaises(self.authority.ContextAuthorityRejected):self.read()
+ def test_callback_revocation_never_emits_descriptor(self):
+  self.mods['database.normal_account_lifecycle'].require_callback_source=lambda *a:(_ for _ in ()).throw(ValueError('current-consent-revoked'))
+  with self.assertRaisesRegex(ValueError,'current-consent'):self.read()
+if __name__=='__main__':unittest.main()

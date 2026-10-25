@@ -1,0 +1,360 @@
+"""Unwired internal workspace-host sync operation. No HTTP route or credential reader.
+
+Authority/source callbacks MUST be server-owned adapters, never request verdicts.
+Absent full runtime authority fails closed. Journals contain receipts, not context.
+"""
+from __future__ import annotations
+import asyncio
+import hashlib
+import json
+import os
+import stat
+import fcntl
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from semantic_context_snapshot import hydrate_owned_workspace
+
+MAX_RECEIPT = 16384
+MAX_TRANSPORT = 196608
+MAX_JOURNAL_FILES = 128
+
+
+class SyncHold(ValueError):
+    pass
+
+
+def encode(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+
+
+def digest(value):
+    return hashlib.sha256(encode(value)).hexdigest()
+
+
+def record_name(key, suffix):
+    if (not isinstance(key, str) or len(key) != 64 or any(c not in '0123456789abcdef' for c in key)
+            or suffix not in {'start', 'completed'}):
+        raise SyncHold('journal_record_name_invalid')
+    return key + '.' + suffix + '.json'
+
+
+def unique_pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise SyncHold('journal_duplicate_key')
+        result[key] = value
+    return result
+
+
+def require_authority_adapter(*args, **kwargs):
+    raise SyncHold('full_runtime_authority_adapter_unconfigured')
+
+
+@dataclass(frozen=True)
+class Authority:
+    # Created ONLY from server-verified registry + backend full runtime + consent.
+    runtime: object
+    identity: object
+    registry_revision: str
+    source_sha256: str
+    recovery_context: object = None
+
+
+class Journal:
+    """Existing private directory, anchored nofollow; exclusive immutable records."""
+    def __init__(self, root):
+        parts = PurePosixPath(str(root)).parts
+        if not parts or parts[0] != '/' or '..' in parts:
+            raise SyncHold('journal_path_invalid')
+        fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in parts[1:]:
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd); fd = nxt
+            s = os.fstat(fd)
+            if s.st_uid != os.geteuid() or stat.S_IMODE(s.st_mode) != 0o700:
+                raise SyncHold('journal_directory_unsafe')
+            self.fd, self.root, self.identity = fd, str(root), (s.st_dev, s.st_ino)
+        except BaseException:
+            os.close(fd); raise
+
+    def close(self):
+        os.close(self.fd)
+
+    def check(self):
+        # Reopen the whole path so a renamed/replaced ancestor cannot be ignored.
+        other = Journal(self.root)
+        try:
+            if other.identity != self.identity:
+                raise SyncHold('journal_directory_replaced')
+        finally:
+            other.close()
+
+    @contextmanager
+    def _publish_lock(self):
+        self.check()
+        try:
+            fd = os.open('publish.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600, dir_fd=self.fd)
+        except OSError as exc:
+            raise SyncHold('journal_publish_lock_unavailable') from exc
+        try:
+            captured = os.fstat(fd)
+            if (not stat.S_ISREG(captured.st_mode) or captured.st_uid != os.geteuid()
+                    or stat.S_IMODE(captured.st_mode) != 0o600 or captured.st_nlink != 1):
+                raise SyncHold('journal_publish_lock_unsafe')
+            # Nonblocking: another publisher causes HOLD rather than an unbounded
+            # event-loop flock wait. Caller never retries automatically.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise SyncHold('journal_publish_busy') from exc
+            current = os.stat('publish.lock', dir_fd=self.fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (captured.st_dev, captured.st_ino):
+                raise SyncHold('journal_publish_lock_replaced')
+            self.check()
+            yield
+            current = os.stat('publish.lock', dir_fd=self.fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (captured.st_dev, captured.st_ino):
+                raise SyncHold('journal_publish_lock_replaced')
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN); os.close(fd)
+
+    def read(self, key, suffix, *, _with_digest=False):
+        self.check()
+        name = record_name(key, suffix)
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
+        except FileNotFoundError:
+            return None
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                    or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1):
+                raise SyncHold('journal_record_unsafe')
+            data = os.read(fd, MAX_RECEIPT + 1)
+            after = os.fstat(fd)
+            current = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            if (len(data) > MAX_RECEIPT or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                    != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                    or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)):
+                raise SyncHold('journal_record_changed')
+            try:
+                result = json.loads(data, object_pairs_hook=unique_pairs,
+                                    parse_constant=lambda x: (_ for _ in ()).throw(SyncHold('journal_nonfinite')))
+            except (ValueError, UnicodeError) as exc:
+                raise SyncHold('journal_record_invalid') from exc
+            # A prior publish may have left valid bytes but failed fsync. Reuse
+            # is allowed ONLY after independently reestablishing file + directory
+            # durability now; failures remain HOLD. No hidden success from JSON.
+            os.fsync(fd); self.check(); os.fsync(self.fd)
+            current = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+                raise SyncHold('journal_record_changed')
+            return (result, hashlib.sha256(data).hexdigest()) if _with_digest else result
+        finally:
+            os.close(fd)
+
+    def read_provenance(self, key, suffix):
+        return self.read(key, suffix, _with_digest=True)
+
+    def publish(self, key, suffix, value):
+        with self._publish_lock():
+            self._publish_locked(key, suffix, value)
+
+    def _publish_locked(self, key, suffix, value):
+        self.check()
+        if len(os.listdir(self.fd)) >= MAX_JOURNAL_FILES:
+            raise SyncHold('journal_record_capacity')
+        data = encode(value)
+        if len(data) > MAX_RECEIPT:
+            raise SyncHold('journal_capacity')
+        # Partial write/fsync failures deliberately remain unknown, never rearm.
+        name = record_name(key, suffix)
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
+        try:
+            captured = os.fstat(fd)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'wb', closefd=False) as stream:
+                stream.write(data); stream.flush(); os.fsync(fd)
+            current = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (captured.st_dev, captured.st_ino):
+                raise SyncHold('journal_publish_replaced')
+            self.check(); os.fsync(self.fd)
+        finally:
+            os.close(fd)
+        if self.read(key, suffix) != value:
+            raise SyncHold('journal_publish_readback_failed')
+
+
+async def run_owned_sync(argv, *, timeout_seconds=60):
+    """Fixed reviewed sync-only CLI adapter; no shell, model, stderr or body export.
+
+    Production caller must construct argv from pinned sync source and resolved
+    authority, not caller input. No implicit retry. Only owned child is killed.
+    """
+    if not 0 < timeout_seconds <= 60:
+        raise SyncHold('sync_deadline_invalid')
+    process = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.DEVNULL,
+                                                  stderr=asyncio.subprocess.DEVNULL)
+    try:
+        await asyncio.wait_for(process.wait(), timeout_seconds)
+        if process.returncode != 0:
+            raise SyncHold('sync_child_failed')
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+        # wait is retained even when outer task was cancelled; no remote-stop claim.
+        cleanup = asyncio.create_task(process.wait())
+        try:
+            await asyncio.wait_for(asyncio.shield(cleanup), 3)
+        except BaseException as exc:
+            raise SyncHold('sync_child_cleanup_unverified') from exc
+        raise
+
+
+class SyncOnlyOperation:
+    def __init__(self, *, journal, resolve=require_authority_adapter, read_source=None, sync=None):
+        self.journal, self.resolve, self.read_source, self.sync = journal, resolve, read_source, sync
+
+    async def _fresh(self, uid, cid):
+        authority = await self.resolve(uid, cid)
+        if not isinstance(authority, Authority):
+            raise SyncHold('full_runtime_authority_required')
+        runtime, identity = authority.runtime, authority.identity
+        if (runtime.uid != uid or runtime.provider != 'hermes' or runtime.status != 'active'
+                or identity.uid != uid or identity.target_mode not in {'retained', 'hermes-cloud-transcript', 'hermes-chat'}
+                or not authority.registry_revision or not runtime.agent_id):
+            raise SyncHold('owner_runtime_changed')
+        if (not isinstance(identity.digest, str) or len(identity.digest) != 64
+                or any(c not in '0123456789abcdef' for c in identity.digest)):
+            raise SyncHold('full_runtime_identity_invalid')
+        source = await self.read_source(uid, cid)
+        # Exact full canonical source, including immutable transcript/timestamps.
+        if not isinstance(source, dict) or source.get('uid') != uid or source.get('conversation_id') != cid:
+            raise SyncHold('canonical_source_owner_changed')
+        if digest(source) != authority.source_sha256:
+            raise SyncHold('canonical_source_changed_during_read')
+        # Re-sample authority AFTER the potentially blocking canonical read.
+        final = await self.resolve(uid, cid)
+        if final != authority:
+            raise SyncHold('authority_changed_during_source_read')
+        return authority, digest(source)
+
+    def require_recovery_journal(self, authority, uid, cid, source_hash):
+        from semantic_recovery_context import require_descriptor, require_old_receipts
+        descriptor = require_descriptor(authority.recovery_context, uid, cid, source_hash)
+        key = digest({'domain': 'ella-sync-only-v1', 'uid': uid, 'conversation_id': cid})
+        start = self.journal.read_provenance(key, 'start')
+        completed = self.journal.read_provenance(key, 'completed')
+        require_old_receipts(descriptor, start, completed)
+        return descriptor
+
+    async def _recovery_snapshot(self, authority, uid, cid, source_hash, *, receipt_status='snapshot'):
+        # Server-owned current attempt, NOT replay of the old sync operation.
+        self.require_recovery_journal(authority, uid, cid, source_hash)
+        snapshot = await asyncio.to_thread(hydrate_owned_workspace, authority.runtime,
+                                           uid=uid, runtime_identity=authority.identity)
+        final, current_source = await self._fresh(uid, cid)
+        if final != authority or current_source != source_hash:
+            raise SyncHold('recovery_authority_changed_during_hydration')
+        self.require_recovery_journal(final, uid, cid, source_hash)
+        # Completion is of this existing host action, not a new journal sync.
+        # The snapshot action retains its original snapshot status.
+        receipt = {'status': receipt_status, 'binding': {
+            'uid': uid, 'conversation_id': cid, 'source_sha256': source_hash,
+            'runtime_authority_sha256': authority.identity.digest,
+            'registry_revision': authority.registry_revision},
+            'context_sha256': digest(snapshot), 'context_revision': snapshot['revision']}
+        result = {'receipt': receipt, 'context_snapshot': snapshot}
+        if len(encode(result)) > MAX_TRANSPORT:
+            raise SyncHold('private_transport_capacity')
+        return result
+
+    async def run(self, *, uid, conversation_id, expected_source_sha256):
+        async with asyncio.timeout(90):
+            return await self._run(uid=uid, conversation_id=conversation_id,
+                                   expected_source_sha256=expected_source_sha256)
+
+    async def _run(self, *, uid, conversation_id, expected_source_sha256):
+        if not isinstance(uid, str) or not uid or not isinstance(conversation_id, str) or not conversation_id:
+            raise SyncHold('owner_source_required')
+        if (not isinstance(expected_source_sha256, str) or len(expected_source_sha256) != 64
+                or any(c not in '0123456789abcdef' for c in expected_source_sha256)):
+            raise SyncHold('source_digest_required')
+        authority, source_hash = await self._fresh(uid, conversation_id)
+        if source_hash != expected_source_sha256:
+            raise SyncHold('canonical_source_changed')
+        if authority.recovery_context is not None:
+            return await self._recovery_snapshot(authority, uid, conversation_id, source_hash, receipt_status='completed')
+        binding = {'uid': uid, 'conversation_id': conversation_id, 'source_sha256': source_hash,
+                   'runtime_authority_sha256': authority.identity.digest,
+                   'registry_revision': authority.registry_revision}
+        # One automatic sync admission per owner/conversation. A changed source
+        # or authority cannot evade an unknown START by deriving a new key.
+        key = digest({'domain': 'ella-sync-only-v1', 'uid': uid, 'conversation_id': conversation_id})
+        start = self.journal.read(key, 'start')
+        completed = self.journal.read(key, 'completed')
+        if start is not None and start != {'status': 'started', 'binding': binding}:
+            raise SyncHold('sync_start_invalid')
+        if completed is not None and start is None:
+            raise SyncHold('sync_completion_without_start')
+        if start is not None:
+            if not isinstance(completed, dict) or completed.get('binding') != binding:
+                raise SyncHold('sync_started_outcome_unknown')
+        else:
+            self.journal.publish(key, 'start', {'status': 'started', 'binding': binding})
+            await self.sync(authority, conversation_id)  # no legacy _run_enrich
+        fresh, current_source = await self._fresh(uid, conversation_id)
+        if fresh != authority or current_source != source_hash:
+            raise SyncHold('post_sync_authority_or_source_changed')
+        snapshot = await asyncio.to_thread(hydrate_owned_workspace, authority.runtime,
+                                           uid=uid, runtime_identity=authority.identity)
+        # No success after an authority/consent change during hydration.
+        fresh, current_source = await self._fresh(uid, conversation_id)
+        if fresh != authority or current_source != source_hash:
+            raise SyncHold('post_hydration_authority_or_source_changed')
+        receipt = {'status': 'completed', 'binding': binding,
+                   'context_sha256': digest(snapshot), 'context_revision': snapshot['revision']}
+        if completed is not None:
+            if completed != receipt:
+                raise SyncHold('sync_replay_context_changed')
+        else:
+            self.journal.publish(key, 'completed', receipt)
+        result = {'receipt': receipt, 'context_snapshot': snapshot}
+        if len(encode(result)) > MAX_TRANSPORT:
+            raise SyncHold('private_transport_capacity')
+        return result
+
+    async def snapshot(self, *, uid, conversation_id, expected_source_sha256):
+        # Read-only operation: never admits a START or invokes the sync child.
+        async with asyncio.timeout(50):
+            authority, source_hash = await self._fresh(uid, conversation_id)
+            if source_hash != expected_source_sha256:
+                raise SyncHold('canonical_source_changed')
+            if authority.recovery_context is not None:
+                return await self._recovery_snapshot(authority, uid, conversation_id, source_hash)
+            binding = {'uid': uid, 'conversation_id': conversation_id, 'source_sha256': source_hash,
+                       'runtime_authority_sha256': authority.identity.digest,
+                       'registry_revision': authority.registry_revision}
+            key = digest({'domain': 'ella-sync-only-v1', 'uid': uid, 'conversation_id': conversation_id})
+            start = self.journal.read(key, 'start')
+            completed = self.journal.read(key, 'completed')
+            if start != {'status':'started','binding':binding} or not isinstance(completed,dict):
+                raise SyncHold('snapshot_sync_completion_required')
+            if (set(completed) != {'status','binding','context_sha256','context_revision'}
+                    or completed['status'] != 'completed' or completed['binding'] != binding):
+                raise SyncHold('snapshot_sync_completion_invalid')
+            snapshot = await asyncio.to_thread(hydrate_owned_workspace, authority.runtime,
+                                               uid=uid, runtime_identity=authority.identity)
+            fresh, current_source = await self._fresh(uid, conversation_id)
+            if fresh != authority or current_source != source_hash:
+                raise SyncHold('post_hydration_authority_or_source_changed')
+            receipt = {'status':'snapshot','binding':binding,'context_sha256':digest(snapshot),
+                       'context_revision':snapshot['revision']}
+            result = {'receipt':receipt,'context_snapshot':snapshot}
+            if len(encode(result)) > MAX_TRANSPORT:
+                raise SyncHold('private_transport_capacity')
+            return result

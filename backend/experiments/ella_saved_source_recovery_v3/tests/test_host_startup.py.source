@@ -1,0 +1,117 @@
+"""Real parser, journal, sync-first stage, capture/validation; synthetic external IO."""
+import asyncio,copy,hashlib,importlib.util,json,sys,tempfile,unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+D=Path(__file__).resolve().parents[1];W=D.parents[1]
+def load(name,p):
+ s=importlib.util.spec_from_file_location(name,p);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+sys.path.insert(0,str(W/'context-snapshot-v2-host/candidate'))
+SNAP=load('semantic_context_snapshot',W/'context-snapshot-v2-host/candidate/semantic_context_snapshot.py')
+SYNC=load('semantic_sync_operation',D/'host/semantic_sync_operation.py')
+DESC=load('semantic_recovery_context',D/'host/semantic_recovery_context.py')
+HOST=load('semantic_sync_host',D/'host/semantic_sync_host.py')
+MAN=load('semantic_context_manifest_v2',D/'host/semantic_context_manifest_v2.py')
+class Rig:
+ def __init__(self,*,uid='fictional-owner',cid='fictional-cid',source=None,attempt='b'*64):
+  self.tmp=tempfile.TemporaryDirectory(dir=D);self.path=Path(self.tmp.name);self.path.chmod(0o700);self.uid=uid;self.cid=cid;self.source=source or {'uid':uid,'conversation_id':cid,'transcript':'fictional source'};self.sha=SYNC.digest(self.source);self.attempt=attempt
+  self.runtime={'uid':uid,'provider':'hermes','status':'active','binding_id':'binding','revision':2,'profile_name':'profile','agent_id':'agent','workspace_root':str(self.path),'account_user_id':'account','profile_user_id':'account'}
+  self.registry={'agent_owners':{'agent':uid,'profile':uid},'agent_workspaces':{'agent':str(self.path),'profile':str(self.path)},'users':{'account':{'omiUid':uid,'userId':'account','hermes':{'userProfile':'profile','userAgentId':'agent','userWorkspace':str(self.path)}}}}
+  self.value={'contract':HOST.CONTRACT,'uid':uid,'conversation_id':cid,'canonical_source':self.source,'source_sha256':self.sha,'transcript_sha256':'c'*64,'source_version':'old-source-version','active_summary_version_id':'stock','runtime':self.runtime,'runtime_identity':{'uid':uid,'target_mode':'hermes-cloud-transcript','digest':'d'*64}}
+  self.jpath=self.path/'journal';self.jpath.mkdir(mode=0o700);self.journal=SYNC.Journal(self.jpath)
+  self.key=SYNC.digest({'domain':'ella-sync-only-v1','uid':uid,'conversation_id':cid});old={'uid':uid,'conversation_id':cid,'source_sha256':self.sha,'runtime_authority_sha256':'e'*64,'registry_revision':'old-registry'}
+  self.start={'status':'started','binding':old};self.completed={'status':'completed','binding':old,'context_sha256':'f'*64,'context_revision':'old-context'}
+  self.journal.publish(self.key,'start',self.start);self.journal.publish(self.key,'completed',self.completed)
+  self.proof={'contract':DESC.CONTRACT,'uid':uid,'conversation_id':cid,'source_sha256':self.sha,'source_version':'old-source-version','stock_version':'stock','recovery_id':'1'*64,'job_id':'hcer_'+'1'*64,'parent_job_sha256':'2'*64,'attempt_scope_sha256':attempt,'reviewed_detachment_sha256':'3'*64,'sync_start_receipt_sha256':SYNC.digest(self.start),'sync_completed_receipt_sha256':SYNC.digest(self.completed)}
+  self.value['recovery_context']=self.proof;self.sync_calls=0;self.reject=False;self.resolve_count=0
+  async def resolve(uid,cid):
+   self.resolve_count+=1
+   if self.reject:raise SYNC.SyncHold('synthetic_current_consent_or_attempt_rejected')
+   return HOST.parse_authority(copy.deepcopy(self.value),uid,cid,'agent',self.registry)
+  async def source(uid,cid):return copy.deepcopy(self.source)
+  async def sync(*a):self.sync_calls+=1;raise AssertionError('recovery launched sync')
+  self.operation=SYNC.SyncOnlyOperation(journal=self.journal,resolve=resolve,read_source=source,sync=sync)
+  self.rows=[];(self.path/'recent-conversations.md').write_text(MAN.index_text(self.rows))
+  async def batch(**kw):
+   return {'contract':'ella-context-records-v2.1','owner_sha256':MAN.textsha(uid),'target_conversation_id':cid,'target_source_sha256':self.sha,'runtime_authority_sha256':'d'*64,'attempt_scope_sha256':self.attempt,'records':{}}
+  self.service=MAN.CapturedContextHostV2(sync_operation=self.operation,read_materialized_rows=lambda **kw:self.rows,read_record_batch=batch)
+ def images(self):return {p.name:p.read_bytes() for p in self.jpath.iterdir()}
+ def close(self):self.journal.close();self.tmp.cleanup()
+ async def run(self):return await self.operation.run(uid=self.uid,conversation_id=self.cid,expected_source_sha256=self.sha)
+ async def capture(self):return await self.service.capture(uid=self.uid,conversation_id=self.cid,expected_source_sha256=self.sha)
+class Tests(unittest.TestCase):
+ def setUp(self):self.r=Rig()
+ def tearDown(self):self.r.close()
+ def test_first_sync_then_capture_and_validate_changed_old_context_no_writes_or_child(self):
+  r=self.r;before=r.images();sync=asyncio.run(r.run());self.assertEqual(sync['receipt']['status'],'completed');capture=asyncio.run(r.capture());self.assertNotEqual(capture['snapshot']['revision'],'old-context');asyncio.run(r.service.require_compatible(uid=r.uid,conversation_id=r.cid,expected_source_sha256=r.sha,captured=capture));self.assertEqual(r.images(),before);self.assertEqual(r.sync_calls,0)
+ def test_ordinary_old_runtime_binding_still_rejected(self):
+  del self.r.value['recovery_context']
+  with self.assertRaisesRegex(SYNC.SyncHold,'sync_start_invalid'):asyncio.run(self.r.run())
+ def test_ordinary_same_binding_and_context_replay_unchanged(self):
+  r=self.r;del r.value['recovery_context'];authority=HOST.parse_authority(r.value,r.uid,r.cid,'agent',r.registry)
+  binding={'uid':r.uid,'conversation_id':r.cid,'source_sha256':r.sha,'runtime_authority_sha256':authority.identity.digest,'registry_revision':authority.registry_revision}
+  snapshot=SNAP.hydrate_owned_workspace(authority.runtime,uid=r.uid,runtime_identity=authority.identity)
+  start={'status':'started','binding':binding};completed={'status':'completed','binding':binding,'context_sha256':SYNC.digest(snapshot),'context_revision':snapshot['revision']}
+  for suffix,value in [('start',start),('completed',completed)]:
+   p=r.jpath/(r.key+'.'+suffix+'.json');p.write_bytes(SYNC.encode(value));p.chmod(0o600)
+  before=r.images();out=asyncio.run(r.run());self.assertEqual(out['receipt'],completed);self.assertEqual(r.images(),before);self.assertEqual(r.sync_calls,0)
+ def test_descriptor_stock_version_must_match_backend_canonical(self):
+  self.r.proof['stock_version']='foreign-stock'
+  with self.assertRaisesRegex(SYNC.SyncHold,'source_version'):asyncio.run(self.r.run())
+ def backend_sync_parser(self):
+  import ast,httpx
+  from contextlib import nullcontext
+  from urllib.parse import quote
+  r=self.r
+  async def active(uid):return None
+  class Response:
+   status_code=200;headers={}
+   async def __aenter__(self):self.value=await r.run();return self
+   async def __aexit__(self,*a):return False
+   async def aiter_bytes(self):yield SYNC.encode(self.value)
+  class Client:
+   def __init__(self,**kw):pass
+   async def __aenter__(self):return self
+   async def __aexit__(self,*a):return False
+   def stream(self,*a,**kw):return Response()
+  authority=SimpleNamespace(base_url='http://synthetic-host',token='synthetic-existing-ref',snapshot=lambda:'synthetic-snapshot')
+  env={'asyncio':asyncio,'httpx':httpx,'json':json,'hashlib':hashlib,'quote':quote,'_timing':SimpleNamespace(stage=lambda *a:nullcontext()),'hermes_provision_authority':lambda **kw:authority,'CompanionContextUnavailable':ValueError,'assert_transcript_processing_active':lambda uid:None,'require_transcript_processing_active':active,'require_queue_graph':lambda *a:None,'canonical_source_from_conversation':lambda **kw:copy.deepcopy(r.source),'canonical_source_sha256':SYNC.digest,'MAX_BYTES':196608,'SOURCES':SNAP.SOURCES,'MAX_DOCUMENT_BYTES':SNAP.MAX_DOCUMENT_BYTES,'MAX_SNAPSHOT_BYTES':SNAP.MAX_SNAPSHOT_BYTES,'observe_host_failure':lambda **kw:None}
+  tree=ast.parse((W/'operation-budget-alignment-v1/candidate/ella/services/semantic_host_context.py').read_text());nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'host_context','digest','unique_pairs'}];exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual_backend_host_context_parser','exec'),env)
+  a=HOST.parse_authority(r.value,r.uid,r.cid,'agent',r.registry)
+  return env['host_context'](runtime=a.runtime,uid=r.uid,conversation_id=r.cid,runtime_identity=a.identity,read_conversation=lambda *a:{'uid':r.uid,'id':r.cid},action='sync',read_budget=SimpleNamespace(reserve=lambda _:90),client_factory=Client)
+ def test_existing_backend_sync_consumer_accepts_recovery_readonly_preparation(self):
+  before=self.r.images();out=self.backend_sync_parser();self.assertEqual(out['owner_uid'],self.r.uid);self.assertEqual(self.r.images(),before);self.assertEqual(self.r.sync_calls,0)
+ def test_existing_backend_sync_consumer_accepts_ordinary_completed_receipt(self):
+  self.test_ordinary_same_binding_and_context_replay_unchanged();before=self.r.images();out=self.backend_sync_parser();self.assertEqual(out['owner_uid'],self.r.uid);self.assertEqual(self.r.images(),before)
+ def test_wrong_receipt_hash_rejected_without_child(self):
+  self.r.proof['sync_completed_receipt_sha256']='0'*64
+  with self.assertRaisesRegex(SYNC.SyncHold,'old_receipt_digest'):asyncio.run(self.r.run())
+ def test_missing_old_completion_rejects(self):
+  (self.r.jpath/(self.r.key+'.completed.json')).unlink()
+  with self.assertRaisesRegex(SYNC.SyncHold,'old_receipts_missing'):asyncio.run(self.r.run())
+ def test_foreign_descriptor_rejected(self):
+  self.r.proof['uid']='foreign'
+  with self.assertRaisesRegex(SYNC.SyncHold,'owner_source'):asyncio.run(self.r.run())
+ def test_unknown_descriptor_field_rejects(self):
+  self.r.proof['force']=True
+  with self.assertRaisesRegex(SYNC.SyncHold,'schema'):asyncio.run(self.r.run())
+ def test_changed_source_rejected(self):
+  self.r.source['transcript']='edited'
+  with self.assertRaises(SYNC.SyncHold):asyncio.run(self.r.run())
+ def test_revoke_during_hydration_rejects(self):
+  orig=SYNC.hydrate_owned_workspace
+  def hydrate(*a,**k):
+   value=orig(*a,**k);self.r.reject=True;return value
+  with patch.object(SYNC,'hydrate_owned_workspace',hydrate),self.assertRaises(SYNC.SyncHold):asyncio.run(self.r.run())
+ def test_attempt_change_during_hydration_rejects(self):
+  orig=SYNC.hydrate_owned_workspace
+  def hydrate(*a,**k):
+   value=orig(*a,**k);self.r.proof['attempt_scope_sha256']='9'*64;return value
+  with patch.object(SYNC,'hydrate_owned_workspace',hydrate),self.assertRaisesRegex(SYNC.SyncHold,'authority_changed'):asyncio.run(self.r.run())
+ def test_records_attempt_must_match_current_backend_attempt(self):
+  self.r.attempt='9'*64
+  with self.assertRaises(MAN.ManifestHold):asyncio.run(self.r.capture())
+ def test_old_raw_noncanonical_bytes_bound_exactly(self):
+  p=self.r.jpath/(self.r.key+'.start.json');p.write_text(json.dumps(self.r.start,indent=2));p.chmod(0o600)
+  with self.assertRaisesRegex(SYNC.SyncHold,'old_receipt_digest'):asyncio.run(self.r.run())
+if __name__=='__main__':unittest.main()

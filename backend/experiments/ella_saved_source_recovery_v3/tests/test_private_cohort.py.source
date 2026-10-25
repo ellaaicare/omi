@@ -1,0 +1,67 @@
+"""Actual generic loader; disposable bytes, explicit root-stat/approved-spec doubles.
+No actual root metadata/permissions or personal sidecar data is read in tests.
+"""
+import ast,copy,hashlib,json,os,stat,tempfile,types,unittest
+from pathlib import Path
+from datetime import datetime
+from uuid import UUID
+from unittest.mock import patch
+P=Path(__file__).resolve().parents[1];SOURCE=P/'candidate/database/saved_source_recovery.py'
+class Cases(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory(dir=P);self.addCleanup(self.tmp.cleanup);self.directory=Path(self.tmp.name);self.path=self.directory/'saved_source_recovery.expected.json'
+  self.records={};self.spec={'owner_sha256':'a'*64,'records':{}}
+  for i in range(20):
+   cid=str(UUID(int=i+1));jid='hce_'+format(i+1,'064x');v={'cid':cid,'job_sha256':'b'*64,'source_created_at':'2026-01-01 00:00:00+00:00'};self.spec['records'][cid]={'job_id':jid,'source_created_at':v['source_created_at']}
+   if i<5:self.records[jid]=v
+  self.data={'contract':'ella-reviewed-saved-recovery-cohort-v1','owner_sha256':'a'*64,'source_spec_sha256':'59091879a32cab719305f14883e6158f94c0e0a8e87b0aed2bf122ac348a1eaf','records':self.records};self.uid=0;self.gid=0;self.links=1;self.mode=0o600
+  tree=ast.parse(SOURCE.read_text());nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in {'need','_cohort_pairs','approved_parents'}];self.ns={'sha256':lambda b:hashlib.sha256(b),'datetime':datetime,'__file__':str(self.directory/'saved_source_recovery.py')};exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual_private_loader','exec'),self.ns)
+  self.repair=types.ModuleType('database.explicit_saved_backlog_repair');self.repair.SPEC_SHA256=self.data['source_spec_sha256'];self.repair.specification=lambda:copy.deepcopy(self.spec);db=types.ModuleType('database');db.explicit_saved_backlog_repair=self.repair
+  self.modules=patch.dict(__import__('sys').modules,{'database':db,'database.explicit_saved_backlog_repair':self.repair});self.modules.start();self.addCleanup(self.modules.stop)
+  self.real_fstat=os.fstat;self.real_lstat=Path.lstat
+  def meta(v):
+   d={k:getattr(v,k) for k in ('st_dev','st_ino','st_uid','st_gid','st_nlink','st_mode','st_size','st_mtime_ns')};d.update(st_uid=self.uid,st_gid=self.gid,st_nlink=self.links,st_mode=stat.S_IFREG|self.mode);return types.SimpleNamespace(**d)
+  self.fake_fstat=lambda fd:meta(self.real_fstat(fd));self.fake_lstat=lambda p:meta(self.real_lstat(p));self.write()
+ def write(self,raw=None):
+  raw=raw if raw is not None else json.dumps(self.data,sort_keys=True).encode();self.path.write_bytes(raw);self.ns['COHORT_SHA256']=hashlib.sha256(raw).hexdigest()
+ def run_loader(self):
+  with patch.object(os,'fstat',self.fake_fstat),patch.object(Path,'lstat',self.fake_lstat):return self.ns['approved_parents']()
+ def test_valid_exact_five_from_original20(self):self.assertEqual(self.run_loader(),self.records)
+ def test_nonroot_group_mode_or_multilink_rejected(self):
+  for k,v in [('uid',501),('gid',501),('mode',0o644),('links',2)]:
+   old=getattr(self,k);setattr(self,k,v)
+   with self.assertRaisesRegex(ValueError,'file_metadata'):self.run_loader()
+   setattr(self,k,old)
+ def test_digest_drift_rejected(self):
+  self.ns['COHORT_SHA256']='f'*64
+  with self.assertRaisesRegex(ValueError,'digest_changed'):self.run_loader()
+ def test_duplicate_json_key_rejected(self):
+  self.write(b'{"contract":"x","contract":"y"}')
+  with self.assertRaisesRegex(ValueError,'duplicate_key'):self.run_loader()
+ def test_unknown_key_or_contract_rejected(self):
+  self.data['extra']='unknown';self.write()
+  with self.assertRaisesRegex(ValueError,'cohort_schema'):self.run_loader()
+ def test_wrong_original_spec_rejected(self):
+  self.data['source_spec_sha256']='f'*64;self.write()
+  with self.assertRaisesRegex(ValueError,'original_scope'):self.run_loader()
+ def test_foreign_owner_rejected(self):
+  self.data['owner_sha256']='f'*64;self.write()
+  with self.assertRaisesRegex(ValueError,'owner_changed'):self.run_loader()
+ def test_extra_or_missing_record_rejected(self):
+  self.data['records'].pop(next(iter(self.records)));self.write()
+  with self.assertRaisesRegex(ValueError,'cohort_count'):self.run_loader()
+ def test_out_of_original_cohort_rejected(self):
+  self.spec['records'].pop(next(iter(self.records.values()))['cid'])
+  # Maintain20 entries so membership check, not merely global count, catches it.
+  self.spec['records'][str(UUID(int=100))]={'job_id':'other','source_created_at':'other'}
+  with self.assertRaisesRegex(ValueError,'not_in_original_scope'):self.run_loader()
+ def test_source_creation_drift_rejected(self):
+  next(iter(self.records.values()))['source_created_at']='2026-01-02 00:00:00+00:00';self.write()
+  with self.assertRaisesRegex(ValueError,'not_in_original_scope'):self.run_loader()
+ def test_capacity_rejected(self):
+  self.write(b'x'*65537)
+  with self.assertRaisesRegex(ValueError,'file_metadata'):self.run_loader()
+ def test_symlink_refused_by_real_open(self):
+  raw=self.path.read_bytes();self.path.unlink();target=self.directory/'foreign';target.write_bytes(raw);self.path.symlink_to(target)
+  with self.assertRaises(OSError):self.run_loader()
+if __name__=='__main__':unittest.main()

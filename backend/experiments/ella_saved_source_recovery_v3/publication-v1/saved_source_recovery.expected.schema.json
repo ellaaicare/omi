@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Reviewed saved recovery private cohort structural schema; no grant",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "source_spec_sha256",
+    "owner_sha256",
+    "records"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ella-reviewed-saved-recovery-cohort-v1"
+    },
+    "source_spec_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "owner_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "records": {
+      "type": "object",
+      "minProperties": 5,
+      "maxProperties": 5,
+      "propertyNames": {
+        "pattern": "^hce_[0-9a-f]{64}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "cid",
+          "job_sha256",
+          "source_created_at"
+        ],
+        "properties": {
+          "cid": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "job_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source_created_at": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      }
+    }
+  }
+}

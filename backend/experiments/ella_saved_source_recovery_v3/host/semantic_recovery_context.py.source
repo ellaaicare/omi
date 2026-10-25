@@ -1,0 +1,27 @@
+"""Closed backend-issued recovery descriptor. No client flags or journal mutation."""
+import re
+from semantic_sync_operation import SyncHold
+CONTRACT='ella-server-recovery-context-v1'
+FIELDS={'contract','uid','conversation_id','source_sha256','source_version','stock_version','recovery_id','job_id','parent_job_sha256','attempt_scope_sha256','reviewed_detachment_sha256','sync_start_receipt_sha256','sync_completed_receipt_sha256'}
+def require(v,code):
+    if not v:raise SyncHold('recovery_context_'+code)
+def hexsha(v):return type(v) is str and re.fullmatch('[0-9a-f]{64}',v) is not None
+def require_descriptor(value,uid,cid,source):
+    require(type(value) is dict and set(value)==FIELDS and value['contract']==CONTRACT,'schema')
+    require(value['uid']==uid and value['conversation_id']==cid and value['source_sha256']==source,'owner_source')
+    require(all(hexsha(value[k]) for k in ['source_sha256','parent_job_sha256','attempt_scope_sha256','reviewed_detachment_sha256','sync_start_receipt_sha256','sync_completed_receipt_sha256']),'digest')
+    require(hexsha(value['recovery_id']),'recovery_id')
+    require(type(value['job_id']) is str and re.fullmatch('hcer_[0-9a-f]{64}',value['job_id']) is not None,'job_id')
+    require(value['job_id']=='hcer_'+value['recovery_id'],'job_binding')
+    require(all(type(value[k]) is str and 0<len(value[k])<=512 for k in ['source_version','stock_version']),'source_version')
+    return value
+
+def require_old_receipts(descriptor,start,completed):
+    require(type(start) is tuple and len(start)==2 and type(completed) is tuple and len(completed)==2,'old_receipts_missing')
+    s,sh=start;c,ch=completed
+    require(sh==descriptor['sync_start_receipt_sha256'] and ch==descriptor['sync_completed_receipt_sha256'],'old_receipt_digest')
+    require(type(s) is dict and set(s)=={'status','binding'} and s['status']=='started','old_start')
+    require(type(c) is dict and set(c)=={'status','binding','context_sha256','context_revision'} and c['status']=='completed' and c['binding']==s['binding'],'old_completed')
+    b=s['binding'];require(type(b) is dict and set(b)=={'uid','conversation_id','source_sha256','runtime_authority_sha256','registry_revision'},'old_binding')
+    require(all(b[k]==descriptor[k] for k in ['uid','conversation_id','source_sha256']),'old_owner_source')
+    require(hexsha(b['runtime_authority_sha256']) and type(b['registry_revision']) is str and bool(b['registry_revision']) and hexsha(c['context_sha256']) and type(c['context_revision']) is str and 0<len(c['context_revision'])<=512,'old_receipt_shape')

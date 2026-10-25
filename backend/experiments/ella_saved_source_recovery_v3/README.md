@@ -1,0 +1,13 @@
+# Saved-source recovery v3: reviewed experimental source
+
+This package is not active backend code or an approved migration. It preserves byte-exact reviewed source as `.py.source` plus synthetic fixtures and a structural schema. The runtime sidecar, real source/job identifiers, admission controls, credentials, receipts and private artifacts are excluded.
+
+The candidate creates a new individually fenced successor for a specifically classified terminal parent. It preserves the parent quarantine, original source, current consent/account route, immutable source/version identity, attempt isolation and canonical-write idempotency. Host startup joins the prior immutable completed sync receipt before preparing fresh read-only context; it does not rewrite an old journal or silently replay an uncertain effect. The backend authenticated authority response carries the optional recovery descriptor. A caller-supplied flag or a hash alone cannot authorize recovery.
+
+Independent source review covered 88 offline synthetic composition cases, including actual retained startup and APPLY/writer code with fake external I/O leaves. These do not prove live Firestore, provider operation, app retrieval or real-account recovery. Actual host imports passed with network/database/private-file/process/file-write counters all zero. Backend import acceptance remains held on offline dependency probes; no guard is waived here. There has been no serving deployment or recovery admission.
+
+`SOURCE.MANIFEST.json` records all 21 exact source hashes and their frozen paths. The six test files depend on the archived serving baseline, existing synthetic harnesses and other reviewed source overlays; this package alone is not a standalone test checkout. The private schema is structural, never an enrollment or grant. An inherited legacy owner hash in the unchanged disposition context is retained; no new private cohort identifiers are published.
+
+Before rollout: qualify actual service imports without credential discovery/network; review exact serving preimages, coherent host/backend import closure and rollback; preserve all saved data and quarantines; obtain fresh per-parent detachment/source/consent evidence; admit one reviewed successor; verify durable canonical and app readback before further admissions. No n8n, OAuth, provider-credential or unrelated-service changes are part of this candidate.
+
+See the [master regression analysis](../../../docs/engineering/ella-regression-analysis-2026-10-24.md).

@@ -1,0 +1,94 @@
+{
+  "state": "REVIEWED_EXPERIMENTAL_SOURCE_NOT_DEPLOYED",
+  "runtime_count": 14,
+  "synthetic_test_files": 6,
+  "files": {
+    "candidate/database/conversations.py.source": {
+      "sha256": "862cb008c8c37e2dfb83eec565c4f2286fb4632cc073184f6781afbd916bb2ec",
+      "original_frozen_path": "candidate/database/conversations.py"
+    },
+    "candidate/database/enrichment_graph_guard.py.source": {
+      "sha256": "d8c9cc54a69def23e14d34b7af9076632e998dc4c3c03737c237be314d088879",
+      "original_frozen_path": "candidate/database/enrichment_graph_guard.py"
+    },
+    "candidate/database/enrichment_job_isolation.py.source": {
+      "sha256": "dce28156e2df226f1a62bebd335d8b8bd2f87700179eb0fabe8e9e1d95b90ee4",
+      "original_frozen_path": "candidate/database/enrichment_job_isolation.py"
+    },
+    "candidate/database/normal_account_lifecycle.py.source": {
+      "sha256": "8d2456f152782f3b37e48f909a9242e468f61fc2dd92c9c47f2f438c1761360c",
+      "original_frozen_path": "candidate/database/normal_account_lifecycle.py"
+    },
+    "candidate/database/normal_enrichment_activation.py.source": {
+      "sha256": "9e5a52a6de07a17102e32bd4772d6215ffce4462a7a9d6386005ac9a525fe640",
+      "original_frozen_path": "candidate/database/normal_enrichment_activation.py"
+    },
+    "candidate/database/normal_future_source_disposition.py.source": {
+      "sha256": "d7c124d731a797cc1b114ca0718c9432e4bbbb70e4440a08e71e51cf1eeb4d60",
+      "original_frozen_path": "candidate/database/normal_future_source_disposition.py"
+    },
+    "candidate/database/saved_source_recovery.py.source": {
+      "sha256": "9dffabb2e5bec222673ed0115d971b09eceb82a8f74f89e87878f0c75bde7ea7",
+      "original_frozen_path": "candidate/database/saved_source_recovery.py"
+    },
+    "candidate/ella/services/semantic_captured_context.py.source": {
+      "sha256": "01536918592ab3e5232f7002c3646748245338c61bc890eb72cf229ba90133fe",
+      "original_frozen_path": "candidate/ella/services/semantic_captured_context.py"
+    },
+    "candidate/ella/services/semantic_context_authority.py.source": {
+      "sha256": "d26b0716d5ab17459e71c1b7f8ba222bbe64ed7dd264f89a6789241d4525c28e",
+      "original_frozen_path": "candidate/ella/services/semantic_context_authority.py"
+    },
+    "candidate/ella/services/semantic_recovery_namespace.py.source": {
+      "sha256": "d6297f870cb8584ee3eabc9943b772006a6139930759dd6b7ee1145f99aa5edb",
+      "original_frozen_path": "candidate/ella/services/semantic_recovery_namespace.py"
+    },
+    "host/semantic_context_manifest_v2.py.source": {
+      "sha256": "a5e794c0d3bdda211a2723da61847f1a0e88e78f5f8bf276b1c0c6bb43b8403e",
+      "original_frozen_path": "host/semantic_context_manifest_v2.py"
+    },
+    "host/semantic_recovery_context.py.source": {
+      "sha256": "d5f5edc3698a43d150c9335493418855ea6546fc8f16f5a810ca66583b34fe6b",
+      "original_frozen_path": "host/semantic_recovery_context.py"
+    },
+    "host/semantic_sync_host.py.source": {
+      "sha256": "9176b974fd911cdec471dcb2f2727814098cd6da31a8cf5d9c49bc16a21d027c",
+      "original_frozen_path": "host/semantic_sync_host.py"
+    },
+    "host/semantic_sync_operation.py.source": {
+      "sha256": "f0fe06e55a6d57a49afd496f1ce8743e65b9dbff0c14f967067969acec861a81",
+      "original_frozen_path": "host/semantic_sync_operation.py"
+    },
+    "tests/test_admission_worker.py.source": {
+      "sha256": "d4ac6133cbbda49561a00b03530ce18b89c33e89e38c60b965323e191d1cf6fd",
+      "original_frozen_path": "tests/test_admission_worker.py"
+    },
+    "tests/test_backend_authority_response.py.source": {
+      "sha256": "f8cf09e20bb8ef7b3ddb6e76125407d0cc5b90d87f88681fc0732190096c9b06",
+      "original_frozen_path": "tests/test_backend_authority_response.py"
+    },
+    "tests/test_host_startup.py.source": {
+      "sha256": "750bbfdd2497b20f6798d72825889f86742e0f8b821a80272c1d0458cd0fc686",
+      "original_frozen_path": "tests/test_host_startup.py"
+    },
+    "tests/test_namespace.py.source": {
+      "sha256": "b306c9ba8761e995b06f6bd8952a59369c8896786b5f31e2908291926dca6c41",
+      "original_frozen_path": "tests/test_namespace.py"
+    },
+    "tests/test_namespace_apply.py.source": {
+      "sha256": "5a17bb9f7aaf96f2829ec73c1a8b07359092a55020fe2118b8b5920fc61543a0",
+      "original_frozen_path": "tests/test_namespace_apply.py"
+    },
+    "tests/test_private_cohort.py.source": {
+      "sha256": "3190b81f7001819291974793cb61fb637745adf502ae76116509460c9ee23056",
+      "original_frozen_path": "tests/test_private_cohort.py"
+    },
+    "publication-v1/saved_source_recovery.expected.schema.json": {
+      "sha256": "0c7b6f5d952d5d2a0faf091ae8b766779b263359bca665e3ebac35c6cffbe5dd",
+      "original_frozen_path": "publication-v1/saved_source_recovery.expected.schema.json"
+    }
+  },
+  "original_freeze_sha256": "fa9f1fc2c98c2e2c96a040e3129db918055e048c77d4c08534ee8b5945a93fe1",
+  "private_cohort_included": false,
+  "runtime_config_authority_included": false
+}

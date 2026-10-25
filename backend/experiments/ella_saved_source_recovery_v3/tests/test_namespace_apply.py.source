@@ -1,0 +1,213 @@
+"""Real captured-v2/producer/issuer/APPLY/SDK with declared storage/graph IO leaves.
+Separate admission_worker suite exercises genuine admission/claim/graph functions.
+"""
+import ast,asyncio,copy,importlib.util,sys,types,unittest
+from pathlib import Path
+W=Path(__file__).resolve().parents[3];C=W/'quarantine-recovery-v1/integration-v3/candidate'
+def load(name,path):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+H=load('capture_correction_namespace_parent',W/'semantic-correction-loop-v1/tests/test_captured_apply.py')
+class Cases(unittest.TestCase):
+ def setUp(self):
+  self.parent=H.CapturedApply(methodName='test_captured_v2_correction_actual_issuer_then_actual_apply');self.parent.setUp();f=self.parent.f;r=f.r;self.f=f;self.r=r
+  self.ns=load('ella.services.semantic_recovery_namespace',C/'ella/services/semantic_recovery_namespace.py');ns=self.ns
+  oldvirtual=copy.deepcopy(f.db.rows[f.key]);source=self.parent.app.R.CAN.canonical_source_from_conversation(uid=r.uid,conversation_id=r.cid,conversation=oldvirtual)
+  tag=ns.identity(uid=r.uid,cid=r.cid,parent_job_id='original-closed-Q',parent_job_sha256='a'*64,parent_tombstone_sha256='b'*64,transcript_sha256=r.job['transcript_sha256'],stock_version='stock',stock_content_sha256=ns.digest({k:v for k,v in oldvirtual['summary_versions'][0].items() if k!='is_active'}),canonical_source_sha256=self.parent.app.R.CAN.canonical_source_sha256(source),source_version=str(source['finished_at']),account_epoch='account-epoch',route_sha256='a'*64,policy_epoch='epoch',protocol_revision='recovery-v1')
+  self.tag=tag
+  # Re-enter actual AttemptContext/OperationBudget with real NEW identity.
+  R=self.parent.app.R;r.context.__exit__(None,None,None);R.future._worker_job.reset(r.jt);R.BUDGET._CURRENT.reset(r.bt)
+  r.job.pop('normal_account_lifecycle_admission');r.job.update(job_id=tag['job_id'],saved_source_recovery_admission=tag)
+  recovery=types.ModuleType('database.saved_source_recovery');recovery.TAG='saved_source_recovery_admission'
+  def tag_of(job):
+   value=job['saved_source_recovery_admission'];ns.validate_identity(value);assert value==tag;return value
+  recovery.tag_of=tag_of;recovery.admission_tag=lambda job:tag_of(job) if recovery.TAG in job else job.get('normal_account_lifecycle_admission',{})
+  sys.modules[recovery.__name__]=recovery
+  lifecycle=sys.modules['database.normal_account_lifecycle'];lifecycle.admission_tag=recovery.admission_tag
+  # Actual candidate attempt-tag extraction; no source rewrite/fake ordinary tag.
+  tree=ast.parse((C/'database/enrichment_job_isolation.py').read_text());node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='attempt');exec(compile(ast.Module(body=[node],type_ignores=[]),'actual_recovery_attempt','exec'),R.ISOLATION.__dict__)
+  tree=ast.parse((C/'ella/services/semantic_captured_context.py').read_text());node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='expected_attempt_digest');exec(compile(ast.Module(body=[node],type_ignores=[]),'actual_recovery_scope','exec'),R.SCOPE.__dict__)
+  r.fenced=R.FENCE.begin(R.FENCE.reserve(R.ISOLATION.attempt(r.job),claims_open=True,previously_quarantined=False),R.ISOLATION.attempt(r.job),claims_open=True)
+  r.budget=R.BUDGET.OperationBudget(R.BUDGET.attempt_scope(r.job),clock=lambda:r.clock);r.bt=R.BUDGET._CURRENT.set(r.budget);r.jt=R.future._worker_job.set(r.job);r.context=R.SCOPE.attempt_context(r.uid,r.cid);r.scope=r.context.__enter__();r.host.attempt=r.scope.attempt_sha256
+  r.doc={k:copy.deepcopy(v) for k,v in oldvirtual.items() if k not in ns.FIELDS};r.prepare();r.doc[self.parent.pub.POLICY_FIELD]['generator_correction_contract']='ella-semantic-generator-correction-v1'
+  # Old normal maps deliberately foreign; selecting them would fail issuer.
+  raw=copy.deepcopy(oldvirtual);raw['semantic_publication_policy']={'old':'immutable'};raw['semantic_producer_executions_v1']={'old-Q':{'status':'started','result':'immutable'}}
+  raw[ns.ROOT]={tag['recovery_id']:{'identity':copy.deepcopy(tag),'state':{self.parent.pub.POLICY_FIELD:copy.deepcopy(r.doc[self.parent.pub.POLICY_FIELD])}}};self.original_maps={k:copy.deepcopy(raw.get(k)) for k in ns.FIELDS};f.db.put(f.key,raw)
+  # Actual modified DB callback through REAL installed SDK retry decorator.
+  f.dbm._prepare_conversation_for_read=lambda value,uid:ns.project_if_recovery(copy.deepcopy(value),uid)
+  graph=sys.modules['database.enrichment_graph_guard'];graph.require_in_transaction=lambda tx,db,job,uid,cid:r.graph(uid,cid)
+  tree=ast.parse((C/'database/conversations.py').read_text());names={'_update_conversation_with_builder_transaction','_update_conversation_with_builder','update_conversation_with_builder'};nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names];exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual_namespace_DB_callback','exec'),f.dbm.__dict__)
+  self.read=lambda uid,cid:ns.project_if_recovery(copy.deepcopy(f.db.rows[f.key]),uid)
+  self.parent.ledger.read=self.read
+  self.parent.ledger.update=lambda uid,cid,builder:f.dbm.update_conversation_with_builder(uid,cid,builder,transaction_guard=lambda tx:r.graph(uid,cid))
+  self.parent.args['binding']=self.parent.original.PublicationBinding(**self.parent.pub.current_binding(self.read(r.uid,r.cid),uid=r.uid,conversation_id=r.cid).__dict__)
+ def tearDown(self):self.parent.tearDown()
+ def produce(self,retain=True):
+  r=self.r;p=self.parent;f=self.f
+  def adapter(role,request):
+   f.io();r.scope.check();r.read();p.calls.append((role,copy.deepcopy(request)));p.obs[(role,p.pub.digest(request))]=('interaction-'+str(len(p.calls)),'event-'+str(len(p.calls)))
+   return copy.deepcopy((p.bad if len(p.calls)==1 else p.good) if role=='generator' else p.verdict)
+  proposal=p.v3.produce(**p.args,current_binding=lambda:p.original.PublicationBinding(**p.pub.current_binding(self.read(r.uid,r.cid),uid=r.uid,conversation_id=r.cid).__dict__),ledger=p.ledger,generator_adapter=lambda request:adapter('generator',request),verifier_adapter=lambda request:adapter('verifier',request))
+  def retained_builder(current):return {p.pub and 'semantic_retained_completion_jobs_v1':{p.pub.digest({'uid':r.uid,'cid':r.cid,'client':r.job['client_interaction_id'],'transcript':self.tag['transcript_sha256']}):{'status':'proposed','client':r.job['client_interaction_id'],'transcript':self.tag['transcript_sha256'],'proposal':proposal}}},{}
+  if retain:f.dbm.update_conversation_with_builder(r.uid,r.cid,retained_builder)
+  return proposal
+ def apply(self,proposal):
+  bridge=self.f.apply.RetainedSemanticApply(uid=self.r.uid,conversation_id=self.r.cid,repository=None,read_conversation=self.read,dependencies=self.f.deps)
+  return asyncio.run(bridge(proposal))
+ def check_old(self):
+  for k,v in self.original_maps.items():self.assertEqual(self.f.db.rows[self.f.key].get(k),v)
+ def test_full_captured_producer_namespace_APPLY_and_exact_replay(self):
+  proposal=self.produce();result=self.apply(proposal);self.assertEqual(result['status'],'completed');self.check_old();current=self.f.db.rows[self.f.key];self.assertEqual(current['summary_writeback_receipt']['status'],'completed');self.assertNotEqual(current['active_summary_version_id'],'stock');version=current['active_summary_version_id'];self.assertEqual(len(self.f.canonical),1)
+  self.apply(proposal);self.assertEqual(self.f.db.rows[self.f.key]['active_summary_version_id'],version);self.assertEqual(len(self.f.canonical),1);self.check_old()
+ def test_new_attempt_lease_change_stops_before_APPLY(self):
+  proposal=self.produce();self.r.job['lease_token']='stale'
+  with self.assertRaises(Exception):self.apply(proposal)
+  self.assertNotIn('summary_writeback_receipt',self.f.db.rows[self.f.key]);self.check_old()
+ def test_pending_accepted_race_reconciles_same_namespace_once(self):
+  proposal=self.produce();before=copy.deepcopy(self.f.db.rows[self.f.key]);self.apply(proposal);pending=copy.deepcopy(self.f.pending);self.f.db.put(self.f.key,before);self.f.canonical.clear();self.f.db.before_commit=lambda db:db.put(self.f.key,pending)
+  result=self.apply(proposal);self.assertEqual(result['status'],'completed');self.assertEqual(self.f.db.rows[self.f.key]['summary_versions'],pending['summary_versions']);self.assertEqual(len(self.f.canonical),1);self.check_old()
+ def test_completed_accepted_race_does_not_duplicate(self):
+  proposal=self.produce();before=copy.deepcopy(self.f.db.rows[self.f.key]);self.apply(proposal);completed=copy.deepcopy(self.f.db.rows[self.f.key]);self.f.db.put(self.f.key,before);self.f.canonical.clear();self.f.db.before_commit=lambda db:db.put(self.f.key,completed)
+  self.apply(proposal);self.assertEqual(self.f.db.rows[self.f.key]['summary_versions'],completed['summary_versions']);self.assertEqual(self.f.canonical,[]);self.check_old()
+ def test_late_parent_callback_before_CAS_has_no_effect(self):
+  proposal=self.produce();before=copy.deepcopy(self.f.db.rows[self.f.key]);old={**self.r.job,'job_id':'original-closed-Q','lease_token':'closed-parent-lease'};old.pop('saved_source_recovery_admission');old['normal_account_lifecycle_admission']={'account_epoch':'account-epoch','route_sha256':'a'*64}
+  token=self.parent.app.R.future._worker_job.set(old)
+  try:
+   with self.assertRaises(Exception):self.apply(proposal)
+  finally:self.parent.app.R.future._worker_job.reset(token)
+  self.assertEqual(self.f.db.rows[self.f.key],before);self.assertEqual(self.f.canonical,[])
+ def test_late_parent_callback_after_completed_does_not_duplicate(self):
+  proposal=self.produce();self.apply(proposal);before=copy.deepcopy(self.f.db.rows[self.f.key]);calls=len(self.f.canonical);old={**self.r.job,'job_id':'original-closed-Q','lease_token':'closed-parent-lease'};old.pop('saved_source_recovery_admission');old['normal_account_lifecycle_admission']={'account_epoch':'account-epoch','route_sha256':'a'*64};token=self.parent.app.R.future._worker_job.set(old)
+  try:
+   with self.assertRaises(Exception):self.apply(proposal)
+  finally:self.parent.app.R.future._worker_job.reset(token)
+  self.assertEqual(self.f.db.rows[self.f.key],before);self.assertEqual(len(self.f.canonical),calls)
+ def test_consent_revoked_after_CAS_preserves_pending_zero_sink(self):
+  proposal=self.produce();self.f.db.after_commit=lambda db:db.put(('users',self.r.uid),{'ai_consent':{'receipt_id':'synthetic','granted':False}})
+  result=self.apply(proposal);self.assertEqual(result['status'],'pending_reconciliation');self.assertEqual(self.f.canonical,[]);self.assertEqual(self.f.db.rows[self.f.key]['summary_writeback_receipt']['status'],'pending_reconciliation');self.check_old()
+ def test_pending_replay_revoked_consent_no_sink(self):
+  proposal=self.produce();before=copy.deepcopy(self.f.db.rows[self.f.key]);self.apply(proposal);pending=copy.deepcopy(self.f.pending);self.f.db.put(self.f.key,pending);self.f.canonical.clear();self.f.db.put(('users',self.r.uid),{'ai_consent':{'receipt_id':'synthetic','granted':False}})
+  result=self.apply(proposal);self.assertEqual(result['status'],'pending_reconciliation')
+  self.assertEqual(self.f.canonical,[]);self.assertEqual(self.f.db.rows[self.f.key],pending)
+ def test_current_recovery_readback_uses_exact_accepted_namespace(self):
+  proposal=self.produce();self.apply(proposal);raw=self.f.db.rows[self.f.key];view=self.ns.accepted_readback_view(raw,uid=self.r.uid,cid=self.r.cid,recovery_id=self.tag['recovery_id'])
+  helper=load('recovery_qualified_readback',W/'semantic-correction-loop-v1/readback-sanitizer-v1/candidate/recall_projection.py')
+  job={**self.r.job,'status':'completed','dispatch_state':'completed','receipt':{'active_summary_version_id':raw['active_summary_version_id']}}
+  out=helper.completed_projection(job,view,uid=self.r.uid,cid=self.r.cid,job_id=self.r.job['job_id'],transcript_sha=self.tag['transcript_sha256'],stock_id='stock',stock_sha=self.tag['stock_content_sha256']);self.assertEqual(out['version'],raw['active_summary_version_id']);self.check_old()
+ def test_accepted_namespace_wrong_payload_cannot_replay(self):
+  proposal=self.produce();self.apply(proposal);current=copy.deepcopy(self.f.db.rows[self.f.key]);current['summary_writeback_receipt']['payload_sha256']='0'*64;self.f.db.put(self.f.key,current);self.f.canonical.clear()
+  with self.assertRaises(Exception):self.apply(proposal)
+  self.assertEqual(self.f.db.rows[self.f.key],current);self.assertEqual(self.f.canonical,[])
+ def test_consent_revoke_inside_APPLY_prevents_new_write(self):
+  proposal=self.produce();before=copy.deepcopy(self.f.db.rows[self.f.key]);self.f.db.before_commit=lambda db:db.put(('users',self.r.uid),{'ai_consent':{'receipt_id':'synthetic','granted':False}})
+  with self.assertRaises(Exception):self.apply(proposal)
+  self.assertEqual(self.f.db.rows[self.f.key],before);self.assertEqual(self.f.canonical,[])
+ def full_startup(self,mutation=None):
+  from contextlib import nullcontext
+  from dataclasses import dataclass
+  from types import SimpleNamespace
+  from unittest.mock import patch
+  import threading
+  HH=load('recovery_full_start_host',Path(__file__).with_name('test_host_startup.py'))
+  r=self.r;f=self.f;p=self.parent;R=p.app.R
+  source=R.CAN.canonical_source_from_conversation(uid=r.uid,conversation_id=r.cid,conversation=self.read(r.uid,r.cid))
+  queued=R.ID.build_enrichment_identity(uid=r.uid,conversation_id=r.cid,conversation=self.read(r.uid,r.cid))
+  r.job['client_interaction_id']=queued.client_interaction_id
+  r.fenced=R.FENCE.begin(R.FENCE.reserve(R.ISOLATION.attempt(r.job),claims_open=True,previously_quarantined=False),R.ISOLATION.attempt(r.job),claims_open=True)
+  r.budget=R.BUDGET.OperationBudget(R.BUDGET.attempt_scope(r.job),clock=lambda:r.clock);R.BUDGET._CURRENT.set(r.budget)
+  host=HH.Rig(uid=r.uid,cid=r.cid,source=source,attempt=R.SCOPE.expected_attempt_digest(r.job))
+  before=host.images();oldhost=r.host;r.host=host
+  r.runtime=SimpleNamespace(**host.runtime);r.identity=SimpleNamespace(**host.value['runtime_identity'])
+  # Retained coordinator starts with a new, EMPTY selected namespace, while old
+  # root producer/policy maps and old journal remain intact.
+  f.db.rows[f.key][self.ns.ROOT][self.tag['recovery_id']]['state']={}
+  r.context.__exit__(None,None,None);r.context=nullcontext()
+  async def wait(_,value):return await value
+  async def nohold(uid):return None
+  timing=types.ModuleType('ella.services.enrichment_stage_timing');timing.stage=lambda *a:nullcontext();timing.operation=lambda *a:nullcontext();timing.await_stage=wait
+  hold=sys.modules['ella.services.transcript_processing_hold'];oldhold=getattr(hold,'require_transcript_processing_active',None);hold.require_transcript_processing_active=nohold
+  life=sys.modules['database.normal_account_lifecycle'];life.require_dispatch_context=lambda uid,db:r.graph(uid,r.cid)
+  companion=sys.modules['ella.services.semantic_companion_context'];companion.CompanionContextUnavailable=RuntimeError
+  hostmod=load('ella.services.semantic_host_context',W/'operation-budget-alignment-v1/candidate/ella/services/semantic_host_context.py')
+  async def runtime(*a,**kw):return r.runtime
+  async def user(**kw):return {'confirmed':True,'event_id':'fictional-user-event'}
+  async def confirm(**kw):return True
+  class Response:
+   status_code=200;headers={}
+   async def __aenter__(self):self.result=await host.run();return self
+   async def __aexit__(self,*a):return False
+   async def aiter_bytes(self):yield HH.SYNC.encode(self.result)
+  class Client:
+   def __init__(self,**kw):pass
+   async def __aenter__(self):return self
+   async def __aexit__(self,*a):return False
+   def stream(self,method,url,**kw):
+    self.body=kw['json'];assert set(self.body)=={'uid','agent_id','conversation_id','expected_source_sha256'} and self.body['expected_source_sha256']==host.sha
+    return Response()
+  fixture_authority=SimpleNamespace(base_url='http://synthetic-host',token='synthetic-existing-reference',snapshot=lambda:'synthetic-authority-snapshot')
+  async def sync_context(*a,**kw):
+   self.assertEqual(len(p.calls),0)
+   return await asyncio.to_thread(hostmod.host_context,runtime=r.runtime,uid=r.uid,conversation_id=r.cid,runtime_identity=r.identity,read_conversation=self.read,action='sync',read_budget=kw['host_read_budget'],client_factory=Client,authority_reader=lambda **kw:fixture_authority)
+  async def learning(**kw):return {'status':'no_learning'}
+  def update(uid,cid,builder):return f.dbm.update_conversation_with_builder(uid,cid,builder,transaction_guard=lambda tx:r.graph(uid,cid))
+  async def produce(**kw):
+   r.scope=R.SCOPE.current_scope(r.uid,r.cid);r.doc=self.read(r.uid,r.cid)
+   p.args['binding']=p.original.PublicationBinding(**p.pub.current_binding(r.doc,uid=r.uid,conversation_id=r.cid).__dict__)
+   p.args['companion_context']=r.scope.envelope()['snapshot'];p.args['canonical_source']=source
+   return await asyncio.to_thread(self.produce,False)
+  def hydrate(*a,**kw):return R.SCOPE.read_captured_context(runtime=r.runtime,uid=r.uid,conversation_id=r.cid,runtime_identity=r.identity,read_conversation=self.read,read_budget=kw['host_read_budget'])
+  def factory(**kw):return f.apply.RetainedSemanticApply(uid=r.uid,conversation_id=r.cid,repository=None,read_conversation=self.read,dependencies=f.deps)
+  scope={'__name__':'full_recovery_retained_coordinator','asyncio':asyncio,'copy':copy,'threading':threading,'dataclass':dataclass,'SimpleNamespace':SimpleNamespace,'admission':p.pub,'_timing':timing,'canonical_source_from_conversation':R.CAN.canonical_source_from_conversation,'canonical_source_sha256':R.CAN.canonical_source_sha256,'transcript_source':R.ID.transcript_source,'build_enrichment_identity':R.ID.build_enrichment_identity,'require_initial_source':lambda *a:None,'require_current_runtime':lambda *a:None,'require_transcript_processing_active':nohold,'JOBS_FIELD':'semantic_retained_completion_jobs_v1','MAX_JOBS':8,'sanitize_summary_update':f.writer.sanitize_summary_update}
+  module=types.ModuleType(scope['__name__']);sys.modules[module.__name__]=module
+  tree=ast.parse((W/'semantic-correction-loop-v1/candidate/ella/services/retained_completion_enrichment.py').read_text());nodes=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in {'reject','owned','source_pin','Dependencies','RetainedCompletionEnrichmentService'}];exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual_full_retained_coordinator','exec'),scope)
+  deps=scope['Dependencies'](selected=lambda uid:True,resolve=runtime,identity=lambda x:r.identity,revalidate=runtime,consent=lambda uid:uid if f.db.rows[('users',uid)]['ai_consent']['granted'] else None,hydrate=hydrate,produce=produce,apply_factory=factory,canonical_user=user,sync_context=sync_context,confirm_canonical_user=confirm,learning=learning)
+  service=scope['RetainedCompletionEnrichmentService'](repository=None,read_conversation=self.read,update_conversation=update,dependencies=deps)
+  queued=R.ID.build_enrichment_identity(uid=r.uid,conversation_id=r.cid,conversation=self.read(r.uid,r.cid));self.assertEqual(queued.client_interaction_id,r.job['client_interaction_id'])
+  if mutation=='foreign':host.proof['uid']='foreign'
+  if mutation=='missing':host.value.pop('recovery_context')
+  if mutation=='attempt':r.job['lease_token']='stale-attempt'
+  if mutation=='consent':f.db.put(('users',r.uid),{'ai_consent':{'receipt_id':'synthetic','granted':False}})
+  if mutation=='source':host.source['transcript']='edited fictional source'
+  try:
+   if mutation:
+    with self.assertRaises(Exception):asyncio.run(service._enrich(r.uid,r.cid,False,queued.client_interaction_id,queued.transcript_sha256))
+    self.assertEqual(p.calls,[]);self.assertNotIn('summary_writeback_receipt',f.db.rows[f.key]);self.assertEqual(host.images(),before);self.assertEqual(host.sync_calls,0);self.check_old();return
+   result=asyncio.run(service._enrich(r.uid,r.cid,False,queued.client_interaction_id,queued.transcript_sha256))
+   self.assertNotEqual(result.active_summary_version_id,'stock');self.assertEqual(f.db.rows[f.key]['summary_writeback_receipt']['canonical_status'],'completed');self.assertEqual(host.images(),before);self.assertEqual(host.sync_calls,0);self.check_old();self.assertEqual(len(f.canonical),1)
+   raw=f.db.rows[f.key];view=self.ns.accepted_readback_view(raw,uid=r.uid,cid=r.cid,recovery_id=self.tag['recovery_id'])
+   helper=load('full_startup_qualified_readback',W/'semantic-correction-loop-v1/readback-sanitizer-v1/candidate/recall_projection.py')
+   job={**r.job,'status':'completed','dispatch_state':'completed','receipt':{'active_summary_version_id':raw['active_summary_version_id']}}
+   out=helper.completed_projection(job,view,uid=r.uid,cid=r.cid,job_id=r.job['job_id'],transcript_sha=self.tag['transcript_sha256'],stock_id='stock',stock_sha=self.tag['stock_content_sha256']);self.assertEqual(out['version'],raw['active_summary_version_id'])
+  finally:
+   host.close();r.host=oldhost
+   if oldhold is None:del hold.require_transcript_processing_active
+   else:hold.require_transcript_processing_active=oldhold
+ def test_FULL_retained_start_old_journal_to_strict_roles_APPLY_readback(self):self.full_startup()
+ def test_FULL_startup_foreign_descriptor_no_generation(self):self.full_startup('foreign')
+ def test_FULL_startup_missing_proof_no_generation(self):self.full_startup('missing')
+ def test_FULL_startup_stale_attempt_no_generation(self):self.full_startup('attempt')
+ def test_FULL_startup_revoked_consent_no_generation(self):self.full_startup('consent')
+ def test_FULL_startup_changed_source_no_generation(self):self.full_startup('source')
+if __name__=='__main__':unittest.main()
+
+
+class OrdinaryIndependence(unittest.TestCase):
+ def setUp(self):
+  self.parent=H.CapturedApply(methodName='test_captured_v2_correction_actual_issuer_then_actual_apply');self.parent.setUp();self.f=self.parent.f;self.r=self.f.r
+  self.ns=load('ella.services.semantic_recovery_namespace',C/'ella/services/semantic_recovery_namespace.py')
+  # Full new module import remains lazy, with declared legacy service import leaves.
+  activation=types.ModuleType('database.normal_enrichment_activation');sys.modules[activation.__name__]=activation
+  recovery=load('database.saved_source_recovery',C/'database/saved_source_recovery.py');recovery.__file__=str(C/'private_DOES_NOT_EXIST'/'saved_source_recovery.py');self.recovery=recovery
+  self.f.dbm._prepare_conversation_for_read=lambda value,uid:self.ns.project_if_recovery(copy.deepcopy(value),uid)
+  tree=ast.parse((C/'database/conversations.py').read_text());names={'_update_conversation_with_builder_transaction','_update_conversation_with_builder','update_conversation_with_builder'};nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names];exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual_ordinary_candidate_DB_callback','exec'),self.f.dbm.__dict__)
+ def tearDown(self):self.parent.tearDown()
+ def test_actual_ordinary_captured_APPLY_ignores_missing_recovery_sidecar(self):
+  proposal=self.parent.produce();result=self.f.run_apply(proposal);self.assertEqual(result['status'],'completed');self.assertEqual(len(self.f.canonical),1);self.assertNotIn(self.ns.ROOT,self.f.db.rows[self.f.key])
+ def test_worker_context_reset_after_recovery_error_and_cancel(self):
+  from functools import wraps
+  source=ast.parse((C/'database/normal_future_source_disposition.py').read_text());fn=next(n for n in source.body if isinstance(n,ast.FunctionDef) and n.name=='worker_context');ns={'TAG':'trusted_future_source_admission','wraps':wraps,'copy':copy,'_worker_job':self.parent.app.R.future._worker_job};exec(compile(ast.Module(body=[fn],type_ignores=[]),'actual_worker_context','exec'),ns)
+  original=self.parent.app.R.future._worker_job.get()
+  for error in [RuntimeError('synthetic'),asyncio.CancelledError()]:
+   async def effect(service,job):
+    self.assertIn('saved_source_recovery_admission',self.parent.app.R.future._worker_job.get());raise error
+   with self.assertRaises(type(error)):asyncio.run(ns['worker_context'](effect)(None,{'uid':'synthetic','saved_source_recovery_admission':{'not-authority':'context-only'}}))
+   self.assertEqual(self.parent.app.R.future._worker_job.get(),original);self.assertIsNone(self.ns.current_job(self.r.uid,self.r.cid))
