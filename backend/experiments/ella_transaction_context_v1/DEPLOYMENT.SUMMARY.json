@@ -1,0 +1,30 @@
+{
+  "state": "DEPLOYED_HEALTHY_EXACT_HOLD_PRESERVED",
+  "observed_at": "2026-10-25T05:52:42.105773+00:00",
+  "source_pins": {
+    "database/conversations.py": "9bd2877297a8e8e1705de044f5d8a8cfe1bbb78949b0b4fc933d9bb10ffaa8f1",
+    "ella/services/semantic_retained_apply.py": "54ef251b37b6b6c0a54e4af00b0c3e6bd620c5f17110066ac7e42aeb75509e83",
+    "ella/services/semantic_transaction_context.py": "69ffb042b9b8e4d1e3009328b9ef76dbd0ada4d7db64fe3309fafa583d3b98a5",
+    "ella/services/summary_writeback.py": "4d30bb8c560d3c517b9d1524275888adf5b853fd3dd7c250bf8009e5fa1cc72e",
+    "ella/services/semantic_publication.py": "3992b86fa9c589fd7b59098d6e5754570b9afff4a037e850d0b2a117c3dc9463",
+    "ella/services/causal_diagnostics.py": "1ebb854a82c57e7ba9fc0513060355e7aaa5be06fb7fafdae8cfc616cb59a905"
+  },
+  "selected_import_modules": 27,
+  "import_network_attempts": 0,
+  "health": [
+    {
+      "route": "/v1/health",
+      "http": 200
+    },
+    {
+      "route": "/v1/ella/health",
+      "http": 200
+    }
+  ],
+  "protected_data_unchanged": true,
+  "original_cohort_quarantines_preserved": 10,
+  "DB_writes": 0,
+  "model_calls": 0,
+  "claims_reopened": false,
+  "enhanced_memory_acceptance": "not yet verified"
+}
