@@ -6,9 +6,13 @@
     "SOURCE.patch": "1b953703ef240ed40e1ee022d3b0d74b3ebd4df14b7c9e552386be2a9c20cb32",
     "baseline/causal_diagnostics.py": "7dd2607728a5f26cfd8305ff558e7adbf26ddad4cf6e0bd9bb6b71bb96228784",
     "candidate/causal_diagnostics.py": "a5d13a2656dfbf46210de6761a117cd74229aeec7e8ca1cdb1182ca38e5ae1c7",
-    "tests/test_transaction_diagnostics.py": "4e6dd77e74a9bb704b7f761060adbcc550ce9f33c3d0d7c9f76b987bbd49865f"
+    "tests/test_transaction_diagnostics.py": "0fb4c11caae957d08ada026ad936a286bef1ef7abaf940b54de91cb7b208f002"
   },
   "source_candidate_sha256": "a5d13a2656dfbf46210de6761a117cd74229aeec7e8ca1cdb1182ca38e5ae1c7",
   "deployment": false,
-  "historical_cause_proven": false
+  "historical_cause_proven": false,
+  "archive_test_adaptations": [
+    "dependency path points to adjacent hash-pinned queue candidate",
+    "existing commit hook applies Black formatting"
+  ]
 }
