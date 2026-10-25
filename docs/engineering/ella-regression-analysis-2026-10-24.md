@@ -4,6 +4,16 @@ Status: investigation and isolated implementation; **not a release qualification
 Prepared October 24, 2026 UTC for independent review, including Claude.
 No credentials, account identifiers, transcript bodies or private source packets belong in this document.
 
+## Verified recovery checkpoint — October 25, 11:11 UTC
+
+The authorized original twenty saved sources now have **five independently read-back enhanced versions, thirteen quarantined attempts, and two untouched sources**. Both backend health endpoints returned 200 at 11:10:59 UTC. No model attempt is active; claims are closed and one failed-attempt execution reservation remains held pending reviewed settlement. Original transcripts, stock versions and original per-account routing are preserved. Five successes do not qualify recovery of all saved memories.
+
+The latest failure occurred before generation: the host's initial context synchronization received HTTP 409 with the closed code `host_backend_authority_rejected`. The exact source-scoped trace ended after 49.604 seconds with all 21 spans closed. Its inner backend rejection detail was not retained by that transport; it must not be inferred from the preceding, different materialized-index failure. No new inference is justified merely to reproduce it.
+
+A separate, independently reviewed recovery candidate permits only five specifically classified, already-terminal parent attempts through a new fenced successor path; it does not reopen quarantines. Eighty-eight offline synthetic composition cases passed. Actual host import acceptance passed with all five I/O counters zero. Actual backend import acceptance is **held** because an eager dependency attempted a temporary-directory write probe and a network operation, both blocked by the offline guard. The candidate is not deployed, admitted or proven against real Firestore by those tests. Resolving the offline dependency closure must preserve the guards.
+
+The separate-turn owner-bound recall result supplied selected context for the first completed record. It does not prove autonomous retrieval or iMessage routing parity. The iMessage account-scalar discrepancy and its existing action-specific review boundary remain separate from the successful enrichment route; no mapping change is claimed.
+
 ## Immediate findings
 
 1. A failed enrichment can invalidate the account's subsequent processing authority. The serving `normal_account_lifecycle.read_account` compares the *current mutable quarantine inventory* with a frozen enrollment inventory. A newly quarantined job changes that inventory, so unrelated future jobs on the same account are held. This is a processing availability regression, not evidence that the user's OAuth-to-agent mapping changed.
