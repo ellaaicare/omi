@@ -1,0 +1,47 @@
+"""One existing owned self-hosted PostgreSQL binding policy-version CAS.
+No provisioning, identity change, model dispatch, credential or SQLite operation.
+"""
+import hashlib,json,re
+TARGET='frontier-codex-5.6-v1'
+OLD='economy-openrouter-deepseek-v4-flash-v1'
+class AlignmentRejected(ValueError):pass
+def require(value,code):
+ if not value:raise AlignmentRejected(code)
+def digest(row):return hashlib.sha256(json.dumps(dict(row),sort_keys=True,separators=(',',':'),default=str).encode()).hexdigest()
+def sha(value):return hashlib.sha256(str(value).encode()).hexdigest()
+def unchanged(row):return {k:v for k,v in dict(row).items() if k not in {'model_policy_version','revision','updated_at'}}
+async def align(repository,*,uid,owner_sha256,binding_id_sha256,row_sha256,revision,old_policy):
+ from database import authority_advisory_lock as locks
+ require(type(uid) is str and sha(uid)==owner_sha256,'owner_scope_changed')
+ require(all(type(x) is str and re.fullmatch('[a-f0-9]{64}',x) for x in [owner_sha256,binding_id_sha256,row_sha256]),'pin_shape_invalid')
+ require(type(revision) is int and revision>=1 and old_policy in {OLD,TARGET},'policy_preimage_invalid')
+ async with repository.pool.acquire() as connection:
+  owner=await locks.resolve_self_owner_unlocked(connection,uid=uid)
+  async with connection.transaction():
+   proof=await locks.acquire_authority_lock(connection,owner=owner)
+   await locks.verify_self_owner_after_lock(connection,uid=uid,owner=owner,proof=proof)
+   rows=await connection.fetch("""SELECT b.* FROM ella_runtime_bindings b
+JOIN users u ON u.id=b.user_id WHERE u.omi_uid=$1 AND u.status='ACTIVE'
+AND b.role='user' AND b.provider='hermes' AND b.active=true
+AND b.status='active' AND b.health_state='healthy'
+AND b.account_user_id=u.id AND b.profile_user_id=u.id FOR UPDATE OF b,u""",uid,timeout=5)
+   require(len(rows)==1,'owned_binding_not_unique');before=dict(rows[0])
+   require(sha(before['id'])==binding_id_sha256 and digest(before)==row_sha256,'binding_preimage_changed')
+   require(before['revision']==revision and before['model_policy_version']==old_policy,'binding_revision_or_policy_changed')
+   require(before['user_id']==owner.account_id and before['account_user_id']==owner.account_id and before['profile_user_id']==owner.profile_id and owner.account_id==owner.profile_id,'binding_owner_coordinates_changed')
+   if old_policy==TARGET:
+    return {'state':'ALREADY_TARGET_NO_WRITE','owner_sha256':owner_sha256,'binding_id_sha256':binding_id_sha256,'before_sha256':row_sha256,'after_sha256':row_sha256,'before_revision':revision,'after_revision':revision,'model_policy_version':TARGET,'writes':0,'immutable_fields_unchanged':True}
+   # One row, exact prior version/revision, original owner coordinates. All
+   # validation remains inside the transaction so any unexpected delta rolls back.
+   updated=await connection.fetchrow("""UPDATE ella_runtime_bindings b
+SET model_policy_version=$1, revision=b.revision+1, updated_at=CURRENT_TIMESTAMP
+FROM users u WHERE b.id=$2 AND b.user_id=u.id AND u.omi_uid=$3
+AND u.status='ACTIVE' AND b.user_id=$4 AND b.account_user_id=$4
+AND b.profile_user_id=$4 AND b.revision=$5 AND b.model_policy_version=$6
+AND b.role='user' AND b.provider='hermes' AND b.active=true
+AND b.status='active' AND b.health_state='healthy' RETURNING b.*""",TARGET,before['id'],uid,owner.account_id,revision,old_policy,timeout=5)
+   require(updated is not None,'binding_policy_cas_lost');after=dict(updated)
+   require(unchanged(after)==unchanged(before),'unexpected_binding_delta')
+   require(after['revision']==revision+1 and after['model_policy_version']==TARGET and after.get('updated_at') is not None,'binding_policy_readback_invalid')
+   result={'state':'OWNED_POLICY_VERSION_CAS_COMMITTED','owner_sha256':owner_sha256,'binding_id_sha256':binding_id_sha256,'before_sha256':row_sha256,'after_sha256':digest(after),'before_revision':revision,'after_revision':revision+1,'previous_model_policy_version':old_policy,'model_policy_version':TARGET,'writes':1,'immutable_fields_unchanged':True}
+  return result

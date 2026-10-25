@@ -1,0 +1,101 @@
+"""Actual CAS helper with fake PG transaction/authority-lock adapters; no real DB/provider."""
+import asyncio,copy,importlib.util,sys,types,unittest,uuid
+from pathlib import Path
+from unittest.mock import patch
+F=Path(__file__).resolve().parents[1]
+def load():
+ spec=importlib.util.spec_from_file_location('actual_owned_binding_policy_cas',F/'candidate/binding_policy_alignment.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
+class Context:
+ def __init__(self,enter,exit=None):self.enter=enter;self.exit=exit
+ async def __aenter__(self):return self.enter()
+ async def __aexit__(self,*exc):
+  if self.exit:self.exit(*exc)
+  return False
+class Rig:
+ def __init__(self,m):
+  self.m=m;self.events=[];self.uid='fictional-owner';self.owner=uuid.UUID('00000000-0000-4000-8000-000000000001');self.row={'id':uuid.UUID('00000000-0000-4000-8000-000000000002'),'user_id':self.owner,'account_user_id':self.owner,'profile_user_id':self.owner,'revision':15,'model_policy_version':m.OLD,'updated_at':'synthetic-before','provider':'hermes','role':'user','active':True,'status':'active','health_state':'healthy','profile_name':'fictional-profile','agent_id':'fictional-agent','workspace_root':'/fictional/workspace','credential_ref':'existing-reference-only','unrelated':{'preserve':['all','fields']}};self.before=copy.deepcopy(self.row);self.duplicates=False;self.lost=False;self.foreign_delta=False;self.commit_fail=False;self.lock_failure=False;self.update_calls=[];self.repo=types.SimpleNamespace(pool=types.SimpleNamespace(acquire=lambda:Context(lambda:self)))
+ async def resolve(self,connection,uid):self.events.append('resolve_owner');return types.SimpleNamespace(account_id=self.owner,profile_id=self.owner)
+ async def lock(self,connection,owner):self.events.append('lock');return object()
+ async def verify(self,connection,**kwargs):
+  self.events.append('verify')
+  if self.lock_failure:raise ValueError('synthetic_lock_failure')
+ def transaction(self):
+  before=copy.deepcopy(self.row)
+  def enter():self.events.append('begin')
+  def exit(kind,value,tb):
+   self.events.append('rollback' if kind else 'commit')
+   if kind:self.row=before
+   if self.commit_fail and not kind:raise TimeoutError('synthetic_uncertain_commit')
+  return Context(enter,exit)
+ async def fetch(self,query,*args,**kw):self.events.append('select');return [copy.deepcopy(self.row)]*(2 if self.duplicates else 1)
+ async def fetchrow(self,query,*args,**kw):
+  self.events.append('update');self.update_calls.append((query,args))
+  if self.lost:return None
+  target,binding,uid,owner,revision,policy=args
+  if (self.row['id'],self.row['user_id'],self.row['revision'],self.row['model_policy_version'])!=(binding,owner,revision,policy):return None
+  self.row.update(model_policy_version=target,revision=revision+1,updated_at='synthetic-after')
+  if self.foreign_delta:self.row['workspace_root']='/foreign/workspace'
+  return copy.deepcopy(self.row)
+ def args(self):return {'uid':self.uid,'owner_sha256':self.m.sha(self.uid),'binding_id_sha256':self.m.sha(self.row['id']),'row_sha256':self.m.digest(self.row),'revision':self.row['revision'],'old_policy':self.row['model_policy_version']}
+ async def run(self,args=None):
+  database=types.ModuleType('database');database.__path__=[];locks=types.ModuleType('database.authority_advisory_lock');locks.resolve_self_owner_unlocked=self.resolve;locks.acquire_authority_lock=self.lock;locks.verify_self_owner_after_lock=self.verify;database.authority_advisory_lock=locks
+  with patch.dict(sys.modules,{'database':database,'database.authority_advisory_lock':locks}):return await self.m.align(self.repo,**(args or self.args()))
+class Tests(unittest.IsolatedAsyncioTestCase):
+ def setUp(self):self.m=load();self.r=Rig(self.m)
+ async def test_owned_one_row_three_field_change_and_existing_lock_order(self):
+  result=await self.r.run();self.assertEqual(result['state'],'OWNED_POLICY_VERSION_CAS_COMMITTED');self.assertEqual(self.r.events,['resolve_owner','begin','lock','verify','select','update','commit']);self.assertEqual(self.r.row['revision'],16);self.assertEqual(self.r.row['model_policy_version'],self.m.TARGET);self.assertEqual(self.m.unchanged(self.r.row),self.m.unchanged(self.r.before));self.assertEqual(len(self.r.update_calls),1);set_clause=self.r.update_calls[0][0].split('SET ',1)[1].split('FROM users',1)[0];self.assertEqual(set_clause.strip(),'model_policy_version=$1, revision=b.revision+1, updated_at=CURRENT_TIMESTAMP')
+ async def test_already_target_lab_noop_revision_six_unchanged(self):
+  self.r.row.update(revision=6,model_policy_version=self.m.TARGET);before=copy.deepcopy(self.r.row);result=await self.r.run();self.assertEqual(result['writes'],0);self.assertEqual(self.r.row,before);self.assertEqual(self.r.update_calls,[])
+ async def test_stale_row_hash_revision_policy_id_pins_reject_before_update(self):
+  for field,value in [('row_sha256','a'*64),('revision',14),('old_policy',self.m.TARGET),('binding_id_sha256','b'*64)]:
+   self.r=Rig(self.m);args=self.r.args();args[field]=value
+   with self.subTest(field=field),self.assertRaises(self.m.AlignmentRejected):await self.r.run(args)
+   self.assertEqual(self.r.update_calls,[]);self.assertEqual(self.r.row,self.r.before)
+ async def test_foreign_uid_scope_rejects_before_pool(self):
+  args=self.r.args();args['uid']='foreign'
+  with self.assertRaises(self.m.AlignmentRejected):await self.r.run(args)
+  self.assertEqual(self.r.events,[])
+ async def test_owner_lock_failure_prevents_row_or_update(self):
+  self.r.lock_failure=True
+  with self.assertRaises(ValueError):await self.r.run()
+  self.assertNotIn('select',self.r.events);self.assertEqual(self.r.update_calls,[])
+ async def test_foreign_owner_coordinates_rejected_even_with_matching_raw_pin(self):
+  self.r.row['profile_user_id']=uuid.UUID('00000000-0000-4000-8000-000000000099')
+  with self.assertRaises(self.m.AlignmentRejected):await self.r.run()
+  self.assertEqual(self.r.update_calls,[])
+ async def test_ambiguous_owned_rows_reject(self):
+  self.r.duplicates=True
+  with self.assertRaises(self.m.AlignmentRejected):await self.r.run()
+  self.assertEqual(self.r.update_calls,[])
+ async def test_lost_update_or_unexpected_immutable_delta_rolls_back(self):
+  for flag in ['lost','foreign_delta']:
+   self.r=Rig(self.m);setattr(self.r,flag,True)
+   with self.subTest(flag=flag),self.assertRaises(self.m.AlignmentRejected):await self.r.run()
+   self.assertEqual(self.r.row,self.r.before);self.assertEqual(self.r.events[-1],'rollback')
+ async def test_uncertain_commit_is_not_success_or_automatic_retry(self):
+  self.r.commit_fail=True
+  with self.assertRaises(TimeoutError):await self.r.run()
+  self.assertEqual(len(self.r.update_calls),1)
+if __name__=='__main__':unittest.main()
+
+class TypedLockTests(unittest.IsolatedAsyncioTestCase):
+ async def scenario(self,*,stale_transaction=False,owner_changed=False):
+  m=load();r=Rig(m);path=F.parents[1]/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/database/authority_advisory_lock.py';spec=importlib.util.spec_from_file_location('actual_v1_authority_lock_composition',path);locks=importlib.util.module_from_spec(spec);sys.modules[spec.name]=locks;spec.loader.exec_module(locks);artifact=F.parents[1]/'repo/backend/contracts/authority_advisory_lock_v1.json';self.assertEqual(__import__('hashlib').sha256(artifact.read_bytes()).hexdigest(),locks.CONTRACT_ARTIFACT_SHA256)
+  original=r.fetchrow;reads=[0]
+  async def execute(query,*args):r.events.append('actual_pg_advisory_lock');self.assertIn('pg_advisory_xact_lock',query)
+  async def fetchrow(query,*args,**kwargs):
+   if 'pg_backend_pid()' in query:
+    reads[0]+=1;return {'backend_pid':42,'transaction_id':101 if stale_transaction and reads[0]>1 else 100,'lock_held':True}
+   if query.startswith('SELECT id FROM users'):
+    r.events.append('actual_owner_forupdate' if 'FOR UPDATE' in query else 'actual_owner_resolve');return {'id':uuid.UUID('00000000-0000-4000-8000-000000000099') if owner_changed and 'FOR UPDATE' in query else r.owner}
+   return await original(query,*args,**kwargs)
+  r.execute=execute;r.fetchrow=fetchrow;database=types.ModuleType('database');database.__path__=[];database.authority_advisory_lock=locks
+  with patch.object(locks,'contract_artifact_path',return_value=artifact),patch.dict(sys.modules,{'database':database,'database.authority_advisory_lock':locks}):
+   if stale_transaction or owner_changed:
+    with self.assertRaises(locks.AuthorityLockError):await m.align(r.repo,**r.args())
+    self.assertEqual(r.update_calls,[])
+   else:
+    result=await m.align(r.repo,**r.args());self.assertEqual(result['after_revision'],16);self.assertIn('actual_pg_advisory_lock',r.events);self.assertLess(r.events.index('actual_owner_forupdate'),r.events.index('select'))
+ async def test_real_authority_owner_uuid_framing_and_opaque_proof_compose(self):await self.scenario()
+ async def test_actual_lock_proof_stale_transaction_rejected(self):await self.scenario(stale_transaction=True)
+ async def test_actual_user_owner_drift_after_lock_rejected(self):await self.scenario(owner_changed=True)

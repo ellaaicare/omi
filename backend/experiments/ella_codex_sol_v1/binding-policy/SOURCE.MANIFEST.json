@@ -1,0 +1,27 @@
+{
+  "actual_personal_rows_updated": 1,
+  "actual_postgres_preparation_parameter_types": [
+    "text",
+    "uuid",
+    "text",
+    "uuid",
+    "int4",
+    "text"
+  ],
+  "business_identity_fields_changed": false,
+  "credentials_or_grants_changed": false,
+  "only_columns_changed": [
+    "model_policy_version",
+    "revision",
+    "updated_at"
+  ],
+  "pins": {
+    "candidate/binding_policy_alignment.py.source": "9cde05f60a353f4f75b08a26250f4a7466da613d56dd682fa5dca66874efaf4c",
+    "tests/test_binding_cas.py.source": "88150bd56f9c06c2cf87f511ab31ffe1df6a6ff6732b8819d83f827f08a6f0f1",
+    "tests/test_exclusive_receipt.py.source": "0281ddf395712b5fa80a2a83e142c594cb37898279f6cd6885574a9f7b9700d6"
+  },
+  "real_authority_lock_noop_acceptance": true,
+  "source_fixture_cases": 15,
+  "state": "EXACT_OWNED_MODEL_POLICY_ALIGNMENT_DEPLOYED_NOT_INFERENCE_ACCEPTANCE",
+  "strict_post_alignment_two_account_join": "PASS"
+}
