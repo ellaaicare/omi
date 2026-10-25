@@ -1,0 +1,66 @@
+"""V2 actual config reasoning chokepoint + actual pure planner; no live config/session I/O."""
+import ast, copy, importlib.util, json, sys, unittest
+from pathlib import Path
+F=Path(__file__).resolve().parents[2];V=F/'profile-cas-v2';sys.path.insert(0,str(F/'tests'))
+import test_profile_model_cas as old
+
+def load(name,path):
+ spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m
+
+def reasoning_source():
+ tree=ast.parse((V/'baseline/hermes_constants.py').read_text());names={'parse_reasoning_effort','_canonical_model_variants','resolve_per_model_reasoning_effort','resolve_reasoning_config'}
+ nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='VALID_REASONING_EFFORTS' for t in n.targets)]
+ ns={};exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual_installed_reasoning_chokepoint','exec'),ns);return ns['resolve_reasoning_config']
+class Tests(old.Tests):
+ def rig(self):
+  super().rig();self.p=load('pure_profile_model_cas_v2',V/'candidate/profile_model_cas.py');self.resolve_reasoning=reasoning_source();return self
+ def plan(self,**overrides):
+  args=dict(selection=self.selected,expected_selection=copy.deepcopy(self.selected),expected_config_digest=self.p.digest(self.c),current_runtime=self.runtime(),legacy_identity='a'*64,route_keys=('fictional-agent','fictional-personal-profile'),project_config=self.a.project_config,require_policy=self.d.require_shared_root_policy,resolve_reasoning_config=self.resolve_reasoning);args.update(overrides);return self.p.plan_switch(self.c,**args)
+ def reconcile(self,plan,current,**overrides):
+  args=dict(selection=self.selected,expected_selection=copy.deepcopy(self.selected),current_runtime=self.runtime(current),project_config=self.a.project_config,require_policy=self.d.require_shared_root_policy,resolve_reasoning_config=self.resolve_reasoning);args.update(overrides);return self.p.reconcile(plan,current,**args)
+ def test_none_low_and_disabled_agent_effort_become_medium_with_security_keys_intact(self):
+  for effort in ['none','low',False]:
+   self.rig();self.c['agent']={'reasoning_effort':effort,'coding_context':'off','environment_probe':False,'disabled_toolsets':['fictional-shell'],'max_iterations':7,'reasoning_overrides':{'unrelated-model':'high'}};before=copy.deepcopy(self.c);plan=self.plan();after=self.reconcile(plan,self.c)
+   with self.subTest(effort=effort):
+    self.assertEqual(self.resolve_reasoning(before,'deepseek/deepseek-v4-flash'),{'enabled':False} if effort in ['none',False] else {'enabled':True,'effort':'low'});self.assertEqual(self.resolve_reasoning(after,'gpt-6.1-sol'),{'enabled':True,'effort':'medium'});self.assertEqual(after['ella_runtime_policy']['reasoningEffort'],'medium');expected={**before['agent'],'reasoning_effort':'medium'};self.assertEqual(after['agent'],expected);self.assertEqual(self.reconcile(plan,after,rollback=True),before)
+ def test_missing_agent_adds_only_single_required_key_and_rollback_removes_it(self):
+  self.rig();self.assertNotIn('agent',self.c);plan=self.plan();after=self.reconcile(plan,self.c);self.assertEqual(after['agent'],{'reasoning_effort':'medium'});self.assertNotIn('agent',self.reconcile(plan,after,rollback=True))
+ def test_invalid_existing_agent_section_rejects(self):
+  for value in [None,False,[], 'foreign']:
+   self.rig();self.c['agent']=value
+   with self.subTest(value=value),self.assertRaises(self.p.PlanRejected):self.plan()
+ def test_target_override_conflict_rejects_without_changing_override(self):
+  for alias in ['gpt-6.1-sol','gpt-6-1-sol','openai/gpt-6.1-sol']:
+   for effort in ['none','low','high',False]:
+    self.rig();self.c['agent']={'reasoning_effort':'none','reasoning_overrides':{alias:effort}};before=copy.deepcopy(self.c)
+    with self.subTest(alias=alias,effort=effort),self.assertRaises(self.p.PlanRejected):self.plan()
+    self.assertEqual(self.c,before)
+ def test_target_medium_override_preserved_and_proven_by_actual_resolver(self):
+  self.rig();self.c['agent']={'reasoning_effort':'none','reasoning_overrides':{'openai/gpt-6.1-sol':'medium','unrelated-model':'high'}};before=copy.deepcopy(self.c);plan=self.plan();after=self.reconcile(plan,self.c);self.assertEqual(after['agent']['reasoning_overrides'],before['agent']['reasoning_overrides']);self.assertEqual(self.resolve_reasoning(after,'gpt-6.1-sol'),{'enabled':True,'effort':'medium'})
+ def test_tampered_added_agent_section_cannot_add_tools(self):
+  from dataclasses import replace
+  self.rig();plan=self.plan();after=json.loads(plan.after_json);after['agent']['tools']=['new-tool'];fake=replace(plan,after_json=self.p.encoded(after),after_digest=self.p.digest(after))
+  with self.assertRaises(self.p.PlanRejected):self.reconcile(fake,self.c)
+ def test_session_override_is_explicitly_separate_from_config_reasoning(self):
+  # Source AST only: the ordinary gateway returns an existing per-session override
+  # before the config resolver. This planner does not mutate that private state.
+  path=Path('/Users/ellaai/.hermes/hermes-agent/gateway/run.py');tree=ast.parse(path.read_text());fn=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='_resolve_session_reasoning_config');returns=[n for n in ast.walk(fn) if isinstance(n,ast.Return)];self.assertTrue(any(isinstance(n.value,ast.Subscript) and isinstance(n.value.value,ast.Name) and n.value.value.id=='overrides' for n in returns));self.assertTrue(any(isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Attribute) and n.value.func.attr=='_load_reasoning_config' for n in returns))
+class WorkerCodes(unittest.TestCase):
+ def namespace(self,path):
+  tree=ast.parse(path.read_text());literal=next(n for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(x,ast.Name) and x.id=='STATIC_CODES' for x in n.targets));cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='DurableOperation');failure=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='failure');ns={};exec(compile(ast.Module(body=[literal,failure],type_ignores=[]),'actual_worker_closed_projection','exec'),ns);return ns
+ def receipt(self,error):
+  from types import SimpleNamespace
+  ns=self.namespace(V/'candidate/gateway/platforms/semantic_role_worker.py');rows=[];obj=SimpleNamespace(completed=False,dispatched=False,persisted=False,binding={'nonce':'synthetic'},write=lambda suffix,value:rows.append((suffix,value)));ns['failure'](obj,error);return rows[0][1]
+ def test_exact_two_new_closed_codes_retained(self):
+  for name,code in [('SemanticRoleHold','semantic_configured_reasoning_unsupported'),('IsolationHold','configured_reasoning_unsupported')]:
+   error=type(name,(RuntimeError,),{})(code);r=self.receipt(error);self.assertEqual(r['error_code'],code);self.assertEqual(r['stage'],'pre_dispatch');self.assertFalse(r['provider_outcome_unknown']);self.assertFalse(r['automatic_retry'])
+ def test_only_two_static_literal_entries_change(self):
+  before=self.namespace(V/'baseline/semantic_role_worker.py')['STATIC_CODES'];after=self.namespace(V/'candidate/gateway/platforms/semantic_role_worker.py')['STATIC_CODES'];self.assertEqual(set(before),set(after));self.assertEqual(set(after['SemanticRoleHold'])-set(before['SemanticRoleHold']),{'semantic_configured_reasoning_unsupported'});self.assertEqual(set(after['IsolationHold'])-set(before['IsolationHold']),{'configured_reasoning_unsupported'});self.assertTrue(all(set(before[k])<=set(after[k]) for k in before))
+ def test_untrusted_text_and_wrong_exception_class_stay_unclassified(self):
+  for error in [type('SemanticRoleHold',(RuntimeError,),{})('private text not a closed code'),ValueError('configured_reasoning_unsupported')]:
+   r=self.receipt(error);self.assertEqual(r['error_code'],'unclassified');self.assertNotIn('private text',repr(r))
+ def test_all_worker_ast_except_static_codes_unchanged(self):
+  def rest(path):
+   tree=ast.parse(path.read_text());tree.body=[n for n in tree.body if not(isinstance(n,ast.Assign) and any(isinstance(x,ast.Name) and x.id=='STATIC_CODES' for x in n.targets))];return ast.dump(tree,include_attributes=False)
+  self.assertEqual(rest(V/'baseline/semantic_role_worker.py'),rest(V/'candidate/gateway/platforms/semantic_role_worker.py'))
+if __name__=='__main__':unittest.main()

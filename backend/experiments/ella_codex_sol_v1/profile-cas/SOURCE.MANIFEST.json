@@ -1,0 +1,14 @@
+{
+  "state": "SOURCE_ONLY_NOT_DEPLOYED_CONFIG_UNREAD",
+  "pins": {
+    "v1/profile_model_cas.py.source": "5fbf04984bebf5718dc6d02e34de5d2aa04abc61f32e3282982cb0626b0a772a",
+    "v1/test_profile_model_cas.py.source": "48cff68053317683f056da03c9270c8230e6d467fb5976fe26986f2066ed3092",
+    "v2/profile_model_cas.py.source": "296f95ae44b7b496f442dc190d0096197b9e9855b1de03d1727166ae59a08c8a",
+    "v2/semantic_role_worker.py.source": "2d2b1a6f6fb295882b5884480b67eb5abdf527a7c2e218ed26aff4b98f282e14",
+    "v2/test_profile_model_cas_v2.py.source": "d97ab6241af6c4f796c56c64211f79d0863b5ba2a119ba6f1f544d6c90ce5f6a"
+  },
+  "v1_planner_and_transport_cases": 23,
+  "v2_cases": 23,
+  "qualification": "Pure actual-policy/resolver tests with synthetic configuration; no live auth/config/session/profile/HTTP/model writes. Session reasoning override remains independently observable.",
+  "root_reviewed_at": "2026-10-25T02:38:30.613864+00:00"
+}

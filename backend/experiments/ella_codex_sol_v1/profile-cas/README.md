@@ -1,0 +1,7 @@
+# One-profile model switch planning
+
+The pure v2 planner reconciles the exact current original-owner selection, full configuration digest and real server runtime projection before returning a model-only plan. It changes only provider/model/base, selected existing route aliases, frozen model policy/digest, and target agent reasoning effort. Security, tool, fallback, owner, workspace and unrelated route fields are preserved. Rollback requires exact post-change configuration and server runtime projection. No file writer or access grant is supplied by the plan.
+
+Normal chat selects `agent.reasoning_effort`, while direct semantic roles select the frozen policy. Updating only the policy would leave these paths inconsistent. V2 aligns both to medium and rejects conflicting model overrides. Existing per-session reasoning overrides are preserved and remain a separate live acceptance item. The ordinary runtime projection excludes `agent`; therefore raw full-file CAS/readback plus the actual reasoning resolver are required, not only projection equality. The worker candidate adds exactly two closed diagnostic labels; all other worker code is unchanged.
+
+Root reran 23 v1/transport and 23 v2 cases. These are local source fixtures with existing retained dependency references, not a standalone environment, live OAuth entitlement test or successful model switch. No actual profile/session/credential files have been read or changed for this source preparation.

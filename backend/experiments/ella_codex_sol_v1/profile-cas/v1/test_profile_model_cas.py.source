@@ -1,0 +1,74 @@
+"""Actual authority project_config + direct-role policy checks; entirely synthetic config/runtime."""
+import copy, importlib.util, json, sys, unittest
+from pathlib import Path
+import test_sol_route as route
+F=Path(__file__).resolve().parents[1]
+def load(name,path):
+ spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m
+class Tests(unittest.TestCase):
+ setUp=route.Tests.setUp
+ tearDown=route.Tests.tearDown
+ config=route.Tests.config
+ def rig(self):
+  p=load('pure_profile_model_cas',F/'candidate/profile_model_cas.py');a=load('actual_runtime_authority_model_cas',F/'baseline/semantic_runtime_authority.py')
+  selected={'uid':'fictional-owner','agent_id':'fictional-agent','profile_name':'fictional-personal-profile','workspace_root':'/synthetic/fictional-personal-profile/workspace','account_user_id':'fictional-account','registered_agent_id':'fictional-agent'}
+  config=self.config(model='deepseek/deepseek-v4-flash',effort='none');config['model']['provider']='openrouter';config['model']['base_url']='https://openrouter.ai/api/v1';policy=config['ella_runtime_policy'];policy.update(provider='openrouter',credentialRef='env:OPENROUTER_API_KEY',fallbackModels=[],fallbackRoutes=[],apiToolsets=['synthetic-existing-read-only-toolset'],isolationPosture={'owner':'fictional-owner','account':'fictional-account'})
+  policy['digest']=__import__('hashlib').sha256(json.dumps({k:v for k,v in policy.items() if k!='digest'},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+  config.update(model_routes={'fictional-agent':{'model':'deepseek/deepseek-v4-flash','provider':'openrouter','base_url':'https://openrouter.ai/api/v1'},'fictional-personal-profile':{'model':'deepseek/deepseek-v4-flash','provider':'openrouter'},'unrelated-route':{'model':'unrelated-model','provider':'unrelated-provider'}},owner={'uid':'fictional-owner'},session={'name':'fictional-original-session'},workspace=selected['workspace_root'],other={'preserve':[1,'unchanged']})
+  self.p,self.a,self.selected,self.c=p,a,selected,config
+  return self
+ def runtime(self,config=None,selected=None):
+  c=config or self.c;s=selected or self.selected;projection,policy=self.a.project_config(c,s['agent_id'])
+  return {'version':2,**{k:s[k] for k in ['uid','agent_id','account_user_id','profile_name','workspace_root']},'legacy_runtime_identity_sha256':'a'*64,'provider':projection['provider'],'model':projection['model'],'policy_version':policy['version'],'policy_sha256':policy['digest'],'config_projection_sha256':self.a.digest(projection),'registry_revision':self.a.digest(s)}
+ def plan(self,**overrides):
+  args=dict(selection=self.selected,expected_selection=copy.deepcopy(self.selected),expected_config_digest=self.p.digest(self.c),current_runtime=self.runtime(),legacy_identity='a'*64,route_keys=('fictional-agent','fictional-personal-profile'),project_config=self.a.project_config,require_policy=self.d.require_shared_root_policy);args.update(overrides);return self.p.plan_switch(self.c,**args)
+ def reconcile(self,plan,current,**overrides):
+  args=dict(selection=self.selected,expected_selection=copy.deepcopy(self.selected),current_runtime=self.runtime(current),project_config=self.a.project_config,require_policy=self.d.require_shared_root_policy);args.update(overrides);return self.p.reconcile(plan,current,**args)
+ def test_pure_plan_actual_projectors_and_one_profile_commit_reconcile(self):
+  self.rig();before=copy.deepcopy(self.c);plan=self.plan();after=self.reconcile(plan,self.c);self.assertEqual(self.c,before);self.assertEqual(after['model']['default'],'gpt-6.1-sol');self.assertEqual(after['model_routes']['unrelated-route'],before['model_routes']['unrelated-route']);self.assertEqual(after['session'],before['session']);self.assertEqual(after['owner'],before['owner']);self.assertEqual(after['workspace'],before['workspace']);self.assertEqual(after['other'],before['other']);self.assertEqual(after['ella_runtime_policy']['apiToolsets'],before['ella_runtime_policy']['apiToolsets']);self.assertEqual(after['ella_runtime_policy']['fallbackModels'],before['ella_runtime_policy']['fallbackModels']);self.assertEqual(after['ella_runtime_policy']['fallbackRoutes'],before['ella_runtime_policy']['fallbackRoutes']);self.assertEqual(after['ella_runtime_policy']['isolationPosture'],before['ella_runtime_policy']['isolationPosture']);self.assertTrue(plan.receipt()['raw_file_cas_required']);self.assertNotIn('fictional-owner',repr(plan.receipt()));self.assertNotIn('fictional-owner',repr(plan))
+ def test_exact_rollback_only_on_current_after_config_runtime(self):
+  self.rig();plan=self.plan();after=self.reconcile(plan,self.c);restored=self.reconcile(plan,after,rollback=True);self.assertEqual(restored,self.c)
+  after['other']['preserve'].append('concurrent')
+  with self.assertRaises(self.p.PlanRejected):self.reconcile(plan,after,rollback=True)
+ def test_foreign_owner_profile_agent_or_workspace_rejected(self):
+  self.rig()
+  for field in ['uid','agent_id','profile_name','workspace_root','account_user_id','registered_agent_id']:
+   s={**self.selected,field:'foreign'}
+   with self.subTest(field=field),self.assertRaises(self.p.PlanRejected):self.plan(selection=s)
+ def test_foreign_route_cannot_be_selected(self):
+  self.rig()
+  with self.assertRaises(self.p.PlanRejected):self.plan(route_keys=('fictional-agent','unrelated-route'))
+ def test_duplicate_or_omitted_existing_selected_alias_rejected(self):
+  self.rig()
+  for keys in [('fictional-agent','fictional-agent'),('fictional-agent',),()]:
+   with self.subTest(keys=keys),self.assertRaises(self.p.PlanRejected):self.plan(route_keys=keys)
+ def test_embedded_model_or_selected_route_credential_rejected(self):
+  for where in ['model','route']:
+   for key in ['api_key','access_token','refresh_token','authorization']:
+    self.rig();row=self.c['model'] if where=='model' else self.c['model_routes']['fictional-personal-profile'];row[key]='synthetic-not-a-credential'
+    with self.subTest(where=where,key=key),self.assertRaises(self.p.PlanRejected):self.plan()
+ def test_runtime_config_owner_policy_registry_mismatch_rejected(self):
+  self.rig()
+  for field in ['uid','agent_id','profile_name','workspace_root','account_user_id','provider','model','policy_version','policy_sha256','config_projection_sha256','registry_revision','legacy_runtime_identity_sha256']:
+   r={**self.runtime(),field:'mismatch'}
+   with self.subTest(field=field),self.assertRaises(self.p.PlanRejected):self.plan(current_runtime=r)
+ def test_initial_config_digest_or_invalid_policy_rejected(self):
+  self.rig()
+  with self.assertRaises(self.p.PlanRejected):self.plan(expected_config_digest='b'*64)
+  self.c['ella_runtime_policy']['digest']='b'*64
+  with self.assertRaises((self.p.PlanRejected,self.a.SemanticRoleHold)):self.plan()
+ def test_selected_route_wrong_model_or_provider_rejected(self):
+  for key,value in [('model','foreign-model'),('provider','foreign-provider'),('base_url','https://foreign.invalid')]:
+   self.rig();self.c['model_routes']['fictional-personal-profile'][key]=value
+   with self.subTest(key=key),self.assertRaises(self.p.PlanRejected):self.plan()
+ def test_tampered_plan_cannot_add_unrelated_owner_tool_or_fallback_changes(self):
+  from dataclasses import replace
+  for section,key,value in [('owner','uid','foreign'),('session','name','foreign'),('ella_runtime_policy','apiToolsets',['new-tool']),('ella_runtime_policy','fallbackModels',['new-model']),('other','new_setting',True)]:
+   self.rig();plan=self.plan();after=json.loads(plan.after_json);after[section][key]=value;tampered=replace(plan,after_json=self.p.encoded(after),after_digest=self.p.digest(after))
+   with self.subTest(section=section,key=key),self.assertRaises(self.p.PlanRejected):self.reconcile(tampered,self.c)
+ def test_rollback_rejects_changed_owner_runtime_projection(self):
+  self.rig();plan=self.plan();after=self.reconcile(plan,self.c);runtime=self.runtime(after);runtime['policy_sha256']='b'*64
+  with self.assertRaises(self.p.PlanRejected):self.reconcile(plan,after,rollback=True,current_runtime=runtime)
+ def test_public_receipt_has_only_digests_model_counts_not_config(self):
+  self.rig();plan=self.plan();receipt=plan.receipt();self.assertEqual(receipt['writes'],0);self.assertEqual(receipt['selected_route_count'],2);self.assertNotIn('before_json',receipt);self.assertNotIn('global-auth:openai-codex',repr(receipt))
+if __name__=='__main__':unittest.main()
