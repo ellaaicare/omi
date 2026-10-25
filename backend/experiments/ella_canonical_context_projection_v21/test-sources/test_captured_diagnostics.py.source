@@ -1,0 +1,37 @@
+"""Actual fixed diagnostic reject function; no provider/auth/DB effects."""
+import ast,contextvars,hashlib,json,logging,sys,types,unittest
+from pathlib import Path
+from unittest.mock import patch
+ROOT=Path(__file__).resolve().parents[1]
+class Rejected(RuntimeError):pass
+class Scope:pass
+
+def load():
+ tree=ast.parse((ROOT/'candidate/ella/services/semantic_captured_context.py').read_text())
+ nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='reject' or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='_LOCAL_HOLD_CODES' for t in n.targets)]
+ namespace={'_CURRENT':contextvars.ContextVar('diag_test',default=None),'AttemptContext':Scope,'textsha':lambda v:hashlib.sha256(v.encode()).hexdigest(),'json':json}
+ exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual_reject.py','exec'),namespace)
+ return namespace
+class DiagnosticTests(unittest.TestCase):
+ def setUp(self):
+  self.n=load();self.mods={}
+  for name in ['ella','ella.services','ella.services.semantic_publication','ella.services.semantic_captured_hold_codes']:self.mods[name]=types.ModuleType(name)
+  self.mods['ella.services.semantic_publication'].SemanticPublicationRejectedError=Rejected
+  self.mods['ella.services.semantic_captured_hold_codes'].CAPTURED_HOLD_CODES=frozenset(['materialized_projection_stale'])
+ def test_fixed_local_and_remote_codes_emit_hashes_only(self):
+  scope=Scope();scope.cid='synthetic-cid';scope.attempt_sha256='a'*64;self.n['_CURRENT'].set(scope)
+  for code in ['captured_context_source_changed','captured_context_host_materialized_projection_stale','captured_context_host_rejected']:
+   with patch.dict(sys.modules,self.mods),patch.object(logging.getLogger('ella.captured_context'),'warning') as emit:
+    with self.assertRaises(Rejected):self.n['reject'](code)
+    value=json.loads(emit.call_args.args[1]);self.assertEqual(value['code'],code);self.assertEqual(value['source_id_sha256'],hashlib.sha256(scope.cid.encode()).hexdigest());self.assertNotIn(scope.cid,json.dumps(value));self.assertEqual(set(value),{'contract','code','source_id_sha256','attempt_scope_sha256'})
+ def test_unknown_private_and_wrong_types_never_log(self):
+  class StringSubclass(str):pass
+  for value in ['private output','captured_context_host_private_not_allowed',StringSubclass('captured_context_source_changed'),['private']]:
+   with patch.dict(sys.modules,self.mods),patch.object(logging.getLogger('ella.captured_context'),'warning') as emit:
+    with self.assertRaises(Rejected):self.n['reject'](value)
+    emit.assert_not_called()
+ def test_logger_failure_does_not_replace_original_rejection(self):
+  with patch.dict(sys.modules,self.mods),patch.object(logging.getLogger('ella.captured_context'),'warning',side_effect=RuntimeError('synthetic-log-failure')):
+   with self.assertRaises(Rejected) as got:self.n['reject']('captured_context_source_changed')
+   self.assertEqual(got.exception.args,('captured_context_source_changed',))
+if __name__=='__main__':unittest.main()

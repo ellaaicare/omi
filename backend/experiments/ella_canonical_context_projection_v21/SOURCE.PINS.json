@@ -1,0 +1,23 @@
+{
+  "candidate/backend/ella/routers/callbacks.py.source": "fa54f713784cbb43bfbf519407bef5738895e5bd40a9bb3da47b6fc52952f028",
+  "candidate/backend/ella/services/recent_context_projection_v2.py.source": "fd1389b8af0f1dea040fa7ebbfd53e970eca7f8dfe68a7c0b477006f43b93957",
+  "candidate/backend/ella/services/retained_completion_enrichment.py.source": "e1433a034def353ff55d9c301d8dfb9824bd2bd786a6ac8b06d8b7d5bd9cd011",
+  "candidate/backend/ella/services/semantic_captured_context.py.source": "cb6776ad1edbfc142e5397296a9201e990fb6a567b1311afc4c73c6349b5a7c4",
+  "candidate/backend/ella/services/semantic_captured_hold_codes.py.source": "2421e5d67cc4ae729be32b64756d18d52ffe49cd5625c47d3bd7f275e5bf44b5",
+  "candidate/backend/ella/services/semantic_context_records_v2.py.source": "2bcc52532c518d7d9fa173ce161a66c777230ef110583568a5c50f0c79b09e62",
+  "candidate/backend/ella/services/semantic_host_context.py.source": "dc5641089a60e102ffa348c8f18baa31b3f80dbf658041729999d83ad803473b",
+  "candidate/backend/ella/services/semantic_publication.py.source": "0e93172f8fd77dbff8ae823a24ce05552226aef8787bb010ad5a76cdae18125d",
+  "candidate/host/recent_context_projection_v2.py.source": "fd1389b8af0f1dea040fa7ebbfd53e970eca7f8dfe68a7c0b477006f43b93957",
+  "candidate/host/semantic_context_manifest_v2.py.source": "74d3a7544976ed16bd239974aa984dc9c60520089ff2cf146c28e5ca0da14f90",
+  "candidate/host/semantic_context_materialized_rows_v2.py.source": "55aaadbcd0b6a3ba7bfb8f689723bc9a5ecd4ad22a4db5b95c9c0f270a0e35f1",
+  "candidate/host/semantic_context_snapshot.py.source": "fd17abc2de14ada43e7e57e818a61a84242609685ed48c6c3795a38dbd9da9c2",
+  "candidate/host/semantic_context_snapshot_host_v2.py.source": "bffb791daae549f61c93082baf8ab8c4fff42a60f827947e0a8d8e6741a62ea5",
+  "candidate/host/semantic_context_snapshot_routes_v2.py.source": "c6df0cdeb6e509530ba955bee6eff05692fd2391556a0fad91ef6db9306d6045",
+  "candidate/host/semantic_context_v2_hold_codes.py.source": "2421e5d67cc4ae729be32b64756d18d52ffe49cd5625c47d3bd7f275e5bf44b5",
+  "test-sources/test_canonical_refresh.py.source": "ade17513d040873213aa4e9933b13420e253a243767c4a8ae3674e640a7cd135",
+  "test-sources/test_captured_diagnostics.py.source": "c0fd6730832f47f52d5ea607e4a879112de68068e8a9646a6754b8f0942e5987",
+  "test-sources/test_context_records_v21.py.source": "8e7c6aaa24812ad827e7f8986ec097dc8481fe9fc68534a430cbf304520fdfb5",
+  "test-sources/test_deployment_controller_rebind_review.py.source": "bb32ba1fa087b10c87659363b0b6d750e11e542193082cd4532a37b66818cf0f",
+  "test-sources/test_host_controller_rebind_review.py.source": "e4a09ef31c95198da44dc1be421e072f248a3016f20bcf79df99d917fe881d46",
+  "test-sources/test_host_manifest_v21.py.source": "4261a77dedeb6d0896d8877361961049c49bc720afee079dc3ee2a109cb2c859"
+}

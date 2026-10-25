@@ -1,0 +1,88 @@
+"""New canonical-projection cases; real capture/validation with synthetic authority/HTTP leaves."""
+import asyncio,copy,json,unittest,sys
+from test_host_manifest_v21 import Rig,v2,ROOT
+sys.path.append(str(ROOT.parent / "context-snapshot-v2-host/baseline"))
+
+class Tests(unittest.IsolatedAsyncioTestCase):
+ def setUp(self):self.r=Rig()
+ def tearDown(self):self.r.close()
+ def refresh(self):
+  row=self.r.metadata['context-a'];row['render_projection']['title']='canonical current title';row['render_projection_sha256']=v2.digest(row['render_projection'])
+  return row
+ async def test_stale_local_title_refreshed_without_any_workspace_write(self):
+  r=self.r;old_index=(r.path/'recent-conversations.md').read_text();old_snapshot=v2._hydrate_with_raw(r.runtime,uid=r.uid,runtime_identity=r.identity)[0]
+  before={str(p.relative_to(r.path)):p.read_bytes() for p in r.path.rglob('*') if p.is_file()}
+  current=self.refresh();captured=await r.capture();after={str(p.relative_to(r.path)):p.read_bytes() for p in r.path.rglob('*') if p.is_file()}
+  self.assertEqual(before,after);self.assertEqual((r.path/'recent-conversations.md').read_text(),old_index)
+  expected=v2.index_text([v2.RecentRow('context-a',current['render_projection'])])
+  self.assertEqual(captured['snapshot']['documents']['recentOMIindex'],expected);self.assertNotEqual(expected,old_index)
+  self.assertEqual(captured['snapshot']['revision'],v2.digest({'contract':'ella-captured-canonical-projection-v1','raw_snapshot_revision':old_snapshot['revision'],'canonical_recent_index_sha256':v2.textsha(expected)}))
+  self.assertEqual(captured['sidecar']['raw_files']['recent-conversations.md']['sha256'],v2.textsha(old_index))
+  row=captured['sidecar']['recent_index_records'][0]
+  self.assertEqual(set(row),v2.META_KEYS|{'row_sha256'});self.assertNotIn('render_projection',row)
+  self.assertEqual(row['row_sha256'],v2.textsha(v2.RecentRow('context-a',current['render_projection']).text()))
+ async def test_frozen_refreshed_inputs_survive_new_unrelated_index_and_eviction(self):
+  r=self.r;self.refresh();cap=await r.capture();sealed=copy.deepcopy(cap['snapshot'])
+  r.rows=[v2.RecentRow('unrelated',{'stamp':'new','title':'new','emoji':'','category':'other','segments':'1','overview':''})];r.write_index()
+  self.assertEqual(await r.validate(cap),sealed);self.assertEqual(await r.validate(cap),sealed)
+ async def test_canonical_projection_tampered_without_digest_rejects(self):
+  self.r.metadata['context-a']['render_projection']['title']='tampered'
+  with self.assertRaisesRegex(v2.ManifestHold,'^canonical_projection_digest_mismatch$'):await self.r.capture()
+ async def test_projection_hash_changed_without_body_rejects(self):
+  self.r.metadata['context-a']['render_projection_sha256']='f'*64
+  with self.assertRaisesRegex(v2.ManifestHold,'^canonical_projection_digest_mismatch$'):await self.r.capture()
+ async def test_projection_exact_six_strings_no_newline_or_extra_text(self):
+  original=copy.deepcopy(self.r.metadata['context-a'])
+  for change in ['unknownfield','newline','nonstring','missing']:
+   self.r.metadata['context-a']=copy.deepcopy(original);projection=self.r.metadata['context-a']['render_projection']
+   if change=='unknownfield':projection['transcript']='must not be accepted'
+   if change=='newline':projection['title']='newline\ninjection'
+   if change=='nonstring':projection['overview']=['not string']
+   if change=='missing':del projection['overview']
+   self.r.metadata['context-a']['render_projection_sha256']=v2.digest(projection)
+   with self.subTest(change=change),self.assertRaises(v2.ManifestHold):await self.r.capture()
+ async def test_captured_current_projection_edit_rejects_in_validation(self):
+  self.refresh();cap=await self.r.capture();row=self.r.metadata['context-a'];row['render_projection']['title']='newer edit';row['render_projection_sha256']=v2.digest(row['render_projection'])
+  with self.assertRaisesRegex(v2.ManifestHold,'^captured_record_changed$'):await self.r.validate(cap)
+ async def test_missing_deleted_or_foreign_canonical_record_never_omitted(self):
+  original=copy.deepcopy(self.r.metadata['context-a'])
+  for state in ['missing','deleted','foreign']:
+   self.r.metadata={'context-a':copy.deepcopy(original)}
+   if state=='missing':self.r.metadata={}
+   if state=='deleted':self.r.metadata['context-a'].update(deleted=True,render_projection=None)
+   if state=='foreign':self.r.metadata['context-a']['owner_sha256']='f'*64
+   with self.subTest(state=state),self.assertRaises(v2.ManifestHold):await self.r.capture()
+ async def test_oversize_canonical_index_rejects_before_success(self):
+  projection=self.r.rows[0].projection;self.r.rows=[v2.RecentRow('context-'+str(i),copy.deepcopy(projection)) for i in range(80)]
+  template=copy.deepcopy(self.r.metadata['context-a']);template['render_projection']['title']='x'*2000;template['render_projection_sha256']=v2.digest(template['render_projection'])
+  self.r.metadata={row.conversation_id:{**copy.deepcopy(template),'conversation_id':row.conversation_id} for row in self.r.rows};self.r.write_index()
+  with self.assertRaisesRegex(v2.ManifestHold,'^canonical_index_capacity$'):await self.r.capture()
+ async def test_old_batch_contract_is_explicitly_rejected(self):
+  r=self.r
+  async def old_batch(**kwargs):
+   return {'contract':'ella-context-records-v2','owner_sha256':v2.textsha(r.uid),'target_conversation_id':r.cid,'target_source_sha256':r.source_sha,'runtime_authority_sha256':r.identity.digest,'attempt_scope_sha256':r.attempt,'records':copy.deepcopy(r.metadata)}
+  r.service.batch=old_batch
+  with self.assertRaisesRegex(v2.ManifestHold,'^batch_scope$'):await r.capture()
+
+class HttpCapacity(unittest.IsolatedAsyncioTestCase):
+ async def test_existing_adapter_accepts_bounded_expanded_response_without_retries(self):
+  from semantic_context_snapshot_host_v2 import BackendContextRecordsAdapter,SyncHold
+  from types import SimpleNamespace
+  class Response:
+   status_code=200;headers={};body=b''
+   async def __aenter__(self):return self
+   async def __aexit__(self,*a):pass
+   async def aiter_bytes(self):yield self.body
+  response=Response();calls=[]
+  class Client:
+   def __init__(self,**kw):pass
+   async def __aenter__(self):return self
+   async def __aexit__(self,*a):pass
+   def stream(self,*a,**kw):calls.append(a);return response
+  adapter=BackendContextRecordsAdapter(SimpleNamespace(origin='http://synthetic',key='synthetic',client_factory=Client))
+  kwargs=dict(uid='owner',target_conversation_id='target',expected_target_source_sha256='a'*64,runtime_authority_sha256='b'*64,conversation_ids=[])
+  response.body=json.dumps({'synthetic':'x'*150000}).encode();self.assertEqual(len((await adapter(**kwargs))['synthetic']),150000)
+  response.body=json.dumps({'synthetic':'x'*262144}).encode()
+  with self.assertRaisesRegex(SyncHold,'^host_context_records_capacity$'):await adapter(**kwargs)
+  self.assertEqual(len(calls),2)
+if __name__=='__main__':unittest.main()

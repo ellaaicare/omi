@@ -1,0 +1,134 @@
+"""Opt-in PRIVATE host route handler; default v1 handler is untouched.
+Existing bearer and owner registry enforcement is required on the shim route.
+Reuses existing callback key in memory. No credential discovery or sync child.
+"""
+
+import asyncio, json
+from pathlib import Path
+from urllib.parse import quote
+import httpx
+from semantic_context_v2_hold_codes import RECORDS_HOLD_CODES
+from semantic_sync_host import BackendAuthorityAdapter, token
+from semantic_sync_operation import Journal, SyncOnlyOperation, SyncHold, unique_pairs
+from semantic_context_manifest_v2 import CapturedContextHostV2, ManifestHold, hexsha, digest
+from semantic_context_materialized_rows_v2 import read_materialized_recent_rows
+
+
+class BackendContextRecordsAdapter:
+    def __init__(self, authority_adapter):
+        self.authority = authority_adapter
+
+    async def __call__(
+        self, *, uid, target_conversation_id, expected_target_source_sha256, runtime_authority_sha256, conversation_ids
+    ):
+        a = self.authority
+        if not isinstance(a.key, str) or not a.key:
+            raise SyncHold('host_backend_auth_missing')
+        url = a.origin + '/v1/ella/conversation/' + quote(target_conversation_id, safe='') + '/context-records-v2'
+        body = {
+            'expected_target_source_sha256': expected_target_source_sha256,
+            'expected_runtime_authority_sha256': runtime_authority_sha256,
+            'conversation_ids': conversation_ids,
+        }
+        headers = {'X-Ella-Callback-Service-Key': a.key, 'X-Ella-Subject-Uid': uid, 'Accept': 'application/json'}
+        try:
+            async with asyncio.timeout(25):
+                async with a.client_factory(
+                    timeout=httpx.Timeout(25, connect=2), follow_redirects=False, trust_env=False
+                ) as client:
+                    async with client.stream('POST', url, headers=headers, json=body) as response:
+                        if response.status_code != 200:
+                            code = response.headers.get('X-Ella-Context-Records-Hold-Code')
+                            if type(code) is str and code in RECORDS_HOLD_CODES:
+                                raise SyncHold(code)
+                            raise SyncHold('host_context_records_rejected')
+                        chunks = []
+                        size = 0
+                        async for chunk in response.aiter_bytes():
+                            size += len(chunk)
+                            if size > 262144:
+                                raise SyncHold('host_context_records_capacity')
+                            chunks.append(chunk)
+            return json.loads(
+                b''.join(chunks),
+                object_pairs_hook=unique_pairs,
+                parse_constant=lambda _: (_ for _ in ()).throw(SyncHold('host_context_records_nonfinite')),
+            )
+        except SyncHold:
+            raise
+        except (httpx.HTTPError, ValueError, UnicodeError) as error:
+            raise SyncHold('host_context_records_unavailable') from error
+
+
+async def captured_context_request(
+    *,
+    body,
+    request_owner_uid,
+    agent_id,
+    workspace_for_agent,
+    load_registry,
+    state_root,
+    backend_url,
+    callback_key,
+    validate=False,
+    client_factory=httpx.AsyncClient
+):
+    """Shim must enforce private existing auth + bounded body <=262144 bytes.
+    /semantic-context/snapshot-v2 => validateFalse; /validate-v2 => True.
+    Backend must supply the captured sidecar's expected hash from exact live policy,
+    not from untrusted client content. Hash is not a signature or fresh grant.
+    """
+    fields = {'uid', 'agent_id', 'conversation_id', 'expected_source_sha256'}
+    if validate:
+        fields |= {'sidecar', 'sidecar_sha256'}
+    if (
+        not isinstance(body, dict)
+        or set(body) != fields
+        or body['uid'] != request_owner_uid
+        or body['agent_id'] != agent_id
+    ):
+        raise SyncHold('host_request_owner_mismatch')
+    uid = token(body['uid'])
+    cid = token(body['conversation_id'])
+    agent = token(agent_id)
+    if not hexsha(body['expected_source_sha256']):
+        raise SyncHold('source_digest_required')
+    if validate and (not isinstance(body['sidecar'], dict) or not hexsha(body['sidecar_sha256'])):
+        raise SyncHold('captured_policy_digest_required')
+    mapped = workspace_for_agent(agent, uid)
+    adapter = BackendAuthorityAdapter(
+        backend_url=backend_url,
+        service_key=callback_key,
+        load_registry=load_registry,
+        agent_id=agent,
+        client_factory=client_factory,
+        snapshot_only=True,
+    )
+
+    async def resolve(owner, conversation):
+        authority = await adapter.resolve(owner, conversation)
+        if str(mapped) != authority.runtime.workspace_root or str(workspace_for_agent(agent, owner)) != str(mapped):
+            raise SyncHold('host_request_workspace_changed')
+        return authority
+
+    journal = Journal(state_root)
+    try:
+        operation = SyncOnlyOperation(journal=journal, resolve=resolve, read_source=adapter.read_source, sync=None)
+        service = CapturedContextHostV2(
+            sync_operation=operation,
+            read_materialized_rows=read_materialized_recent_rows,
+            read_record_batch=BackendContextRecordsAdapter(adapter),
+        )
+        if validate:
+            return await service.validate_sidecar(
+                uid=uid,
+                conversation_id=cid,
+                expected_source_sha256=body['expected_source_sha256'],
+                sidecar=body['sidecar'],
+                sidecar_sha256=body['sidecar_sha256'],
+            )
+        return await service.capture(
+            uid=uid, conversation_id=cid, expected_source_sha256=body['expected_source_sha256']
+        )
+    finally:
+        journal.close()

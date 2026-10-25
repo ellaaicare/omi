@@ -1,0 +1,79 @@
+"""Explicit opt-in private routes; install only with existing verified shim gates.
+This module changes no legacy route, config, credential, journal or agent scope.
+"""
+
+import asyncio, json
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from semantic_sync_operation import SyncHold, unique_pairs
+from semantic_context_v2_hold_codes import CAPTURED_HOLD_CODES
+from semantic_context_manifest_v2 import ManifestHold
+from semantic_context_snapshot_host_v2 import captured_context_request
+
+
+def install_captured_context_routes(
+    app,
+    *,
+    verify_token,
+    validate_agent_id,
+    request_owner_uid,
+    workspace_for_agent,
+    load_registry,
+    state_root,
+    backend_url,
+    callback_key
+):
+    router = APIRouter()
+
+    async def invoke(agent_id, request, validate):
+        validate_agent_id(agent_id)
+        owner = request_owner_uid(request)
+        try:
+            async with asyncio.timeout(55):
+                chunks = []
+                size = 0
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > 262144:
+                        raise HTTPException(status_code=413, detail={'code': 'context_v2_request_capacity'})
+                    chunks.append(chunk)
+                body = json.loads(
+                    b''.join(chunks),
+                    object_pairs_hook=unique_pairs,
+                    parse_constant=lambda _: (_ for _ in ()).throw(SyncHold('host_nonfinite')),
+                )
+                value = await captured_context_request(
+                    body=body,
+                    request_owner_uid=owner,
+                    agent_id=agent_id,
+                    workspace_for_agent=workspace_for_agent,
+                    load_registry=load_registry,
+                    state_root=state_root,
+                    backend_url=backend_url,
+                    callback_key=callback_key,
+                    validate=validate,
+                )
+                return JSONResponse(value, headers={'Cache-Control': 'no-store'})
+        except asyncio.CancelledError:
+            raise
+        except (ManifestHold, SyncHold, TimeoutError, OSError, ValueError, KeyError, TypeError) as error:
+            code = (
+                error.args[0]
+                if len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in CAPTURED_HOLD_CODES
+                else 'unknown'
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={'code': 'semantic_context_v2_hold'},
+                headers={'X-Ella-Captured-Context-Hold-Code': code},
+            ) from None
+
+    @router.post('/workspace/{agent_id}/semantic-context/snapshot-v2', dependencies=[Depends(verify_token)])
+    async def snapshot_v2(agent_id: str, request: Request):
+        return await invoke(agent_id, request, False)
+
+    @router.post('/workspace/{agent_id}/semantic-context/validate-v2', dependencies=[Depends(verify_token)])
+    async def validate_v2(agent_id: str, request: Request):
+        return await invoke(agent_id, request, True)
+
+    app.include_router(router)

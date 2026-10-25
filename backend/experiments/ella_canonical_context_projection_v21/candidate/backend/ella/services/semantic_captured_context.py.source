@@ -1,0 +1,218 @@
+"""Attempt-private captured data with live validation; never an authority cache.
+Only the trusted worker's existing OperationBudget/worker context can capture.
+Legacy callers and absent context-contract policy retain the existing path.
+"""
+from __future__ import annotations
+import asyncio,copy,hashlib,json
+from contextlib import contextmanager
+from contextvars import ContextVar
+from urllib.parse import quote
+import httpx
+from ella.services.canonical_summary_source import canonical_source_from_conversation,canonical_source_sha256
+from ella.services.semantic_operation_budget import current_budget,attempt_scope
+from ella.utils.provision_authority import hermes_provision_authority
+from models.hermes_cloud_enrichment_contract import transcript_source
+_CURRENT=ContextVar('ella_captured_context_v2',default=None)
+POLICY_FIELD='semantic_publication_policy'
+CONTRACT_VERSION=2
+SIDECAR_FIELDS={'contract','owner_sha256','target_conversation_id','target_source_sha256','runtime_authority_sha256','runtime_binding_id_sha256','runtime_revision_sha256','profile_sha256','registry_revision_sha256','attempt_scope_sha256','snapshot_sha256','raw_files','recent_index_records'}
+def encoded(v):return json.dumps(v,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+def digest(v):return hashlib.sha256(encoded(v)).hexdigest()
+def textsha(v):return hashlib.sha256(v.encode()).hexdigest()
+_LOCAL_HOLD_CODES=frozenset(['captured_context_already_prepared', 'captured_context_attempt_changed', 'captured_context_binding_changed', 'captured_context_budget_required', 'captured_context_contract_unknown', 'captured_context_duplicate_key', 'captured_context_envelope_invalid', 'captured_context_fresh_validation_required', 'captured_context_host_rejected', 'captured_context_manifest_invalid', 'captured_context_nested_scope', 'captured_context_not_prepared', 'captured_context_owner_changed', 'captured_context_policy_changed', 'captured_context_raw_manifest_invalid', 'captured_context_records_invalid', 'captured_context_runtime_changed', 'captured_context_runtime_owner_changed', 'captured_context_scope_changed', 'captured_context_scope_required', 'captured_context_snapshot_invalid', 'captured_context_source_changed', 'captured_context_source_unavailable', 'captured_context_thread_required', 'captured_context_transport_capacity', 'captured_context_transport_invalid', 'captured_context_validation_changed', 'captured_context_worker_required'])
+def reject(code):
+ # Fixed vocabulary only. Diagnostics never read response/exception bodies and
+ # cannot replace or weaken the original rejection.
+ try:
+  from ella.services.semantic_captured_hold_codes import CAPTURED_HOLD_CODES
+  allowed=type(code) is str and (code in _LOCAL_HOLD_CODES or code in {'captured_context_host_'+v for v in CAPTURED_HOLD_CODES})
+  if allowed:
+   import logging
+   metadata={'contract':'ella-captured-context-hold-v1','code':code}
+   scope=_CURRENT.get()
+   if type(scope) is AttemptContext:
+    metadata['source_id_sha256']=textsha(scope.cid)
+    metadata['attempt_scope_sha256']=scope.attempt_sha256
+   logging.getLogger('ella.captured_context').warning('ella_captured_context_hold %s',json.dumps(metadata,sort_keys=True,allow_nan=False))
+ except BaseException:pass
+ from ella.services.semantic_publication import SemanticPublicationRejectedError
+ raise SemanticPublicationRejectedError(code)
+def expected_attempt_digest(job):
+ from database import enrichment_attempt_fence as fence,enrichment_job_isolation as isolation,normal_account_lifecycle as lifecycle
+ return lifecycle.digest({'contract':'ella-captured-context-attempt-v2','fence_key':fence._key(isolation.attempt(job)),'admission_epoch':job['admission_epoch'],'policy_epoch':job['admission_epoch'],'account_source_lineage':job[lifecycle.TAG]})
+def _job():
+ from database.normal_future_source_disposition import _worker_job
+ value=_worker_job.get()
+ if type(value) is not dict:reject('captured_context_worker_required')
+ return value
+
+def require_sidecar_shape(sidecar,uid):
+ import re
+ from ella.services.semantic_companion_context import SOURCES,MAX_DOCUMENT_BYTES
+ hexsha=lambda value:type(value) is str and bool(re.fullmatch('[0-9a-f]{64}',value))
+ raws=sidecar.get('raw_files');expected={name for names in SOURCES.values() for name in names}
+ if type(raws) is not dict or set(raws)!=expected:reject('captured_context_raw_manifest_invalid')
+ for value in raws.values():
+  if type(value) is not dict or set(value)!={'present','sha256','utf8_bytes'} or type(value['present']) is not bool or type(value['utf8_bytes']) is not int or not 0<=value['utf8_bytes']<=MAX_DOCUMENT_BYTES:reject('captured_context_raw_manifest_invalid')
+  if value['present']:
+   if not hexsha(value['sha256']):reject('captured_context_raw_manifest_invalid')
+  elif value['sha256'] is not None or value['utf8_bytes']!=0:reject('captured_context_raw_manifest_invalid')
+ records=sidecar.get('recent_index_records');keys={'conversation_id','owner_sha256','canonical_source_sha256','transcript_sha256','active_summary_version_id','deleted','render_projection_sha256','row_sha256'}
+ if type(records) is not list or len(records)>80:reject('captured_context_records_invalid')
+ ids=set()
+ for value in records:
+  if type(value) is not dict or set(value)!=keys or type(value['conversation_id']) is not str or not re.fullmatch('[A-Za-z0-9_.:-]{1,200}',value['conversation_id']) or '..' in value['conversation_id'] or value['conversation_id'] in ids:reject('captured_context_records_invalid')
+  ids.add(value['conversation_id'])
+  if value['owner_sha256']!=textsha(uid) or value['deleted'] is not False or type(value['active_summary_version_id']) is not str or not value['active_summary_version_id'] or len(value['active_summary_version_id'])>200 or not all(hexsha(value[k]) for k in ['canonical_source_sha256','transcript_sha256','render_projection_sha256','row_sha256']):reject('captured_context_records_invalid')
+ if not hexsha(sidecar.get('registry_revision_sha256')):reject('captured_context_manifest_invalid')
+
+class AttemptContext:
+ def __init__(self,uid,cid,budget):
+  if budget is None or current_budget() is not budget:reject('captured_context_budget_required')
+  budget.require_source(uid,cid)
+  job=_job()
+  if attempt_scope(job)!=budget.scope:reject('captured_context_attempt_changed')
+  self.uid,self.cid,self.budget=uid,cid,budget
+  self.attempt_sha256=expected_attempt_digest(job)
+  self._sealed=None;self.runtime_sha=None;self.source_sha=None;self.stock=None
+  self.admitted=False;self.closed=False;self.validations=0
+  self._validation_stamp=ContextVar('ella_captured_validation_stamp',default=None)
+ def check(self):
+  if self.closed or current_budget() is not self.budget or attempt_scope(_job())!=self.budget.scope or expected_attempt_digest(_job())!=self.attempt_sha256:reject('captured_context_scope_changed')
+  self.budget.require_source(self.uid,self.cid)
+ def source(self,reader):
+  self.check();doc=reader(self.uid,self.cid)
+  if type(doc) is not dict or doc.get('id')!=self.cid or doc.get('uid',self.uid)!=self.uid or doc.get('status')!='completed' or any(doc.get(k) for k in ['deleted','discarded','is_locked']):reject('captured_context_source_unavailable')
+  if transcript_source(doc)[1]!=_job()['transcript_sha256']:reject('captured_context_source_changed')
+  source=canonical_source_sha256(canonical_source_from_conversation(uid=self.uid,conversation_id=self.cid,conversation=doc))
+  if self.source_sha is not None and (source!=self.source_sha or doc.get('active_summary_version_id')!=self.stock):reject('captured_context_source_changed')
+  if self.admitted:self.require_policy(doc)
+  return doc,source
+ def envelope(self):
+  self.check()
+  if self._sealed is None:reject('captured_context_not_prepared')
+  return json.loads(self._sealed)
+ def fields(self):
+  value=self.envelope()
+  return {'context_contract_version':2,'captured_context_manifest_sha256':value['sidecar_sha256'],'captured_context_attempt_sha256':self.attempt_sha256}
+ def require_policy(self,doc):
+  self.check();policy=doc.get(POLICY_FIELD) or {};fields=self.fields();capture=self.envelope()
+  if doc.get('id')!=self.cid or doc.get('uid',self.uid)!=self.uid or doc.get('status')!='completed' or any(doc.get(k) for k in ['deleted','discarded','is_locked']) or doc.get('active_summary_version_id')!=self.stock or transcript_source(doc)[1]!=_job()['transcript_sha256'] or canonical_source_sha256(canonical_source_from_conversation(uid=self.uid,conversation_id=self.cid,conversation=doc))!=self.source_sha:reject('captured_context_source_changed')
+  if type(policy) is not dict or any(type(policy.get(k)) is not type(v) or policy.get(k)!=v for k,v in fields.items()) or policy.get('uid')!=self.uid or policy.get('conversation_id')!=self.cid or policy.get('companion_context_sha256')!=digest(capture['snapshot']) or policy.get('companion_context_revision')!=capture['snapshot']['revision']:reject('captured_context_policy_changed')
+ def install(self,value,*,runtime,identity,reader):
+  self.check()
+  if self._sealed is not None:reject('captured_context_already_prepared')
+  doc,source=self.source(reader)
+  from ella.services.semantic_companion_context import SOURCES,MAX_DOCUMENT_BYTES,MAX_SNAPSHOT_BYTES
+  if type(value) is not dict or set(value)!={'version','snapshot','sidecar','sidecar_sha256'} or type(value['version']) is not int or value['version']!=2 or len(encoded(value))>262144:reject('captured_context_envelope_invalid')
+  snapshot=value['snapshot'];sidecar=value['sidecar']
+  if type(snapshot) is not dict or set(snapshot)!={'owner_uid','revision','documents'} or snapshot['owner_uid']!=self.uid or type(snapshot['revision']) is not str or not snapshot['revision'] or type(snapshot['documents']) is not dict or set(snapshot['documents'])!=set(SOURCES) or any(type(v) is not str or len(v.encode())>MAX_DOCUMENT_BYTES for v in snapshot['documents'].values()) or len(encoded(snapshot))>MAX_SNAPSHOT_BYTES:reject('captured_context_snapshot_invalid')
+  if type(sidecar) is not dict or set(sidecar)!=SIDECAR_FIELDS or sidecar['contract']!='ella-captured-context-sidecar-v2' or value['sidecar_sha256']!=digest(sidecar):reject('captured_context_manifest_invalid')
+  require_sidecar_shape(sidecar,self.uid)
+  expected={'owner_sha256':textsha(self.uid),'target_conversation_id':self.cid,'target_source_sha256':source,'runtime_authority_sha256':identity.digest,'runtime_binding_id_sha256':textsha(runtime.binding_id),'runtime_revision_sha256':digest(runtime.revision),'profile_sha256':textsha(runtime.profile_name),'attempt_scope_sha256':self.attempt_sha256,'snapshot_sha256':digest(snapshot)}
+  if any(sidecar.get(k)!=v for k,v in expected.items()):reject('captured_context_binding_changed')
+  self._sealed=encoded(value);self.runtime_sha=identity.digest;self.source_sha=source;self.stock=doc['active_summary_version_id']
+  return copy.deepcopy(snapshot)
+ def mark_admitted(self,conversation):
+  self.require_policy(conversation);self.admitted=True
+ def require_ack(self,ack):
+  value=self.envelope();expected={'contract':'ella-captured-context-validation-v2','compatible':True,'owner_sha256':textsha(self.uid),'target_conversation_id':self.cid,'target_source_sha256':self.source_sha,'runtime_authority_sha256':self.runtime_sha,'attempt_scope_sha256':self.attempt_sha256,'sidecar_sha256':value['sidecar_sha256'],'snapshot_sha256':digest(value['snapshot'])}
+  if type(ack) is not dict or set(ack)!=set(expected) or type(ack.get('compatible')) is not bool or ack!=expected:reject('captured_context_validation_changed')
+  self.validations+=1;self._validation_stamp.set(object())
+
+@contextmanager
+def attempt_context(uid,cid):
+ budget=current_budget()
+ if budget is None:
+  yield None;return
+ if _CURRENT.get() is not None:reject('captured_context_nested_scope')
+ scope=AttemptContext(uid,cid,budget);token=_CURRENT.set(scope)
+ try:yield scope
+ finally:
+  scope.closed=True;_CURRENT.reset(token)
+def current_scope(uid,cid):
+ value=_CURRENT.get()
+ if value is None:return None
+ if type(value) is not AttemptContext or (value.uid,value.cid)!=(uid,cid):reject('captured_context_owner_changed')
+ value.check();return value
+
+def policy_fields(uid,cid):
+ scope=current_scope(uid,cid)
+ return scope.fields() if scope is not None and scope._sealed is not None else {}
+def require_policy(conversation,uid,cid):
+ policy=conversation.get(POLICY_FIELD) or {}
+ if type(policy) is not dict:reject('captured_context_policy_changed')
+ version=policy.get('context_contract_version',1)
+ if type(version) is not int or version not in (1,2):reject('captured_context_contract_unknown')
+ if version==2:
+  scope=current_scope(uid,cid)
+  if scope is None:reject('captured_context_scope_required')
+  scope.require_policy(conversation)
+ return version
+
+def validation_ticket(conversation,uid,cid):
+ if require_policy(conversation,uid,cid)==1:return None
+ scope=current_scope(uid,cid);return scope,scope._validation_stamp.get()
+def require_validated_read(ticket,snapshot,conversation,uid,cid):
+ if ticket is None:return
+ scope,before=ticket
+ if current_scope(uid,cid) is not scope or scope._validation_stamp.get() is before or digest(snapshot)!=digest(scope.envelope()['snapshot']):reject('captured_context_fresh_validation_required')
+ scope.require_policy(conversation)
+
+async def _exchange_async(*,url,body,authority,timeout,client_factory=httpx.AsyncClient):
+ async with asyncio.timeout(timeout):
+  async with client_factory(timeout=httpx.Timeout(timeout,connect=min(2,timeout)),follow_redirects=False,trust_env=False) as client:
+   async with client.stream('POST',url,json=body,headers={'Authorization':'Bearer '+authority.token,'X-Ella-Owner-Uid':body['uid'],'Accept':'application/json'}) as response:
+    if response.status_code!=200:
+     from ella.services.semantic_captured_hold_codes import CAPTURED_HOLD_CODES
+     code=response.headers.get('X-Ella-Captured-Context-Hold-Code')
+     reject('captured_context_host_'+code if type(code) is str and code in CAPTURED_HOLD_CODES else 'captured_context_host_rejected')
+    chunks=[];size=0
+    async for chunk in response.aiter_bytes():
+     size+=len(chunk)
+     if size>262144:reject('captured_context_transport_capacity')
+     chunks.append(chunk)
+ def pairs(items):
+  result={}
+  for key,value in items:
+   if key in result:reject('captured_context_duplicate_key')
+   result[key]=value
+  return result
+ try:return json.loads(b''.join(chunks),object_pairs_hook=pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError('captured_context_nonfinite')))
+ except (ValueError,TypeError,UnicodeError):reject('captured_context_transport_invalid')
+
+def _exchange(*,runtime,uid,cid,identity,reader,budget,validate):
+ scope=current_scope(uid,cid)
+ if scope is None:reject('captured_context_scope_required')
+ from database.enrichment_graph_guard import require_current as require_graph
+ require_graph(uid,cid)
+ if runtime.uid!=uid or identity.uid!=uid or runtime.provider!='hermes':reject('captured_context_runtime_owner_changed')
+ doc,source=scope.source(reader)
+ if scope.runtime_sha is not None and identity.digest!=scope.runtime_sha:reject('captured_context_runtime_changed')
+ authority=hermes_provision_authority();pin=authority.snapshot();hermes_provision_authority(expected_snapshot=pin)
+ body={'uid':uid,'agent_id':runtime.agent_id,'conversation_id':cid,'expected_source_sha256':source}
+ if validate:
+  capture=scope.envelope();body.update(sidecar=capture['sidecar'],sidecar_sha256=capture['sidecar_sha256'])
+ path='validate-v2' if validate else 'snapshot-v2'
+ url=authority.base_url+'/workspace/'+quote(runtime.agent_id,safe='')+'/semantic-context/'+path
+ from ella.services.transcript_processing_hold import assert_transcript_processing_active
+ assert_transcript_processing_active(uid)
+ timeout=min(budget.reserve('context_snapshot'),scope.budget.remaining())
+ try:asyncio.get_running_loop()
+ except RuntimeError:pass
+ else:reject('captured_context_thread_required')
+ value=asyncio.run(_exchange_async(url=url,body=body,authority=authority,timeout=timeout))
+ hermes_provision_authority(expected_snapshot=pin);assert_transcript_processing_active(uid);scope.source(reader);require_graph(uid,cid)
+ return value
+
+def capture_context(*,runtime,uid,conversation_id,runtime_identity,read_conversation,read_budget):
+ scope=current_scope(uid,conversation_id)
+ if scope is None:return None
+ value=_exchange(runtime=runtime,uid=uid,cid=conversation_id,identity=runtime_identity,reader=read_conversation,budget=read_budget,validate=False)
+ return scope.install(value,runtime=runtime,identity=runtime_identity,reader=read_conversation)
+def read_captured_context(*,runtime,uid,conversation_id,runtime_identity,read_conversation,read_budget):
+ scope=current_scope(uid,conversation_id)
+ if scope is None or scope._sealed is None:return None
+ ack=_exchange(runtime=runtime,uid=uid,cid=conversation_id,identity=runtime_identity,reader=read_conversation,budget=read_budget,validate=True)
+ scope.require_ack(ack)
+ return scope.envelope()['snapshot']

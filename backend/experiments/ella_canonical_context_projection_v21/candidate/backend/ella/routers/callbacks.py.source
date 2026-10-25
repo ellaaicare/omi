@@ -1,0 +1,1800 @@
+"""
+Ella Callback Router
+
+Provides Ella-specific callback endpoints that n8n workflows use to trigger
+backend actions (push notifications with TTS audio, etc).
+
+Endpoints:
+- POST   /v1/ella/notification                         - Push notification with optional TTS audio
+- POST   /v1/ella/emergency                            - Emergency alert to all configured contacts
+- POST   /v1/ella/daily-summary                        - Trigger daily summary for a user's caregivers
+- GET    /v1/ella/caregiver-dashboard-data             - Dashboard data for caregivers (token auth)
+- POST   /v1/ella/generate-dashboard-token             - Generate 24h dashboard token (internal)
+- POST   /v1/ella/emergency-contact                    - Add an emergency contact
+- GET    /v1/ella/emergency-contacts/{uid}             - List all contacts for a user
+- PUT    /v1/ella/emergency-contact/{contact_id}       - Update a contact
+- DELETE /v1/ella/emergency-contact/{contact_id}       - Remove a contact
+- POST   /v1/ella/chat/stream                           - Stream chat response from Grok (xAI)
+NOTE: Caregiver CRUD endpoints moved to n8n (ella-ai-care repo). iOS calls n8n webhooks directly.
+- GET    /v1/ella/health                               - Health check
+- PATCH  /v1/ella/conversation/{id}/enrichment-state   - Record terminal enrichment state (internal)
+- GET    /v1/ella/conversation/{id}/data               - Fetch conversation data with transcript (internal)
+"""
+
+import hashlib
+import hmac
+import io
+import json
+import logging
+import os
+import re
+import secrets
+import string
+import asyncio
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Literal, Optional
+
+import asyncpg
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
+
+import database.conversations as conversations_db
+import database.memories as memories_db
+import database.users as users_db
+from database._client import db
+from database.honcho_attestation import authority_credential
+from database.ella_postgres import get_ella_postgres_pool
+from models.conversation import CategoryEnum
+from database.ella_caregivers import (
+    create_caregiver,
+    delete_caregiver,
+    get_caregivers,
+    get_emergency_caregiver_id,
+    refresh_caregiver_invite,
+    set_emergency_caregiver,
+    update_caregiver,
+)
+from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
+from ella.config import ELLA_CONFIG
+from ella.services.ai_consent import assert_current_ai_consent
+from ella.services.canonical_summary_source import (
+    ELLA_CANONICAL_SOURCE_CONTRACT,
+    conversation_data_payload,
+)
+from ella.services.memory_artwork import enqueue_after_terminal_enrichment
+from ella.services.escalation_policy import (
+    CaregiverPolicyContext,
+    SEVERITY_CRITICAL,
+    _caregiver_alert_allowed,
+)
+from ella.services.runtime_resolver import (
+    resolve_isolated_runtime,
+    runtime_authority_enabled,
+)
+from ella.services.summary_sanitizer import SummarySanitizationError
+from ella.services.semantic_publication import SemanticPublicationRejectedError
+from ella.services.summary_writeback import (
+    CanonicalConversationSourceMismatchError,
+    CanonicalSummaryDependencyUnavailableError,
+    CanonicalSummaryOperationConflictError,
+    CanonicalSummaryReconciliationPendingError,
+    ConcurrentConversationSummaryChangeError,
+    ConversationSummaryOutcomeUnknownError,
+    ConversationSummaryNotFoundError,
+    InvalidConversationSummaryCategoryError,
+    TERMINAL_ENRICHMENT_REASONS,
+    TerminalEnrichmentStateConflictError,
+    write_terminal_enrichment_state,
+    write_conversation_summary,
+    write_conversation_summary_cas,
+)
+from utils.notifications import send_notification
+from utils.ella.canonical_omi import (
+    canonical_transcript_segments,
+    require_omi_canonical_write_ready,
+    transcript_grounding_hash,
+    write_omi_canonical_event,
+)
+from utils.ella.exact_firebase_auth import (
+    ELLA_SUBJECT_UID_HEADER,
+    EllaRequestAuthority,
+    get_exact_firebase_uid,
+    get_exact_service_authority,
+    require_matching_firebase_uid,
+)
+from utils.other.storage import storage_client
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/v1/ella", tags=["ella"])
+_resolve_pool: Optional[asyncpg.Pool] = None
+
+# GCS bucket for Ella TTS audio files (defaults to project's Firebase Storage bucket)
+ELLA_AUDIO_BUCKET = os.getenv("ELLA_AUDIO_BUCKET", "omi-dev-ca005.firebasestorage.app")
+
+# OpenAI TTS configuration
+OPENAI_TTS_MODEL = os.getenv("ELLA_TTS_MODEL", "tts-1")
+OPENAI_TTS_VOICE = os.getenv("ELLA_TTS_VOICE", "nova")
+PROVISION_API_KEY = authority_credential("ELLA_PROVISION_API_KEY", "ELLA_PROVISION_API_TOKEN", strip=False)
+PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
+CALLBACK_SERVICE_HEADER = "X-Ella-Callback-Service-Key"
+CAREGIVER_SERVICE_HEADER = "X-Ella-Caregiver-Service-Key"
+EMERGENCY_WEBHOOK_KEY_HEADER = "X-Ella-Emergency-Webhook-Key"
+EMERGENCY_WEBHOOK_KEY = authority_credential("ELLA_EMERGENCY_WEBHOOK_KEY", strip=False)
+SUMMARY_CAS_MODE_ENV = "ELLA_SUMMARY_CAS_MODE"
+SUMMARY_CAS_OPTIONAL = "optional"
+SUMMARY_CAS_REQUIRED = "required"
+SUMMARY_CAS_IF_MATCH_RE = re.compile(rf'^"{re.escape(ELLA_CANONICAL_SOURCE_CONTRACT)}:([0-9a-f]{{64}})"$')
+SUMMARY_OPERATION_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{16,256}$")
+
+
+def require_callback_service(
+    service_key: Optional[str] = Header(default=None, alias=CALLBACK_SERVICE_HEADER),
+    subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
+) -> EllaRequestAuthority:
+    return get_exact_service_authority(
+        provided_service_key=service_key,
+        configured_service_key=os.getenv("ELLA_CALLBACK_SERVICE_KEY", "").strip(),
+        service_subject_uid=subject_uid,
+        service="ella_callback",
+    )
+
+
+def require_caregiver_service(
+    service_key: Optional[str] = Header(default=None, alias=CAREGIVER_SERVICE_HEADER),
+    subject_uid: Optional[str] = Header(default=None, alias=ELLA_SUBJECT_UID_HEADER),
+) -> EllaRequestAuthority:
+    return get_exact_service_authority(
+        provided_service_key=service_key,
+        configured_service_key=os.getenv("ELLA_CAREGIVER_SERVICE_KEY", "").strip(),
+        service_subject_uid=subject_uid,
+        service="ella_caregiver",
+    )
+
+
+# ============================================================================
+# Request/Response Models
+# ============================================================================
+
+
+class NotificationMetadata(BaseModel):
+    source: str = "omi"
+    letta_agent: str = "main-agent"
+    confidence: Optional[float] = None
+    trigger: Optional[str] = None
+    conversation_id: Optional[str] = None
+
+
+class NotificationRequest(BaseModel):
+    uid: str
+    message: str = Field(..., min_length=1, max_length=500)
+    urgency: str = "NORMAL"
+    generate_audio: bool = True
+    audio_url: Optional[str] = None
+    metadata: Optional[NotificationMetadata] = None
+
+
+class NotificationResponse(BaseModel):
+    status: str
+    message_id: Optional[str] = None
+    audio_url: Optional[str] = None
+    urgency: str = "NORMAL"
+    error: Optional[str] = None
+
+
+# ============================================================================
+# TTS + Upload helpers
+# ============================================================================
+
+
+def _generate_tts_audio(text: str) -> Optional[bytes]:
+    """Generate TTS audio via OpenAI API. Returns MP3 bytes or None."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logger.warning("[Ella] OPENAI_API_KEY not set, skipping TTS")
+        return None
+
+    try:
+        response = httpx.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": OPENAI_TTS_MODEL,
+                "input": text,
+                "voice": OPENAI_TTS_VOICE,
+                "response_format": "mp3",
+            },
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        audio_bytes = response.content
+        logger.info(f"[Ella] TTS generated: {len(audio_bytes)} bytes")
+        return audio_bytes
+
+    except Exception as e:
+        logger.error(f"[Ella] TTS generation failed: {e}")
+        return None
+
+
+def _upload_audio_to_gcs(audio_bytes: bytes, uid: str) -> Optional[str]:
+    """Upload MP3 audio to GCS and return a signed URL (1 hour expiry)."""
+    try:
+        bucket = storage_client.bucket(ELLA_AUDIO_BUCKET)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        filename = f"ella-tts/{uid}/{timestamp}-{uuid.uuid4().hex[:8]}.mp3"
+        blob = bucket.blob(filename)
+        blob.upload_from_file(io.BytesIO(audio_bytes), content_type="audio/mpeg")
+        url = blob.generate_signed_url(version="v4", expiration=timedelta(hours=1), method="GET")
+        logger.info(f"[Ella] Audio uploaded: {filename}")
+        return url
+
+    except Exception as e:
+        logger.error(f"[Ella] GCS upload failed: {e}")
+        return None
+
+
+# ============================================================================
+# Conversation Summary Update (for n8n pipeline write-back)
+# ============================================================================
+
+
+class ParallelTodayCardGroundingEvidence(BaseModel):
+    attester: Literal["hermes_parallel_grounding_verifier"]
+    semantic_outcome: Literal["supported"]
+    supporting_quotes: List[str] = Field(min_length=1, max_length=3)
+    policy_version: Literal["hermes-parallel-grounding-verifier-v1"]
+    transcript_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    summary_request_id: str = Field(min_length=1, max_length=512)
+    summary_response_id: str = Field(min_length=1, max_length=512)
+    verifier_request_id: str = Field(min_length=1, max_length=512)
+    verifier_response_id: str = Field(min_length=1, max_length=512)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ConversationSummaryUpdate(BaseModel):
+    """Schema for updating conversation structured summary fields."""
+
+    title: Optional[str] = None
+    overview: Optional[str] = None
+    emoji: Optional[str] = None
+    category: Optional[str] = None
+    summary_source: str = "observer"
+    summary_kind: str = "observer_enriched"
+    correction_id: Optional[str] = None
+    based_on_version_id: Optional[str] = None
+    require_based_on_match: bool = False
+    set_active: bool = True
+    trace_id: Optional[str] = None
+    require_canonical: bool = False
+    expected_transcript_hash: Optional[str] = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    require_source_match: bool = False
+    ella_tags: List[str] = Field(default_factory=list)
+    ella_signal: Optional[Dict[str, Any]] = None
+    today_card_grounding_evidence: Optional[ParallelTodayCardGroundingEvidence] = None
+    # A lookup handle only. Verification records are created by the internal
+    # server producer, never accepted as a caller-provided verdict or payload.
+    semantic_publication_receipt_id: Optional[str] = Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$", max_length=128,
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ConversationTerminalEnrichmentUpdate(BaseModel):
+    status: Literal["terminal"]
+    reason: Literal[
+        "grounding_rejected",
+        "provider_rejected",
+        "reservation_exhausted",
+        "provider_replay_exhausted",
+    ]
+    idempotency_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_trace_id: str = Field(min_length=1, max_length=256, pattern=r"^[\x21-\x7e]+$")
+    expected_source_transcript_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_source_active_summary_version_id: str = Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[\x20-\x7e]+$",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def _summary_cas_mode() -> str:
+    value = os.getenv(SUMMARY_CAS_MODE_ENV, SUMMARY_CAS_OPTIONAL).strip().lower()
+    return value if value in {SUMMARY_CAS_OPTIONAL, SUMMARY_CAS_REQUIRED} else SUMMARY_CAS_REQUIRED
+
+
+def _raw_header_values(request: Optional[Request], name: str) -> list[str]:
+    if request is None:
+        return []
+    expected_name = name.lower().encode("ascii")
+    return [
+        value.decode("latin-1")
+        for raw_name, value in request.scope.get("headers", [])
+        if raw_name.lower() == expected_name
+    ]
+
+
+def _summary_cas_preconditions(
+    contract: Optional[str],
+    if_match: Optional[str],
+    operation_token: Optional[str],
+    source_version: Optional[str],
+    request: Optional[Request] = None,
+) -> Optional[tuple[str, str, str]]:
+    raw_contracts = _raw_header_values(request, "x-ella-cas-contract")
+    raw_matches = _raw_header_values(request, "if-match")
+    raw_operation_tokens = _raw_header_values(request, "x-ella-operation-token")
+    raw_source_versions = _raw_header_values(request, "x-ella-source-version")
+    if any(len(values) > 1 for values in (raw_contracts, raw_matches, raw_operation_tokens, raw_source_versions)):
+        raise HTTPException(status_code=400, detail="Duplicate summary operation headers")
+    if raw_contracts:
+        contract = raw_contracts[0]
+    if raw_matches:
+        if_match = raw_matches[0]
+    if raw_operation_tokens:
+        operation_token = raw_operation_tokens[0]
+    if raw_source_versions:
+        source_version = raw_source_versions[0]
+    contract = contract if isinstance(contract, str) else None
+    if_match = if_match if isinstance(if_match, str) else None
+    operation_token = operation_token if isinstance(operation_token, str) else None
+    source_version = source_version if isinstance(source_version, str) else None
+    attempted = any(value is not None for value in (contract, if_match, operation_token, source_version))
+    if not attempted and _summary_cas_mode() == SUMMARY_CAS_OPTIONAL:
+        return None
+    if (
+        contract != ELLA_CANONICAL_SOURCE_CONTRACT
+        or if_match is None
+        or operation_token is None
+        or source_version is None
+    ):
+        raise HTTPException(status_code=428, detail="Canonical source precondition required")
+    match = SUMMARY_CAS_IF_MATCH_RE.fullmatch(if_match)
+    if (
+        match is None
+        or SUMMARY_OPERATION_TOKEN_RE.fullmatch(operation_token) is None
+        or not source_version
+        or len(source_version) > 256
+        or any(ord(char) < 32 or ord(char) > 126 for char in source_version)
+    ):
+        raise HTTPException(status_code=428, detail="Canonical source precondition required")
+    return match.group(1), operation_token, source_version
+
+
+@router.get("/conversation/summary/capabilities")
+async def conversation_summary_capabilities():
+    """Credential-free rollout signal; contains no owner or conversation data."""
+    mode = _summary_cas_mode()
+    return {
+        "contract": ELLA_CANONICAL_SOURCE_CONTRACT,
+        "conditional_write": True,
+        "enforcement": mode,
+        "headerless_legacy_writes": mode == SUMMARY_CAS_OPTIONAL,
+    }
+
+
+def _active_summary_version(conversation: dict) -> Optional[dict]:
+    active_id = conversation.get("active_summary_version_id")
+    versions = conversation.get("summary_versions") or []
+    if active_id:
+        for version in versions:
+            if version.get("id") == active_id:
+                return version
+    for version in versions:
+        if version.get("is_active"):
+            return version
+    return None
+
+
+def _enrichment_candidate_reason(conversation: dict) -> Optional[str]:
+    enrichment_state = conversation.get("enrichment_state") or {}
+    status = enrichment_state.get("status")
+    if status in {"writeback_applied", "terminal"}:
+        return None
+    if status == "failed":
+        return "enrichment_failed"
+    if enrichment_state.get("pending"):
+        return "enrichment_pending"
+
+    active_version = _active_summary_version(conversation)
+    if not active_version:
+        return "missing_active_summary_version"
+
+    source = str(active_version.get("source") or "")
+    kind = str(active_version.get("kind") or "")
+    if source == "observer" and kind in {"observer_enriched", "corrected_enriched"}:
+        return None
+    return "active_summary_not_enriched"
+
+
+def _update_correction_audit(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    payload: dict,
+) -> None:
+    (
+        db.collection("users")
+        .document(uid)
+        .collection("conversations")
+        .document(conversation_id)
+        .collection("corrections")
+        .document(correction_id)
+        .set(payload, merge=True)
+    )
+
+
+async def _get_resolve_pool() -> asyncpg.Pool:
+    global _resolve_pool
+    if _resolve_pool is None:
+        _resolve_pool = await asyncpg.create_pool(
+            host="127.0.0.1",
+            port=5433,
+            user="postgres",
+            password=authority_credential("ELLA_POSTGRES_PASSWORD", default="postgres", strip=False),
+            database="ella_ai",
+            min_size=1,
+            max_size=4,
+        )
+    return _resolve_pool
+
+
+async def _resolve_agent_id_for_uid(uid: str) -> Optional[str]:
+    pool = await _get_resolve_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT ac.agents
+        FROM users u
+        LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+        WHERE u.omi_uid = $1
+        """,
+        uid,
+    )
+    if not row or not row["agents"]:
+        return None
+
+    agents = row["agents"]
+    if isinstance(agents, str):
+        try:
+            agents = json.loads(agents)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(agents, dict):
+        return None
+    return agents.get("userAgentId")
+
+
+async def _resolve_workspace_target_for_uid(uid: str) -> Optional[tuple[str, str, str]]:
+    if await runtime_authority_enabled(uid):
+        runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
+        if runtime is None:
+            return None
+        if runtime.provider == "hermes_cloud":
+            # Managed Cloud exposes no Mini workspace/history control plane.
+            return None
+        return (
+            runtime.agent_id,
+            os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210").rstrip("/"),
+            authority_credential("ELLA_HERMES_PROVISION_API_TOKEN", strip=False),
+        )
+
+    agent_id = await _resolve_agent_id_for_uid(uid)
+    if not agent_id:
+        return None
+    return agent_id, PROVISION_API_URL.rstrip("/"), PROVISION_API_KEY
+
+
+async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional[dict]:
+    """Best-effort fetch of the user's Observer internal_assessment.
+
+    Isolated users fail closed on their active Hermes runtime. Legacy users retain
+    the existing 8200 lookup until the canary rollout is complete.
+    """
+    try:
+        target = await _resolve_workspace_target_for_uid(uid)
+        if not target:
+            return None
+        agent_id, provision_api_url, provision_api_key = target
+
+        headers = {}
+        if provision_api_key:
+            headers["Authorization"] = f"Bearer {provision_api_key}"
+            headers["X-Ella-Owner-Uid"] = uid
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{provision_api_url}/workspace/{agent_id}/metadata/conversations/{conversation_id}",
+                headers=headers,
+            )
+
+        if resp.status_code >= 400:
+            return None
+
+        data = resp.json()
+        assessment = data.get("internal_assessment")
+        return assessment if isinstance(assessment, dict) else None
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch internal_assessment from Provision API",
+            extra={"uid": uid, "conversation_id": conversation_id},
+        )
+        logger.warning(str(e))
+        return None
+
+
+@router.patch("/conversation/{conversation_id}/summary")
+async def update_conversation_summary(
+    conversation_id: str,
+    update: ConversationSummaryUpdate,
+    background_tasks: BackgroundTasks = None,
+    request: Request = None,
+    uid: str = None,
+    service: EllaRequestAuthority = Depends(require_callback_service),
+    response: Response = None,
+    cas_contract: Optional[str] = Header(default=None, alias="X-Ella-CAS-Contract"),
+    if_match: Optional[str] = Header(default=None, alias="If-Match"),
+    operation_token: Optional[str] = Header(default=None, alias="X-Ella-Operation-Token"),
+    source_version: Optional[str] = Header(default=None, alias="X-Ella-Source-Version"),
+):
+    """
+    Update the structured summary of an OMI conversation.
+    Called by n8n pipeline after agent enhances the summary.
+    Requires uid as query parameter (internal endpoint, not user-facing).
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Conversation summary callback")
+    cas_preconditions = _summary_cas_preconditions(
+        cas_contract,
+        if_match,
+        operation_token,
+        source_version,
+        request,
+    )
+
+    try:
+        writer = write_conversation_summary_cas if cas_preconditions is not None else write_conversation_summary
+        writer_args = dict(
+            uid=uid,
+            conversation_id=conversation_id,
+            title=update.title,
+            overview=update.overview,
+            emoji=update.emoji,
+            category=update.category,
+            summary_source=update.summary_source,
+            summary_kind=update.summary_kind,
+            correction_id=update.correction_id,
+            based_on_version_id=update.based_on_version_id,
+            require_based_on_match=update.require_based_on_match,
+            set_active=update.set_active,
+            trace_id=update.trace_id,
+            ella_tags=update.ella_tags,
+            ella_signal=update.ella_signal,
+            semantic_publication_receipt_id=update.semantic_publication_receipt_id,
+            internal_assessment_fetcher=_fetch_internal_assessment,
+            correction_audit_updater=_update_correction_audit,
+            canonical_writer=write_omi_canonical_event,
+            canonical_preflight=require_omi_canonical_write_ready,
+            require_canonical=update.require_canonical,
+            expected_transcript_hash=update.expected_transcript_hash,
+            require_source_match=update.require_source_match,
+            today_card_grounding_evidence=(
+                update.today_card_grounding_evidence.model_dump()
+                if update.today_card_grounding_evidence is not None
+                else None
+            ),
+        )
+        if cas_preconditions is not None:
+            expected_source_sha256, operation_token, source_version = cas_preconditions
+            if request is not None:
+                payload_sha256 = hashlib.sha256(await request.body()).hexdigest()
+            else:
+                payload_sha256 = hashlib.sha256(
+                    json.dumps(
+                        update.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest()
+            writer_args.update(
+                expected_canonical_source_sha256=expected_source_sha256,
+                operation_token=operation_token,
+                source_version=source_version,
+                payload_sha256=payload_sha256,
+                canonical_preflight=require_omi_canonical_write_ready,
+            )
+            for legacy_only_argument in (
+                "correction_audit_updater",
+                "require_based_on_match",
+                "require_canonical",
+                "expected_transcript_hash",
+                "require_source_match",
+                "today_card_grounding_evidence",
+            ):
+                writer_args.pop(legacy_only_argument)
+        else:
+            writer_args.pop("canonical_preflight")
+            writer_args["require_canonical"] = update.require_canonical
+        result = await writer(**writer_args)
+        if background_tasks is not None:
+            background_tasks.add_task(enqueue_after_terminal_enrichment, uid, conversation_id)
+        if cas_preconditions is not None:
+            if response is not None:
+                if result.get("status") == "pending_reconciliation":
+                    response.status_code = 202
+                    response.headers["X-Ella-CAS-Reconciliation"] = "pending"
+                else:
+                    response.headers["X-Ella-CAS-Applied"] = ELLA_CANONICAL_SOURCE_CONTRACT
+            return {
+                "status": result["status"],
+                "operation_receipt": result["operation_receipt"],
+            }
+        return result
+    except SemanticPublicationRejectedError:
+        raise HTTPException(status_code=409, detail="semantic_publication_rejected")
+    except SummarySanitizationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Unsafe conversation summary", "violations": e.violations},
+        )
+    except ConversationSummaryNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    except CanonicalConversationSourceMismatchError:
+        raise HTTPException(status_code=412, detail="Canonical source changed")
+    except CanonicalSummaryReconciliationPendingError:
+        raise HTTPException(status_code=409, detail="Canonical summary reconciliation pending")
+    except CanonicalSummaryOperationConflictError:
+        raise HTTPException(status_code=409, detail="Canonical summary operation conflict")
+    except CanonicalSummaryDependencyUnavailableError:
+        raise HTTPException(status_code=503, detail="Canonical summary dependency unavailable")
+    except ConversationSummaryOutcomeUnknownError:
+        raise HTTPException(status_code=503, detail="Conversation summary outcome unknown; retry exact request")
+    except InvalidConversationSummaryCategoryError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid category: '{e.args[0]}'")
+    except ConcurrentConversationSummaryChangeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logging.error("Failed to update conversation summary", extra={"stage": "summary_writeback"})
+        raise HTTPException(status_code=500, detail="Conversation summary update failed")
+
+
+@router.patch("/conversation/{conversation_id}/enrichment-state")
+async def update_conversation_enrichment_state(
+    conversation_id: str,
+    update: ConversationTerminalEnrichmentUpdate,
+    uid: str = None,
+    service: EllaRequestAuthority = Depends(require_callback_service),
+):
+    """Record a validated terminal enrichment outcome for reconciliation."""
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Conversation enrichment-state callback")
+    if update.reason not in TERMINAL_ENRICHMENT_REASONS:
+        raise HTTPException(status_code=400, detail="Unsupported terminal enrichment reason")
+    try:
+        return await write_terminal_enrichment_state(
+            uid=uid,
+            conversation_id=conversation_id,
+            reason=update.reason,
+            idempotency_sha256=update.idempotency_sha256,
+            expected_trace_id=update.expected_trace_id,
+            expected_source_transcript_hash=update.expected_source_transcript_hash,
+            expected_source_active_summary_version_id=update.expected_source_active_summary_version_id,
+        )
+    except ConversationSummaryNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    except TerminalEnrichmentStateConflictError:
+        raise HTTPException(status_code=409, detail="Terminal enrichment state conflict")
+
+
+@router.get("/conversations/enrichment/reconcile-candidates")
+async def list_enrichment_reconcile_candidates(
+    uid: Optional[str] = None,
+    lookback_minutes: int = 180,
+    limit: int = 25,
+    service: EllaRequestAuthority = Depends(require_callback_service),
+):
+    """
+    Internal helper for n8n reconciliation.
+    Returns recent completed conversations whose active summary is not yet
+    marked as observer-enriched in OMI.
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Enrichment reconciliation")
+    if lookback_minutes <= 0:
+        raise HTTPException(status_code=400, detail="lookback_minutes must be positive")
+    if limit <= 0 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+
+    start_date = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+    get_recent = getattr(conversations_db, "get_conversations_without_photos", conversations_db.get_conversations)
+    conversations = get_recent(
+        uid,
+        limit=limit,
+        offset=0,
+        include_discarded=False,
+        statuses=["completed"],
+        start_date=start_date,
+    )
+
+    candidates = []
+    for conversation in conversations:
+        reason = _enrichment_candidate_reason(conversation)
+        if not reason:
+            continue
+
+        active_version = _active_summary_version(conversation) or {}
+        structured = conversation.get("structured") or {}
+        candidates.append(
+            {
+                "conversation_id": conversation.get("id"),
+                "created_at": conversation.get("created_at"),
+                "title": structured.get("title") or conversation.get("title") or "",
+                "reason": reason,
+                "active_summary_version_id": conversation.get("active_summary_version_id"),
+                "active_summary_source": active_version.get("source"),
+                "active_summary_kind": active_version.get("kind"),
+                "enrichment_state": conversation.get("enrichment_state"),
+            }
+        )
+
+    return {
+        "uid": uid,
+        "lookback_minutes": lookback_minutes,
+        "limit": limit,
+        "total_scanned": len(conversations),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
+
+
+# ============================================================================
+# Conversation Data Fetch (for reprocessing pipeline)
+# ============================================================================
+
+
+def _conversation_field(conversation, key: str, default=None):
+    if isinstance(conversation, dict):
+        return conversation.get(key, default)
+    return getattr(conversation, key, default)
+
+
+def _structured_field(structured, key: str):
+    if isinstance(structured, dict):
+        return structured.get(key)
+    return getattr(structured, key, None)
+
+
+@router.get("/conversation/{conversation_id}/semantic-learning-authority/{receipt_id}")
+async def get_semantic_learning_authority(conversation_id: str, receipt_id: str,
+        service: EllaRequestAuthority = Depends(require_callback_service)):
+    """Private read-only v3 grant. No issue/write endpoint or caller proof blob."""
+    from ella.services.semantic_learning_authority import read_learning_authority
+    from ella.services.semantic_learning_v3 import LearningHold
+    from fastapi.responses import JSONResponse
+    uid=service.require_uid(None,feature="Semantic learning authority")
+    try:
+        grant=await read_learning_authority(uid=uid,conversation_id=conversation_id,receipt_id=receipt_id)
+        return JSONResponse(grant,headers={"Cache-Control":"no-store"})
+    except LearningHold as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from None
+    except Exception:
+        raise HTTPException(status_code=503,detail="learning_authority_unavailable") from None
+
+
+@router.get("/conversation/{conversation_id}/semantic-context-authority")
+async def get_semantic_context_authority(
+    conversation_id: str,
+    service: EllaRequestAuthority = Depends(require_callback_service),
+):
+    """Internal existing service+subject authentication; read-only, never public proof."""
+    from ella.services.semantic_context_authority import read_context_authority, ContextAuthorityRejected
+    from ella.services.semantic_runtime_authority import resolve_semantic_runtime,semantic_runtime_authority_identity
+    from fastapi.responses import JSONResponse
+    # Exact subject comes exclusively from the authenticated service authority.
+    uid = service.require_uid(None, feature="Semantic context authority")
+    try:
+        payload = await read_context_authority(uid=uid, conversation_id=conversation_id,
+            read_conversation=conversations_db.get_conversation, consent=assert_current_ai_consent,
+            resolve=resolve_semantic_runtime, identity=semantic_runtime_authority_identity)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+    except ContextAuthorityRejected as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except HTTPException:
+        raise
+    except Exception:
+        # No raw source, identity, provider exception or credentials in logs/errors.
+        raise HTTPException(status_code=503, detail="context_authority_unavailable") from None
+
+
+@router.get("/conversation/{conversation_id}/data")
+async def get_conversation_data(
+    conversation_id: str,
+    uid: Optional[str] = None,
+    service: EllaRequestAuthority = Depends(require_callback_service),
+):
+    """
+    Fetch conversation data used by the reprocessing pipeline when re-firing the
+    conversation-ready webhook. Internal endpoint; requires uid as query param.
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+    uid = service.require_uid(uid, feature="Conversation data callback")
+
+    try:
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+    except Exception as e:
+        logging.error(f"Failed to fetch conversation {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    payload = conversation_data_payload(uid=uid, conversation_id=conversation_id, conversation=conversation)
+    segments = _conversation_field(conversation, "transcript_segments", []) or []
+    transcript_segments = canonical_transcript_segments(list(segments))
+    active_summary_version = _active_summary_version(conversation) or {}
+    enrichment_state = _conversation_field(conversation, "enrichment_state", {}) or {}
+    return {
+        **payload,
+        "transcript_segments": transcript_segments,
+        "transcript_hash": transcript_grounding_hash(transcript_segments),
+        "active_summary_version_id": _conversation_field(conversation, "active_summary_version_id"),
+        "active_summary_source": active_summary_version.get("source"),
+        "active_summary_kind": active_summary_version.get("kind"),
+        "enrichment_status": enrichment_state.get("status"),
+        "enrichment_canonical_status": enrichment_state.get("canonical_status"),
+        "enrichment_trace_id": enrichment_state.get("trace_id"),
+    }
+
+
+# ============================================================================
+# Endpoints
+# ============================================================================
+
+
+@router.get("/health")
+async def ella_health():
+    """Health check for Ella callback endpoints."""
+    return {"status": "ok", "service": "ella-callbacks"}
+
+
+@router.post("/notification", response_model=NotificationResponse)
+async def ella_notification(
+    request: NotificationRequest,
+    service: EllaRequestAuthority = Depends(require_callback_service),
+):
+    """
+    Send push notification to user with optional TTS audio.
+
+    Called by n8n push-notification workflow when Letta agents need to
+    proactively alert the user (medication reminders, urgency detection, etc).
+
+    Flow:
+        Letta agent tool call -> n8n webhook -> this endpoint -> TTS -> GCS -> FCM -> iOS
+    """
+    request.uid = service.require_uid(request.uid, feature="Ella notification")
+    assert_current_ai_consent(request.uid)
+    logger.info(f"[Ella] Notification: uid={request.uid}, urgency={request.urgency}, audio={request.generate_audio}")
+
+    audio_url = request.audio_url
+
+    # Step 1: Generate TTS audio if requested and no pre-existing URL
+    if request.generate_audio and not audio_url:
+        audio_bytes = _generate_tts_audio(request.message)
+        if audio_bytes:
+            audio_url = _upload_audio_to_gcs(audio_bytes, request.uid)
+            del audio_bytes
+
+    # Step 2: Build FCM data payload
+    data = {
+        "type": "ella_notification",
+        "urgency": request.urgency,
+    }
+    if audio_url:
+        data["audio_url"] = audio_url
+        data["action"] = "play_audio"
+    if request.metadata:
+        data["source"] = request.metadata.source
+        if request.metadata.conversation_id:
+            data["conversation_id"] = request.metadata.conversation_id
+
+    # Step 3: Send FCM push notification
+    try:
+        send_notification(
+            user_id=request.uid,
+            title="Ella",
+            body=request.message,
+            data=data,
+        )
+    except Exception as e:
+        logger.error(f"[Ella] FCM send failed: {e}")
+        return NotificationResponse(
+            status="error",
+            urgency=request.urgency,
+            error=f"FCM delivery failed: {e}",
+        )
+
+    logger.info(f"[Ella] Notification sent: uid={request.uid}, audio={'yes' if audio_url else 'no'}")
+
+    return NotificationResponse(
+        status="success",
+        audio_url=audio_url,
+        urgency=request.urgency,
+    )
+
+
+# ============================================================================
+# Emergency Alert Models
+# ============================================================================
+
+
+class EmergencyLocation(BaseModel):
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    address: Optional[str] = None
+
+
+class EmergencyRequest(BaseModel):
+    uid: str
+    message: str = Field(default="Emergency alert triggered", max_length=500)
+    location: Optional[EmergencyLocation] = None
+    audio_context_url: Optional[str] = None
+    contacts: Optional[List[dict]] = None
+
+
+class ContactResult(BaseModel):
+    name: str
+    method: str
+    status: str
+    error: Optional[str] = None
+
+
+class EmergencyResponse(BaseModel):
+    status: str
+    alert_id: str
+    contacts_notified: List[ContactResult] = []
+    push_sent: bool = False
+    sms_available: bool = False
+    error: Optional[str] = None
+
+
+_CONFIRMED_EMERGENCY_DELIVERY_STATUSES = {"delivered"}
+_PENDING_EMERGENCY_DELIVERY_STATUSES = {"queued"}
+
+
+def _append_unique_emergency_contact(contacts: List[dict], seen: set[str], contact: dict) -> None:
+    phone = str(contact.get("phone") or "").strip()[:20]
+    email = str(contact.get("email") or "").strip()[:254]
+    if not phone and not email:
+        return
+
+    dedupe_keys = set()
+    phone_digits = re.sub(r"\D", "", phone)
+    if phone_digits:
+        dedupe_keys.add(f"phone:{phone_digits}")
+    if email:
+        dedupe_keys.add(f"email:{email.casefold()}")
+    if dedupe_keys & seen:
+        return
+
+    seen.update(dedupe_keys)
+    contacts.append(
+        {
+            "name": str(contact.get("name") or "Emergency contact")[:200],
+            "phone": phone or None,
+            "email": email or None,
+            "relationship": str(contact.get("relationship") or "other")[:100],
+        }
+    )
+
+
+async def _server_owned_emergency_contacts(uid: str) -> List[dict]:
+    # The authenticated onboarding store is canonical. PostgreSQL caregivers
+    # remain a compatibility source while existing records are reconciled.
+    stored_contacts = await asyncio.to_thread(get_contacts, uid)
+    if not isinstance(stored_contacts, list):
+        raise RuntimeError("invalid emergency contact store response")
+
+    contacts: List[dict] = []
+    seen: set[str] = set()
+    for stored_contact in stored_contacts:
+        if not isinstance(stored_contact, dict):
+            continue
+        if str(stored_contact.get("uid") or "").strip() != uid:
+            continue
+        permissions = stored_contact.get("permissions") or {}
+        if not isinstance(permissions, dict) or permissions.get("emergency_contact") is not True:
+            continue
+        _append_unique_emergency_contact(contacts, seen, stored_contact)
+
+    pool = await get_ella_postgres_pool()
+    caregiver_rows = await pool.fetch(
+        """
+        SELECT
+            c.id,
+            u.omi_uid AS owner_uid,
+            c.status::text AS status,
+            c.is_emergency_contact,
+            c.name,
+            c.relationship,
+            c.email,
+            c.phone,
+            c.permissions
+        FROM users u
+        JOIN caregivers c ON c.user_id = u.id
+        WHERE u.omi_uid = $1
+          AND c.is_emergency_contact = TRUE
+        ORDER BY c.created_at ASC
+        """,
+        uid,
+    )
+    for row in caregiver_rows:
+        caregiver = dict(row)
+        if str(caregiver.get("owner_uid") or "").strip() != uid:
+            continue
+        permissions = caregiver.get("permissions") or {}
+        if isinstance(permissions, str):
+            try:
+                permissions = json.loads(permissions)
+            except json.JSONDecodeError:
+                permissions = {}
+        if not isinstance(permissions, dict):
+            permissions = {}
+        context = CaregiverPolicyContext(
+            caregiver_id=str(caregiver.get("id") or ""),
+            status=str(caregiver.get("status") or ""),
+            is_emergency_contact=caregiver.get("is_emergency_contact") is True,
+            name=caregiver.get("name"),
+            relationship=caregiver.get("relationship"),
+            email=caregiver.get("email"),
+            phone=caregiver.get("phone"),
+            permissions=permissions,
+        )
+        allowed, _reason = _caregiver_alert_allowed(
+            context,
+            {"emergency_contact_only": True, "allow_high": False},
+            SEVERITY_CRITICAL,
+        )
+        if not allowed:
+            continue
+        _append_unique_emergency_contact(
+            contacts,
+            seen,
+            {
+                "name": context.name,
+                "phone": context.phone,
+                "email": context.email,
+                "relationship": context.relationship,
+            },
+        )
+    return contacts
+
+
+# ============================================================================
+# Emergency Alert Endpoint
+# ============================================================================
+
+
+@router.post("/emergency", response_model=EmergencyResponse)
+async def ella_emergency(
+    request: EmergencyRequest,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    """
+    Emergency alert endpoint. Called by the iOS app when the elder taps
+    the emergency button.
+
+    Flow:
+        1. Send immediate FCM push to elder's device (confirmation)
+        2. Dispatch SMS/call alerts to emergency contacts via n8n
+        3. Return alert status
+
+    The endpoint is designed to work without Twilio credentials:
+    - Without Twilio: push notification only (still useful)
+    - With Twilio: push + SMS + voice call via n8n workflow
+    """
+    uid = require_matching_firebase_uid(authenticated_uid, request.uid, feature="Emergency alert")
+    request.uid = uid
+
+    alert_id = f"emg-{uuid.uuid4().hex[:12]}"
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    logger.info(f"[Ella] EMERGENCY: uid={request.uid}, alert_id={alert_id}")
+
+    contacts_notified: List[ContactResult] = []
+    push_sent = False
+    sms_available = False
+    delivery_error: Optional[str] = None
+    confirmed_delivery_count = 0
+    pending_delivery_count = 0
+
+    # Step 1: Send immediate push notification to elder's device
+    try:
+        data = {
+            "type": "ella_emergency_confirmation",
+            "urgency": "EMERGENCY",
+            "alert_id": alert_id,
+        }
+        send_notification(
+            user_id=request.uid,
+            title="Ella - Emergency Request Received",
+            body="Your emergency request was received.",
+            data=data,
+        )
+        push_sent = True
+        logger.info(f"[Ella] Emergency push sent to elder: uid={request.uid}")
+    except Exception as e:
+        logger.error(f"[Ella] Emergency push to elder failed: {e}")
+
+    try:
+        emergency_contacts = await _server_owned_emergency_contacts(request.uid)
+    except Exception:
+        logger.exception("[Ella] Emergency caregiver authority lookup failed")
+        emergency_contacts = []
+        delivery_error = "emergency_contact_authority_unavailable"
+
+    # Step 2: Dispatch to n8n for SMS/call alerts (non-blocking)
+    n8n_payload = {
+        "alert_id": alert_id,
+        "uid": request.uid,
+        "message": request.message,
+        "timestamp": timestamp,
+        "location": request.location.model_dump() if request.location else None,
+        "contacts": emergency_contacts,
+    }
+
+    if delivery_error is not None:
+        logger.warning("[Ella] Emergency delivery skipped: server-owned contacts unavailable")
+    elif not EMERGENCY_WEBHOOK_KEY:
+        delivery_error = "emergency_webhook_authority_unavailable"
+        logger.error("[Ella] Emergency delivery skipped: webhook authority unavailable")
+    elif not emergency_contacts:
+        delivery_error = "emergency_contacts_unavailable"
+        logger.warning("[Ella] Emergency delivery skipped: no eligible server-owned contacts")
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+                response = await client.post(
+                    ELLA_CONFIG.emergency_url,
+                    json=n8n_payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        EMERGENCY_WEBHOOK_KEY_HEADER: EMERGENCY_WEBHOOK_KEY,
+                    },
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    sms_available = result.get("sms_available", False)
+
+                    for contact in result.get("contacts_notified", []):
+                        contact_result = ContactResult(
+                            name=contact.get("name", "Unknown"),
+                            method=contact.get("method", "unknown"),
+                            status=contact.get("status", "unknown"),
+                            error=contact.get("error"),
+                        )
+                        contacts_notified.append(contact_result)
+                        normalized_status = contact_result.status.strip().lower()
+                        if normalized_status in _CONFIRMED_EMERGENCY_DELIVERY_STATUSES:
+                            confirmed_delivery_count += 1
+                        elif normalized_status in _PENDING_EMERGENCY_DELIVERY_STATUSES:
+                            pending_delivery_count += 1
+
+                    logger.info(
+                        f"[Ella] Emergency n8n dispatch success: "
+                        f"{len(contacts_notified)} contacts, confirmed={confirmed_delivery_count}, "
+                        f"sms={sms_available}"
+                    )
+                    if confirmed_delivery_count == 0:
+                        delivery_error = (
+                            "emergency_delivery_pending"
+                            if pending_delivery_count > 0
+                            else "emergency_delivery_unconfirmed"
+                        )
+                else:
+                    delivery_error = "emergency_delivery_unavailable"
+                    logger.warning("[Ella] Emergency n8n dispatch returned status=%s", response.status_code)
+
+        except httpx.TimeoutException:
+            delivery_error = "emergency_delivery_outcome_unknown"
+            logger.warning("[Ella] Emergency n8n dispatch timed out; delivery outcome is unknown")
+        except Exception:
+            delivery_error = "emergency_delivery_unavailable"
+            logger.exception("[Ella] Emergency n8n dispatch failed")
+
+    if confirmed_delivery_count > 0:
+        status = "success"
+    elif pending_delivery_count > 0:
+        status = "pending"
+    else:
+        status = "partial"
+
+    logger.info(
+        f"[Ella] Emergency alert complete: alert_id={alert_id}, "
+        f"push={push_sent}, contacts={len(contacts_notified)}, sms={sms_available}"
+    )
+
+    return EmergencyResponse(
+        status=status,
+        alert_id=alert_id,
+        contacts_notified=contacts_notified,
+        push_sent=push_sent,
+        sms_available=sms_available,
+        error=delivery_error,
+    )
+
+
+# ============================================================================
+# Daily Summary Models
+# ============================================================================
+
+
+class DailySummaryHighlight(BaseModel):
+    title: str
+    overview: str
+
+
+class DailySummaryMemory(BaseModel):
+    content: str
+    category: str = "general"
+
+
+class DailySummaryRequest(BaseModel):
+    uid: str
+    date: Optional[str] = None
+
+
+class DailySummaryResponse(BaseModel):
+    status: str
+    dispatched: bool = False
+    error: Optional[str] = None
+
+
+# ============================================================================
+# Daily Summary Endpoint
+# ============================================================================
+
+
+@router.post("/daily-summary", response_model=DailySummaryResponse)
+async def ella_daily_summary(
+    request: DailySummaryRequest,
+    service: EllaRequestAuthority = Depends(require_callback_service),
+):
+    """
+    Trigger daily summary generation for a user's caregivers.
+
+    Called by n8n cron workflow (hourly, at 8pm user-local) or manually
+    from the caregiver dashboard. Dispatches to the n8n daily-summary
+    webhook which handles data aggregation, email formatting, and delivery.
+
+    Flow:
+        n8n cron (hourly) -> checks timezone -> this endpoint -> n8n daily-summary webhook
+        OR
+        Caregiver dashboard "Send Summary Now" -> this endpoint -> n8n daily-summary webhook
+    """
+    request.uid = service.require_uid(request.uid, feature="Ella daily summary")
+    logger.info(f"[Ella] Daily summary requested: uid={request.uid}, date={request.date}")
+
+    summary_date = request.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    n8n_payload = {
+        "uid": request.uid,
+        "date": summary_date,
+        "trigger": "api",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                ELLA_CONFIG.daily_summary_url,
+                json=n8n_payload,
+                headers={"Content-Type": "application/json"},
+            )
+
+            if response.status_code == 200:
+                logger.info(f"[Ella] Daily summary dispatched to n8n: uid={request.uid}")
+                return DailySummaryResponse(status="success", dispatched=True)
+            else:
+                logger.warning(f"[Ella] Daily summary n8n returned {response.status_code}: {response.text[:200]}")
+                return DailySummaryResponse(
+                    status="error",
+                    dispatched=False,
+                    error=f"n8n returned {response.status_code}",
+                )
+
+    except httpx.TimeoutException:
+        logger.warning("[Ella] Daily summary n8n dispatch timed out (30s)")
+        return DailySummaryResponse(
+            status="timeout",
+            dispatched=False,
+            error="n8n webhook timed out",
+        )
+    except Exception as e:
+        logger.error(f"[Ella] Daily summary dispatch failed: {e}")
+        return DailySummaryResponse(
+            status="error",
+            dispatched=False,
+            error=str(e),
+        )
+
+
+# ============================================================================
+# Emergency Contact CRUD Models
+# ============================================================================
+
+
+class ContactPermissions(BaseModel):
+    emergency_contact: bool = True
+    daily_summary: bool = False
+    view_conversations: bool = False
+
+
+class EmergencyContactCreate(BaseModel):
+    uid: str
+    name: str = Field(..., min_length=1, max_length=200)
+    phone: str = Field(..., max_length=20)
+    email: Optional[str] = Field(default=None, max_length=254)
+    relationship: str = Field(default="other", max_length=100)
+    permissions: ContactPermissions = ContactPermissions()
+
+
+class EmergencyContactUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    phone: Optional[str] = Field(default=None, max_length=20)
+    email: Optional[str] = Field(default=None, max_length=254)
+    relationship: Optional[str] = Field(default=None, max_length=100)
+    permissions: Optional[ContactPermissions] = None
+
+
+class EmergencyContactOut(BaseModel):
+    id: str
+    uid: str
+    name: str
+    phone: str = ""
+    email: Optional[str] = None
+    relationship: str = "other"
+    permissions: ContactPermissions = ContactPermissions()
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+# ============================================================================
+# Emergency Contact CRUD Endpoints
+# ============================================================================
+
+
+@router.post("/emergency-contact", response_model=EmergencyContactOut, status_code=201)
+async def create_emergency_contact(
+    request: EmergencyContactCreate,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    """Add an emergency contact for a user."""
+    uid = require_matching_firebase_uid(authenticated_uid, request.uid, feature="Emergency contact")
+    data = request.model_dump()
+    data["uid"] = uid
+    data['permissions'] = request.permissions.model_dump()
+    result = create_contact(uid, data)
+    logger.info("[Ella] Contact created")
+    return EmergencyContactOut(**result)
+
+
+@router.get("/emergency-contacts/{uid}", response_model=List[EmergencyContactOut])
+async def list_emergency_contacts(
+    uid: str,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    """List all emergency contacts for a user."""
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Emergency contacts")
+    contacts = get_contacts(uid)
+    logger.info("[Ella] Contacts listed count=%s", len(contacts))
+    return [EmergencyContactOut(**c) for c in contacts]
+
+
+@router.put("/emergency-contact/{contact_id}", response_model=EmergencyContactOut)
+async def update_emergency_contact(
+    contact_id: str,
+    request: EmergencyContactUpdate,
+    uid: str = "",
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    """
+    Update an emergency contact. Pass uid as a query parameter.
+
+    Example: PUT /v1/ella/emergency-contact/{contact_id}?uid=abc123
+    """
+    if not uid:
+        raise HTTPException(status_code=422, detail="uid query parameter is required")
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Emergency contact")
+
+    existing = get_contact(uid, contact_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    update_data = request.model_dump(exclude_none=True)
+    if 'permissions' in update_data and request.permissions is not None:
+        update_data['permissions'] = request.permissions.model_dump()
+
+    result = update_contact(uid, contact_id, update_data)
+    logger.info("[Ella] Contact updated")
+    return EmergencyContactOut(**result)
+
+
+@router.delete("/emergency-contact/{contact_id}", status_code=204)
+async def delete_emergency_contact(
+    contact_id: str,
+    uid: str = "",
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    """
+    Remove an emergency contact. Pass uid as a query parameter.
+
+    Example: DELETE /v1/ella/emergency-contact/{contact_id}?uid=abc123
+    """
+    if not uid:
+        raise HTTPException(status_code=422, detail="uid query parameter is required")
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Emergency contact")
+
+    deleted = delete_contact(uid, contact_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    logger.info("[Ella] Contact deleted")
+
+
+# ============================================================================
+# Authenticated first-party caregiver API
+# ============================================================================
+
+
+class CaregiverInviteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=200)
+    phone: Optional[str] = Field(default=None, max_length=20)
+    email: str = Field(..., min_length=3, max_length=254)
+    relationship: str = Field(default="other", max_length=100)
+    permissions: Dict[str, bool] = Field(default_factory=dict)
+
+
+class CaregiverPermissionsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receive_daily_summary: bool
+    daily_summary_email: bool
+
+
+class EmergencyCaregiverUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    caregiver_id: str = Field(default="", max_length=128)
+
+
+@router.get("/caregivers")
+async def list_caregivers(authenticated_uid: str = Depends(get_exact_firebase_uid)):
+    caregivers = get_caregivers(authenticated_uid)
+    return {"caregivers": caregivers}
+
+
+@router.post("/caregivers/invite", status_code=201)
+async def invite_caregiver(
+    request: CaregiverInviteRequest,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    caregiver = create_caregiver(authenticated_uid, request.model_dump())
+    return {
+        "invite_id": caregiver["id"],
+        "caregiver_id": caregiver["id"],
+        "invite_code": caregiver["invite_code"],
+        "status": caregiver["status"],
+        "expires_at": caregiver["invite_expires_at"],
+    }
+
+
+@router.get("/caregivers/emergency-contact")
+async def get_emergency_caregiver(authenticated_uid: str = Depends(get_exact_firebase_uid)):
+    return {"caregiver_id": get_emergency_caregiver_id(authenticated_uid)}
+
+
+@router.put("/caregivers/emergency-contact")
+async def update_emergency_caregiver(
+    request: EmergencyCaregiverUpdate,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    selected = set_emergency_caregiver(authenticated_uid, request.caregiver_id.strip())
+    if request.caregiver_id.strip() and selected is None:
+        raise HTTPException(status_code=404, detail="Caregiver not found")
+    return {"caregiver_id": selected}
+
+
+@router.put("/caregivers/{caregiver_id}/permissions")
+async def update_caregiver_permissions(
+    caregiver_id: str,
+    request: CaregiverPermissionsUpdate,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    caregiver = update_caregiver(
+        authenticated_uid,
+        caregiver_id,
+        {
+            "permissions.receive_daily_summary": request.receive_daily_summary,
+            "permissions.daily_summary_email": request.daily_summary_email,
+        },
+    )
+    if caregiver is None:
+        raise HTTPException(status_code=404, detail="Caregiver not found")
+    return caregiver
+
+
+@router.post("/caregivers/{caregiver_id}/resend-invite")
+async def resend_caregiver_invite(
+    caregiver_id: str,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    caregiver = refresh_caregiver_invite(authenticated_uid, caregiver_id)
+    if caregiver is None:
+        raise HTTPException(status_code=404, detail="Caregiver not found")
+    return {
+        "caregiver_id": caregiver["id"],
+        "invite_code": caregiver["invite_code"],
+        "status": caregiver["status"],
+        "expires_at": caregiver["invite_expires_at"],
+    }
+
+
+@router.delete("/caregivers/{caregiver_id}", status_code=204)
+async def remove_caregiver(
+    caregiver_id: str,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
+    if not delete_caregiver(authenticated_uid, caregiver_id):
+        raise HTTPException(status_code=404, detail="Caregiver not found")
+
+
+# ============================================================================
+# Caregiver Dashboard Token Helpers
+# ============================================================================
+
+
+def _dashboard_secret() -> str:
+    secret = os.getenv("ELLA_DASHBOARD_SECRET", "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail={"code": "caregiver_dashboard_auth_not_configured"})
+    return secret
+
+
+def generate_dashboard_token(caregiver_id: str, user_id: str, omi_uid: str, hours_valid: int = 24) -> str:
+    """Generate an HMAC-signed dashboard token.
+
+    Token format: {caregiver_id}.{omi_uid}.{expiry_ts}.{signature}
+    """
+    expiry = int((datetime.now(timezone.utc) + timedelta(hours=hours_valid)).timestamp())
+    payload = f"{caregiver_id}.{omi_uid}.{expiry}"
+    signature = hmac.new(_dashboard_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{payload}.{signature}"
+
+
+def validate_dashboard_token(token: str) -> Optional[dict]:
+    """Validate and decode a dashboard token. Returns dict with caregiver_id, omi_uid, or None."""
+    dashboard_secret = _dashboard_secret()
+    parts = token.split(".")
+    if len(parts) != 4:
+        return None
+
+    caregiver_id, omi_uid, expiry_str, signature = parts
+
+    try:
+        expiry = int(expiry_str)
+    except ValueError:
+        return None
+
+    if datetime.now(timezone.utc).timestamp() > expiry:
+        return None
+
+    payload = f"{caregiver_id}.{omi_uid}.{expiry_str}"
+    expected_sig = hmac.new(dashboard_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+
+    if not hmac.compare_digest(signature, expected_sig):
+        return None
+
+    return {"caregiver_id": caregiver_id, "omi_uid": omi_uid, "expiry": expiry}
+
+
+# ============================================================================
+# Caregiver Dashboard Data Models
+# ============================================================================
+
+
+class DashboardConversation(BaseModel):
+    id: str
+    title: str
+    overview: str
+    category: str = "general"
+    started_at: Optional[str] = None
+
+
+class DashboardMemory(BaseModel):
+    id: str
+    content: str
+    category: str = "general"
+
+
+class DashboardData(BaseModel):
+    elder_name: str
+    date: str
+    date_formatted: str
+    conversations: List[DashboardConversation] = []
+    memories: List[DashboardMemory] = []
+    conversation_count: int = 0
+    memory_count: int = 0
+
+
+# ============================================================================
+# Caregiver Dashboard Data Endpoint
+# ============================================================================
+
+
+@router.get("/caregiver-dashboard-data")
+async def caregiver_dashboard_data(token: str, date: Optional[str] = None):
+    """
+    Returns dashboard data for a caregiver, validated by signed token.
+
+    Token is generated by the daily summary n8n workflow and embedded in
+    the email link. Valid for 24 hours.
+
+    Query params:
+        token: HMAC-signed token from daily summary email
+        date: optional date override (YYYY-MM-DD), defaults to today
+    """
+    token_data = validate_dashboard_token(token)
+    if not token_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired dashboard token")
+
+    omi_uid = token_data["omi_uid"]
+    logger.info(f"[Ella] Dashboard data requested: uid={omi_uid}, caregiver={token_data['caregiver_id']}")
+
+    # Get elder profile
+    user_profile = users_db.get_user_profile(omi_uid)
+    elder_name = user_profile.get("name", "Your loved one") if user_profile else "Your loved one"
+
+    # Determine date range
+    target_date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        start_dt = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    end_dt = start_dt + timedelta(days=1)
+
+    # Format date for display
+    date_formatted = start_dt.strftime("%A, %B %d, %Y")
+
+    # Fetch conversations for the day
+    raw_conversations = conversations_db.get_conversations(
+        omi_uid,
+        limit=50,
+        offset=0,
+        include_discarded=False,
+        statuses=["completed"],
+        start_date=start_dt,
+        end_date=end_dt,
+    )
+
+    conversations = []
+    for conv in raw_conversations:
+        structured = conv.get("structured", {})
+        started = conv.get("started_at")
+        conversations.append(
+            DashboardConversation(
+                id=conv.get("id", ""),
+                title=structured.get("title", "Conversation"),
+                overview=structured.get("overview", ""),
+                category=structured.get("category", "general"),
+                started_at=started.isoformat() if hasattr(started, "isoformat") else str(started) if started else None,
+            )
+        )
+
+    # Fetch recent memories
+    raw_memories = memories_db.get_memories(omi_uid, limit=20, offset=0)
+    memories = []
+    for mem in raw_memories:
+        if mem.get("is_locked", False):
+            continue
+        memories.append(
+            DashboardMemory(
+                id=mem.get("id", ""),
+                content=mem.get("content", ""),
+                category=mem.get("category", "general"),
+            )
+        )
+
+    dashboard = DashboardData(
+        elder_name=elder_name,
+        date=target_date,
+        date_formatted=date_formatted,
+        conversations=conversations,
+        memories=memories,
+        conversation_count=len(conversations),
+        memory_count=len(memories),
+    )
+
+    logger.info(
+        f"[Ella] Dashboard data served: uid={omi_uid}, " f"conversations={len(conversations)}, memories={len(memories)}"
+    )
+
+    return dashboard
+
+
+@router.post("/generate-dashboard-token")
+async def generate_dashboard_token_endpoint(
+    uid: str,
+    caregiver_id: str,
+    service: EllaRequestAuthority = Depends(require_caregiver_service),
+):
+    """
+    Generate a dashboard token for a caregiver. Called by n8n workflows
+    when composing daily summary emails.
+
+    This is an internal endpoint — should be called from n8n on the same VPS,
+    not exposed to end users.
+    """
+    uid = service.require_uid(uid, feature="Caregiver dashboard token")
+    token = generate_dashboard_token(caregiver_id=caregiver_id, user_id=uid, omi_uid=uid, hours_valid=24)
+    dashboard_url = f"https://ella-ai-care.com/dashboard/?token={token}"
+
+    logger.info("[Ella] Dashboard token generated")
+
+    return {"token": token, "dashboard_url": dashboard_url, "expires_in_hours": 24}
+
+
+# ============================================================================
+# Caregiver CRUD — MOVED to n8n (ella-ai-care repo)
+# iOS app calls n8n.ella-ai-care.com webhooks directly for all caregiver ops.
+# All caregiver data in ella-ai-care Postgres, not OMI Firestore.
+# See: https://github.com/ellaaicare/ella-ai/issues/55
+# ============================================================================
+
+
+@router.post("/conversation/{conversation_id}/context-records-v2")
+async def get_context_records_v2(conversation_id: str, request: Request,
+        service: EllaRequestAuthority = Depends(require_callback_service)):
+    """Private existing service/subject auth, bounded metadata only; never a grant."""
+    from ella.services.semantic_context_records_v2 import read_context_records, ContextRecordsRejected, closed_failure_code
+    from database._client import db
+    from fastapi.responses import JSONResponse
+    uid = service.require_uid(None, feature="Captured context records")
+    chunks=[];size=0
+    async for chunk in request.stream():
+        size+=len(chunk)
+        if size>32768:raise HTTPException(status_code=413,detail="context_records_request_capacity")
+        chunks.append(chunk)
+    try:
+        def pairs(items):
+            value={}
+            for key,item in items:
+                if key in value:raise ValueError()
+                value[key]=item
+            return value
+        body=json.loads(b''.join(chunks),object_pairs_hook=pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+        result=await read_context_records(db=db,uid=uid,target_cid=conversation_id,arguments=body)
+        return JSONResponse(result,headers={"Cache-Control":"no-store"})
+    except ContextRecordsRejected as error:
+        raise HTTPException(status_code=409,detail={'code':'context_records_hold'},headers={'X-Ella-Context-Records-Hold-Code':closed_failure_code(error)}) from None
+    except Exception as error:
+        raise HTTPException(status_code=503,detail={'code':'context_records_unavailable'},headers={'X-Ella-Context-Records-Hold-Code':closed_failure_code(error)}) from None
