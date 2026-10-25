@@ -12,7 +12,10 @@
     "ordinary": 12,
     "semantic": 6
   },
+  "controller_fault_cases": 11,
+  "deployed_at": "2026-10-25T04:43:42.160976+00:00",
   "live_latency": "NOT_YET_MEASURED",
+  "model_and_authority_configuration_changed": false,
   "pins": {
     "baseline/ella/services/semantic_context_authority.py.source": "b876a94e1eb71e04e5887774c2db54b998ca19272f07232f8a0b8e52a05fede9",
     "baseline/ella/services/semantic_context_records_v2.py.source": "2bcc52532c518d7d9fa173ce161a66c777230ef110583568a5c50f0c79b09e62",
@@ -24,5 +27,7 @@
     "tests/test_factoring.py.source": "40cb98a640e71b02d5c7cae14d6026725c3934a04925241391a53ac385030bde"
   },
   "private_batch_alias_and_public_double_wrapper": "PASS",
-  "state": "SOURCE_REVIEWED_REAL_SERVICE_IMPORT_PASS_NOT_DEPLOYED"
+  "protected_original_cohort_quarantines_preserved": 9,
+  "selected_import_closure_modules": 20,
+  "state": "DEPLOYED_HEALTHY_REAL_SERVICE_IMPORT_PASS_APPLICATION_ACCEPTANCE_PENDING"
 }
