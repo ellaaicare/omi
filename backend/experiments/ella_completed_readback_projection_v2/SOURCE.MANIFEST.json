@@ -20,6 +20,6 @@
     "generator_verifier_distinct_accepted_provenance": true,
     "no_regeneration_or_write": true
   },
-  "actual_agent_recall": "NOT_YET_RUN",
+  "actual_agent_recall": "PASS_CURRENT_TURN_RETRIEVAL_AUGMENTED_TITLE_MATCH_2026-10-25T08:05:36Z",
   "new_serving_deployment": false
 }

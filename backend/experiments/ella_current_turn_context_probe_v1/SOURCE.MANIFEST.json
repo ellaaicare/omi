@@ -1,0 +1,25 @@
+{
+  "state": "SOURCE_REPRODUCED_PERSISTENT_CONTEXT_PLACEMENT_AND_LIVE_RAG_MATCH",
+  "parser_fixture_sha256": "93eac9949ee24bc0ccfa0a06492f430b683df32ac9ba89e17ec7fed26f7ae064",
+  "external_gateway_source_relative_path": "gateway/platforms/api_server.py",
+  "external_gateway_source_sha256": "afe8d2a7371d928d7fd8b702c7d313ac6aab5752a2332cae4464e05195aacb2f",
+  "selected_ast_sha256": "c21b9cfa196483728ed0d501879a67a3276e8551b13d4b82f14b54927024a3f8",
+  "offline_cases": {
+    "actual_parser_branch": 10,
+    "independent_bound_controller": 7
+  },
+  "independent_review_sha256": "8aff086f31fd0a9ab18a6116a1fa7b24900ef1f78ca22627ff5c9d84a0e323c2",
+  "live_result": {
+    "utc": "2026-10-25T08:05:36.820028+00:00",
+    "http": 200,
+    "finish_reason": "stop",
+    "exact_owned_current_title_match": true,
+    "original_route_source_and_version_unchanged": true,
+    "current_turn_context_contract": "ella-canonical-current-turn-v1"
+  },
+  "no_regeneration_of_completed_memory": true,
+  "serving_code_edits": 0,
+  "normal_chat_effective_provider": "UNKNOWN",
+  "autonomous_archive_search_proven": false,
+  "imessage_session_parity_proven": false
+}
