@@ -1,0 +1,30 @@
+{
+  "state": "DEPLOYED_HEALTHY_EXACT_HOLD_PRESERVED",
+  "utc": "2026-10-25T07:04:12.543079+00:00",
+  "source_commit": "b3b605f4cc9d58cbe9ff291566bfebc7c3d2bfdd",
+  "source_files": {
+    "ella/services/semantic_producer_ledger.py": "7722f260c29d3a7197145d67424f24cc5a0581106dae088e54284401e3d562c6",
+    "ella/services/retained_completion_enrichment.py": "13e41ec7c3a679268525ab5fee8a79fcf8cd20d2a46d4cf9e094f6eb8fcd5140",
+    "ella/services/semantic_contextual_producer_v3.py": "72fae2bf4006ac461bea83ef10ac6e3d965ab762192129119110b1eccc170a86",
+    "ella/services/semantic_publication.py": "1203bd8b0476f4c25e637ae6402c073d4e9bb270ad0cd4c34ea491b7aaa9763e",
+    "ella/services/semantic_generator_correction.py": "d9058adb3a34f29f277aa574c02ccfe4f842dd3b78bab896e573d53e7b5ed74a",
+    "ella/services/causal_diagnostics.py": "c45a05dd9265e35ba6714bafca12581d731976e6dd396a200a3ad0c400c623d3"
+  },
+  "selected_import_modules": 28,
+  "network_attempts": 0,
+  "health": [
+    {
+      "route": "/v1/health",
+      "http": 200
+    },
+    {
+      "route": "/v1/ella/health",
+      "http": 200
+    }
+  ],
+  "protected_preimages_unchanged": true,
+  "selected_quarantines_preserved": 11,
+  "claims_reopened": false,
+  "model_calls": 0,
+  "live_enhanced_writeback_proven": false
+}

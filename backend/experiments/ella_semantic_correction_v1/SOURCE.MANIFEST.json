@@ -22,6 +22,8 @@
   "tests_actual": 55,
   "service_imports_actual": 28,
   "network_attempts": 0,
-  "deployed": false,
-  "live_enhanced_writeback_proven": false
+  "deployed": true,
+  "live_enhanced_writeback_proven": false,
+  "deployment_utc": "2026-10-25T07:04:12.543079+00:00",
+  "deployment_summary": "DEPLOYMENT.SUMMARY.json"
 }
