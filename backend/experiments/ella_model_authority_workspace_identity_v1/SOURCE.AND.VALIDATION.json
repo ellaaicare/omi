@@ -1,16 +1,18 @@
 {
   "baseline_sha256": "059b075f084f9aaa1d0d8a82e2d05f52dfb2bdd34e8df45397c5bc0377586cde",
   "candidate_sha256": "8f5f47587a979158364bb60ab7f0f1f87b38d7f647d22bdadd143e88c5537ff4",
-  "portable_test_sha256": "729f066a360baf88464aced02ac4acc62e6a9d3ceeab8b0afe3b01f67e858c13",
+  "portable_test_sha256": "71b72940bbbbdb769da216481d25ea0fc62012c9e1dfa9275fffba0d941afef9",
   "actual_local_cases": 9,
   "independent_cases": 9,
   "portable_cases": 9,
   "portable_exit": 0,
-  "portable_elapsed_seconds": 0.073,
+  "portable_elapsed_seconds": 0.062,
   "source_review_sha256": "f194c384ace7b34ad83d053d79ef587eb6bb909813a03c888ec69034e5e0dd04",
   "controller_review_sha256": "dce215baafd5b7b2afc6c4e890cbc11294e53de9c10587f95ee279895b8e9436",
   "deployed_utc": "2026-10-25T13:42:54.870824+00:00",
   "deployment_db_writes": 0,
   "deployment_model_calls": 0,
-  "historical_exact_request_correlation": false
+  "historical_exact_request_correlation": false,
+  "portable_final_bytes_passed_after_hook": true,
+  "source_extension": ".py.source"
 }
