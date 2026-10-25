@@ -1,0 +1,30 @@
+{
+  "state": "SOURCE_QUALIFIED_IMPORT_CHECKED_NOT_DEPLOYED",
+  "files": {
+    "saved_source_recovery.py.source": "63d6523f3f4a23a5f9d67d00a6a1b3c1a989499b64d4065875603d934b6bfb57",
+    "test_completed_typed_stock.py.source": "21cd7c00e3bbadece07057187a67ef1fdd67c478450d9b3b7e12c77376336d09",
+    "typed-stock-completed-parent.patch": "12a3825f4fccb9d956456c21d54689a51411a039f45e0fb9892cceec551af184"
+  },
+  "baseline_sha256": "73c8b7825ff320f44b1473a3d5f11bfb734223619ae5dff88f925d3a3fc72c7c",
+  "new_protocol": "ella-completed-parent-typed-stock-v1",
+  "actual_offline_cases": 19,
+  "offline_limits": "Actual completed-parent admit/eligibility/claim/begin/graph/current server callback and da9 production records attempt on existing serialized fake DB. Source/grant/decode/unused runtime IO leaves explicit doubles. Public SDK timestamps/DocumentSnapshot are actual installed library. No live database or model.",
+  "actual_service_import": {
+    "state": "PASS",
+    "python": "3.11.0rc1",
+    "network_attempts": 0,
+    "database_rpc_attempts": 0,
+    "private_file_attempts": 0,
+    "process_attempts": 0,
+    "file_write_attempts": 0,
+    "live_code_changed": false,
+    "live_database_writes": 0,
+    "allowed_local_ipv6_probe": {
+      "attempts": 1,
+      "closed": 1,
+      "scope": "Inherited exact-source loopback capability probe only"
+    }
+  },
+  "precision_limit": "Typed recipe preserves all fractional digits AVAILABLE in SDK decoded values. Actual snapshot/deepcopy can collapse distinct raw fractional values; tests document this loss as a LIMIT, not raw Firestore nanosecond integrity. NonUTC rendering collision rejected.",
+  "no_private_certificates_or_live_controllers_in_archive": true
+}

@@ -1,0 +1,116 @@
+"""Real completed-parent admission/claim/graph/callback over existing fake store.
+Real public SDK decoded timestamp helper. No real DB/service/auth/model request.
+"""
+import ast,copy,hashlib,importlib.util,json,pathlib,sys,types,unittest
+from unittest.mock import patch
+from datetime import timezone,timedelta
+from google.api_core.datetime_helpers import DatetimeWithNanoseconds
+from google.cloud.firestore_v1.base_document import DocumentSnapshot
+from datetime import datetime
+W=pathlib.Path(__file__).resolve().parents[3];B=W/'quarantine-recovery-v1/one6dcc-typed-stock-v1';BASE=W/'quarantine-recovery-v1/pregen-generation-v2/candidate/database/saved_source_recovery.py'
+def load(name,path):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+F=load('completed_existing_admission_harness',W/'quarantine-recovery-v1/integration-v3/tests/test_admission_worker.py')
+class Cases(unittest.TestCase):
+ @classmethod
+ def setUpClass(cls):
+  F.Cases.setUpClass.__func__(cls)
+  cls.stock=load('database.saved_source_pregen_recovery',W/'quarantine-recovery-v1/no-completion-successor-v1/rollout-v1/bound-candidate/database/saved_source_pregen_recovery.py')
+  exec(compile((B/'candidate/database/saved_source_recovery.py').read_text(),'completed_typed_candidate','exec'),cls.recovery.__dict__)
+ @classmethod
+ def tearDownClass(cls):F.Cases.tearDownClass.__func__(cls)
+ def setUp(self):
+  F.Cases.setUp(self)
+  self.doc['summary_versions'][0]['created_at']=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T00:00:00.123456000Z')
+  self.invalid={'outcome':'candidate','schema_version':2,'title':'Fictional source','overview':'He records the fictional statement.','claims':[{'id':'c1','text':'He records the fictional statement.','evidence':[{'segment_id':'transcript','quote':'Fictional test only.'}]}],'contextual_additions':[]}
+  self.doc['semantic_producer_executions_v1']['oldop']['result']=copy.deepcopy(self.invalid)
+  self.doc['semantic_retained_completion_jobs_v1']={'old-start':{'status':'started','client':self.parent['client_interaction_id'],'transcript':self.parent['transcript_sha256'],'runtime_binding_id':'synthetic-old-binding','canonical_user':{'confirmed':True},'learning':{'status':'no_learning','reason':'synthetic-disabled'}}}
+  self.db.put(self.key,self.doc);self.expected['source']=self.h.lifecycle.digest(self.doc);self.content={k:v for k,v in self.doc['summary_versions'][0].items() if k!='is_active'}
+  self.expected['stock_content']=self.stock.stock_fingerprint(self.content);self.expected['stock_legacy_display']=hashlib.sha256(json.dumps(self.content,sort_keys=True,separators=(',',':'),ensure_ascii=False,default=str,allow_nan=False).encode()).hexdigest();self.before=copy.deepcopy(self.db.rows)
+ def admit(self,protocol=None):return self.r.admit(self.db.transaction(),self.db,proof=self.proof,parent_job_id='parent-Q',expected=self.expected,reviewed_detachment_sha256='f'*64,protocol_revision=protocol or self.r.COMPLETED_TYPED_PROTOCOL,now=F.H.h.NOW,reviewed_sync_receipts={'sync_start_receipt_sha256':'a'*64,'sync_completed_receipt_sha256':'b'*64})
+ def start(self):
+  out=self.admit();job=self.db.rows[(self.h.activation.JOBS,out['recovery_job_id'])];self.h.issue(job);claimed=self.h.claim(job);self.assertIsNotNone(claimed);self.assertTrue(self.h.begin(claimed));return self.db.rows[(self.h.activation.JOBS,job['job_id'])]
+ def test_baseline_actual_admission_reproduces_timestamp_typeerror(self):
+  approved=self.r.approved_parents
+  try:
+   exec(compile(BASE.read_text(),'exact_serving_baseline','exec'),self.r.__dict__);self.r.approved_parents=approved
+   with self.assertRaises(TypeError):self.r.admit(self.db.transaction(),self.db,proof=self.proof,parent_job_id='parent-Q',expected=self.expected,reviewed_detachment_sha256='f'*64,protocol_revision='ella-completed-parent-typed-stock-v1',now=F.H.h.NOW,reviewed_sync_receipts={'sync_start_receipt_sha256':'a'*64,'sync_completed_receipt_sha256':'b'*64})
+  finally:exec(compile((B/'candidate/database/saved_source_recovery.py').read_text(),'restored_candidate','exec'),self.r.__dict__);self.r.approved_parents=lambda:{'parent-Q':{'cid':'c','job_sha256':self.expected['parent_job'],'source_created_at':str(self.db.collection('users').document('u').collection('conversations').document('c').get().create_time)}}
+  self.assertEqual(self.db.rows,self.before)
+ def test_admission_empty_namespace_invalid_old_result_preserved(self):
+  out=self.admit();job=self.db.rows[(self.h.activation.JOBS,out['recovery_job_id'])];tag=job[self.r.TAG];self.assertEqual(tag['stock_content_sha256'],self.expected['stock_content']);self.assertEqual(tag['protocol_revision'],self.r.COMPLETED_TYPED_PROTOCOL);raw=self.db.rows[self.key];self.assertEqual(raw[self.ns.ROOT][tag['recovery_id']],{'identity':tag,'state':{}})
+  for field in self.ns.FIELDS:self.assertEqual(raw.get(field),self.before[self.key].get(field))
+  self.assertEqual(raw['semantic_producer_executions_v1']['oldop']['result'],self.invalid);self.assertEqual(self.db.rows[(self.h.activation.JOBS,'parent-Q')],self.parent);self.assertEqual(raw['transcript_segments'],self.before[self.key]['transcript_segments']);self.assertEqual(raw['summary_versions'],self.before[self.key]['summary_versions'])
+ def test_actual_worker_graph_callback_uses_same_typed_fingerprint(self):
+  job=self.start();self.h.graph.require_in_transaction(self.db.transaction(),self.db,job,'u','c');value=self.r.current_host_context(self.db,'u','c');self.assertEqual(value['job_id'],job['job_id']);self.assertEqual(value['attempt_scope_sha256'],sys.modules['ella.services.semantic_captured_context'].expected_attempt_digest(job));self.assertEqual(self.r._stock_fingerprint(job[self.r.TAG],self.content),self.expected['stock_content'])
+ def test_actual_da9_production_records_joins_new_typed_protocol(self):
+  identity=self.model.build_enrichment_identity(uid='u',conversation_id='c',conversation=self.doc);self.parent.update(job_id=identity.job_id,client_interaction_id=identity.client_interaction_id,policy_version=identity.policy_version,trace_id=identity.trace_id);self.db.put((self.h.activation.JOBS,identity.job_id),self.parent);self.db.put(self.h.isolation.tombstone_ref(self.db,self.parent).key,self.tomb);self.expected['parent_job']=self.h.lifecycle.digest(self.parent)
+  self.r.approved_parents=lambda:{identity.job_id:{'cid':'c','job_sha256':self.expected['parent_job'],'source_created_at':str(self.db.collection('users').document('u').collection('conversations').document('c').get().create_time)}}
+  result=self.r.admit(self.db.transaction(),self.db,proof=self.proof,parent_job_id=identity.job_id,expected=self.expected,reviewed_detachment_sha256='f'*64,protocol_revision=self.r.COMPLETED_TYPED_PROTOCOL,now=F.H.h.NOW,reviewed_sync_receipts={'sync_start_receipt_sha256':'a'*64,'sync_completed_receipt_sha256':'b'*64});job=self.db.rows[(self.h.activation.JOBS,result['recovery_job_id'])];self.h.issue(job);claimed=self.h.claim(job);self.assertIsNotNone(claimed);self.assertTrue(self.h.begin(claimed));job=self.db.rows[(self.h.activation.JOBS,job['job_id'])]
+  async def unused(*a,**kw):raise AssertionError('no-runtime-io-in-test')
+  authority=types.ModuleType('ella.services.semantic_context_authority');authority.read_context_authority_sample=unused
+  runtime=types.ModuleType('ella.services.semantic_runtime_authority');runtime.resolve_semantic_runtime=unused;runtime.semantic_runtime_authority_identity=lambda *a:None;self.consent.assert_current_ai_consent=lambda uid:uid
+  with patch.dict(sys.modules,{authority.__name__:authority,runtime.__name__:runtime}):
+   load('ella.services.recent_context_projection_v2',W/'captured-context-canonical-projection-v1/candidate/ella/services/recent_context_projection_v2.py');records=load('typed_actual_context_records',W/'quarantine-recovery-v1/recovery-context-attempt-v1/candidate/ella/services/semantic_context_records_v2.py');expected=sys.modules['ella.services.semantic_captured_context'].expected_attempt_digest(job);self.assertEqual(records._production(self.db).attempt('u','c'),expected)
+   job['lease_token']='foreign';self.db.put((self.h.activation.JOBS,job['job_id']),job)
+   with self.assertRaises(Exception):records._production(self.db).attempt('u','c')
+ def test_current_typed_values_and_display_pin_both_required(self):
+  for key in ['stock_legacy_display','stock_content']:
+   old=self.expected[key];self.expected[key]='0'*64
+   with self.assertRaises(ValueError):self.admit()
+   self.expected[key]=old
+  self.expected.pop('stock_legacy_display')
+  with self.assertRaisesRegex(ValueError,'completed_stock_display_pin_required'):self.admit()
+ def test_malformed_display_pins_reject_before_any_effect(self):
+  for value in [None,True,1,[],{},'0'*63,'G'*64]:
+   self.expected['stock_legacy_display']=value
+   with self.assertRaisesRegex(ValueError,'completed_stock_display_pin_required'):self.admit()
+   self.assertEqual(self.db.rows,self.before)
+ def test_nonfinite_new_typed_fingerprint_is_not_accepted(self):
+  with self.assertRaises(ValueError):self.r._stock_fingerprint({'protocol_revision':self.r.COMPLETED_TYPED_PROTOCOL},{'value':float('nan')})
+ def test_changed_owner_transcript_stock_version_reject(self):
+  original=copy.deepcopy(self.doc)
+  for change in [lambda d:d.update(uid='foreign'),lambda d:d['transcript_segments'][0].update(text='edited'),lambda d:d.update(active_summary_version_id='foreign'),lambda d:d.update(deleted=True)]:
+   raw=copy.deepcopy(original);change(raw);self.db.put(self.key,raw);self.expected['source']=self.h.lifecycle.digest(raw)
+   with self.assertRaises(ValueError):self.admit()
+ def test_stock_type_lookalike_or_timestamp_edit_rejects_callback(self):
+  self.start();before=copy.deepcopy(self.db.rows[self.key])
+  for value in [str(self.content['created_at']),DatetimeWithNanoseconds.from_rfc3339('2026-10-25T00:00:00.123457000Z')]:
+   raw=copy.deepcopy(before);raw['summary_versions'][0]['created_at']=value;self.db.put(self.key,raw)
+   with self.assertRaises(Exception):self.r.current_host_context(self.db,'u','c')
+ def test_decoded_precision_and_offset_collision_limits(self):
+  a=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T00:00:00.123456789Z');b=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T00:00:00.123456788Z');self.assertNotEqual(self.stock.stock_fingerprint({'stamp':a}),self.stock.stock_fingerprint({'stamp':b}));copied=copy.deepcopy(a);self.assertNotEqual(a.rfc3339(),copied.rfc3339()) # SDK loss observation, NOT remote nanosecond protection proof.
+  other=a.replace(tzinfo=timezone(timedelta(hours=1)))
+  with self.assertRaises(ValueError):self.stock.stock_fingerprint({'stamp':other})
+ def test_sdk_snapshot_roundtrip_loss_is_explicit_limit(self):
+  a=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T00:00:00.123456789Z');b=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T00:00:00.123456788Z')
+  self.assertNotEqual(self.stock.stock_fingerprint({'stamp':a}),self.stock.stock_fingerprint({'stamp':b}))
+  def decoded(value):return DocumentSnapshot(reference=None,data={'stamp':value},exists=True,read_time=None,create_time=None,update_time=None).to_dict()['stamp']
+  first,second=decoded(a),decoded(b);self.assertNotEqual(first.rfc3339(),a.rfc3339());self.assertEqual(first.rfc3339(),second.rfc3339());self.assertEqual(self.stock.stock_fingerprint({'stamp':first}),self.stock.stock_fingerprint({'stamp':second})) # LIMIT: raw distinct instants lost by SDK copy cannot be recovered by this fix.
+ def test_decoded_timestamp_lookalikes_cannot_match_typed_recipe(self):
+  stamp=DatetimeWithNanoseconds.from_rfc3339('2026-10-25T00:00:00.123456000Z');expected=self.stock.stock_fingerprint({'stamp':stamp})
+  for value in [stamp.rfc3339(),{'timestamp':stamp.rfc3339()},['firestore_timestamp',stamp.rfc3339()],datetime(2026,10,25,0,0,0,123456,tzinfo=timezone.utc)]:self.assertNotEqual(expected,self.stock.stock_fingerprint({'stamp':value}))
+ def test_non_utc_wallclock_collision_rejected(self):
+  utc=DatetimeWithNanoseconds(2026,10,25,nanosecond=123456789,tzinfo=timezone.utc);offset=DatetimeWithNanoseconds(2026,10,25,nanosecond=123456789,tzinfo=timezone(timedelta(hours=1)))
+  self.assertEqual(utc.rfc3339(),offset.rfc3339()) # Existing public SDK string rendering collision; offset is not accepted.
+  with self.assertRaises(ValueError):self.stock.stock_fingerprint({'stamp':offset})
+ def test_invalid_synthetic_result_is_still_locally_rejected_after_admission(self):
+  base=W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/ella/services'
+  load('ella.services.semantic_contract_v1',base/'semantic_contract_v1.py');strict=load('ella.services.semantic_contract_v2',base/'semantic_contract_v2.py');core={k:self.invalid[k] for k in ['outcome','title','overview','claims']}
+  with self.assertRaises(strict.ContractError) as caught:strict.validate_candidate(core,[{'id':'transcript','speaker':'unresolved','text':'Fictional test only.'}])
+  self.assertEqual(caught.exception.args,('unsupported_gender_pronoun',));self.admit();self.assertEqual(self.db.rows[self.key]['semantic_producer_executions_v1']['oldop']['result'],self.invalid)
+ def test_current_private_stock_golden_is_evidence_not_fabricated_fixture(self):
+  path=W/'quarantine-recovery-v1/one6dcc-qualification-v1/evidence/CURRENT.COMPLETED.PARENT.QUALIFICATION.ACTUAL.safe.json';self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(),'5c11d098fac9360fd70bc6fdea95b40455bd5cfb2fd258618a4ebc6fd3e50d22');outer=json.loads(path.read_text());actual=json.loads(outer['stdout']);self.assertEqual(actual['stock_serialization']['typed_decoded_stock_sha256'],'3340f9205a1bd90c55469047781d3b72799fecab13669e50431fcdf60323a542');self.assertEqual(actual['stock_serialization']['legacy_display_sha256'],'f3f5f10a2e794194742c8b263a4478c9c854b3f84adad630cfa26c7cf3a61991');self.assertTrue(actual['current_checks']['source_raw_matches_historical'])
+ def test_old_protocol_recipes_and_source_functions_preserved(self):
+  content={'title':'fictional Ω'};self.assertEqual(self.r._stock_fingerprint({'protocol_revision':'legacy-completed'},content),self.ns.digest(content));self.assertEqual(self.r._stock_fingerprint({'protocol_revision':self.stock.PROTOCOL},content),self.stock.stock_fingerprint(content));self.assertEqual(self.r._stock_fingerprint({'protocol_revision':'ella-terminal-pregen-successor-generation-v2'},content),self.stock.stock_fingerprint(content))
+  get=lambda p:{n.name:ast.dump(n,include_attributes=False) for n in ast.parse(p.read_text()).body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))};old,new=get(BASE),get(B/'candidate/database/saved_source_recovery.py');self.assertEqual({k:v for k,v in old.items() if k not in {'admit','_stock_fingerprint'}},{k:v for k,v in new.items() if k not in {'admit','_stock_fingerprint'}})
+ def test_old_generic_json_admission_recipe_still_works(self):
+  self.doc['summary_versions'][0].pop('created_at');self.db.put(self.key,self.doc);self.expected['source']=self.h.lifecycle.digest(self.doc);content={k:v for k,v in self.doc['summary_versions'][0].items() if k!='is_active'};self.expected['stock_content']=self.ns.digest(content);self.expected.pop('stock_legacy_display');out=self.admit('legacy-completed');self.assertEqual(self.db.rows[(self.h.activation.JOBS,out['recovery_job_id'])][self.r.TAG]['stock_content_sha256'],self.ns.digest(content))
+ def test_old_protocol_with_timestamp_is_not_silently_migrated(self):
+  with self.assertRaises(TypeError):self.admit('legacy-completed')
+ def test_unknown_prior_operation_and_revocation_hold(self):
+  raw=copy.deepcopy(self.doc);raw['semantic_producer_executions_v1']['oldop']['status']='started';self.db.put(self.key,raw);self.expected['source']=self.h.lifecycle.digest(raw)
+  with self.assertRaisesRegex(ValueError,'parent_unknown_or_foreign_operation'):self.admit()
+  self.db.put(self.key,self.doc);self.expected['source']=self.h.lifecycle.digest(self.doc);self.db.put(('users','u'),{'ai_consent':{'approved':False}})
+  with self.assertRaises(ValueError):self.admit()
+if __name__=='__main__':unittest.main()

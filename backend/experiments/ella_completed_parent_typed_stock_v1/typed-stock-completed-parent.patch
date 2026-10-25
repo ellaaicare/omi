@@ -1,0 +1,37 @@
+--- baseline/database/saved_source_recovery.py
++++ candidate/database/saved_source_recovery.py
+@@ -6,6 +6,7 @@
+ from google.cloud.firestore_v1 import transactional
+ from database import normal_enrichment_activation as activation,normal_account_lifecycle as lifecycle,enrichment_job_isolation as isolation
+ from ella.services import semantic_recovery_namespace as ns
++COMPLETED_TYPED_PROTOCOL='ella-completed-parent-typed-stock-v1'
+ TAG='saved_source_recovery_admission'
+ ADMISSIONS='ella_saved_source_recovery_admissions_v1'
+ COHORT_SHA256='87184540c54ed4840df1557ef1f2fe7396c21ba027f766dbb3efb2cae495553d'
+@@ -88,7 +89,7 @@
+  return p
+ 
+ def _stock_fingerprint(tag,value):
+- if tag.get('protocol_revision') in ('ella-terminal-pregen-successor-v1','ella-terminal-pregen-successor-generation-v2'):
++ if tag.get('protocol_revision') in ('ella-terminal-pregen-successor-v1','ella-terminal-pregen-successor-generation-v2',COMPLETED_TYPED_PROTOCOL):
+   from database.saved_source_pregen_recovery import stock_fingerprint
+   return stock_fingerprint(value)
+  return ns.digest(value)
+@@ -177,7 +178,16 @@
+   b=op.get('binding') or {};need(op.get('status')=='completed' and type(op.get('result')) is dict and all(type(op.get(k)) is str and bool(op[k]) for k in ['runtime_interaction_id','canonical_assistant_event_id']) and all(b.get(k)==v for k,v in {'uid':uid,'conversation_id':cid,'source_sha256':source_sha,'source_version':source_version,'transcript_sha256':transcript,'active_summary_version_id':doc.get('active_summary_version_id')}.items()),'parent_unknown_or_foreign_operation')
+  stock_id=doc.get('active_summary_version_id');stock=[v for v in doc.get('summary_versions',[]) if type(v) is dict and v.get('id')==stock_id]
+  need(len(stock)==1 and stock[0].get('is_active') is True and stock[0].get('source')=='omi' and stock[0].get('kind')=='generated','not_generic_stock')
+- stock_sha=ns.digest({k:v for k,v in stock[0].items() if k!='is_active'});need(stock_sha==expected['stock_content'],'stock_changed')
++ stock_content={k:v for k,v in stock[0].items() if k!='is_active'}
++ if protocol_revision==COMPLETED_TYPED_PROTOCOL:
++  import json,re
++  display_pin=expected.get('stock_legacy_display')
++  need(type(display_pin) is str and re.fullmatch('[0-9a-f]{64}',display_pin),'completed_stock_display_pin_required')
++  display_sha=sha256(json.dumps(stock_content,sort_keys=True,separators=(',',':'),ensure_ascii=False,default=str,allow_nan=False).encode()).hexdigest()
++  need(display_sha==display_pin,'completed_stock_display_changed')
++  stock_sha=_stock_fingerprint({'protocol_revision':protocol_revision},stock_content)
++ else:stock_sha=ns.digest(stock_content)
++ need(stock_sha==expected['stock_content'],'stock_changed')
+  tag=ns.identity(uid=uid,cid=cid,parent_job_id=parent_job_id,parent_job_sha256=pin['job_sha256'],parent_tombstone_sha256=expected['parent_tombstone'],transcript_sha256=transcript,stock_version=stock_id,stock_content_sha256=stock_sha,canonical_source_sha256=source_sha,source_version=source_version,account_epoch=account['epoch'],route_sha256=account['route_sha256'],policy_epoch=policy['epoch'],protocol_revision=protocol_revision)
+  _parent(tx,db,tag);_source(tx,db,tag,allow_accepted=False);_current_consent(tx,db,uid)
+  jr=db.collection(activation.JOBS).document(tag['job_id']);mr=marker_ref(db,tag);lock=source_lock_ref(db,tag)
