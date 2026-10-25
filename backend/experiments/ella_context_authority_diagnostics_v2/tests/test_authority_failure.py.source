@@ -1,0 +1,80 @@
+"""Actual async sampler/wrappers, actual stage and causal helpers; fake IO leaves.
+No DB/network/provider/service imports or private source fixtures.
+"""
+import ast,asyncio,contextlib,dataclasses,hashlib,importlib.util,io,json,logging,os,sys,types,unittest
+from pathlib import Path
+from unittest.mock import patch
+D=Path(__file__).resolve().parents[1];W=D.parent;C=D/'candidate/ella/services'
+def load(name,p):
+ s=importlib.util.spec_from_file_location(name,p);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
+@dataclasses.dataclass
+class Identity:
+ uid:str='synthetic-owner'
+ target_mode:str='hermes-cloud-transcript'
+class Cases(unittest.TestCase):
+ def setUp(self):
+  self.timing=load('synthetic_stage',C/'enrichment_stage_timing.py');self.causal=load('synthetic_causal',C/'causal_diagnostics.py');self.uid='synthetic-owner';self.cid='synthetic-source';self.counts={};self.failure=None;self.failure_error=None;self.logs=[];self.out=io.StringIO()
+  self.ns={'asyncio':asyncio,'json':json,'asdict':dataclasses.asdict,'_timing':self.timing,'__name__':'synthetic_authority','MAX_RESPONSE_BYTES':196608,'CONTRACT':'ella-semantic-context-authority-v1','RUNTIME_FIELDS':('uid','provider','status','binding_id','revision','profile_name','agent_id','workspace_root','account_user_id','profile_user_id'),'canonical_source_from_conversation':lambda **kw:{'started_at':'synthetic'},'canonical_source_sha256':lambda s:'a'*64,'transcript_source':lambda d:('', 'b'*64)}
+  tree=ast.parse((C/'semantic_context_authority.py').read_text());nodes=[n for n in tree.body if isinstance(n,(ast.ClassDef,ast.FunctionDef,ast.AsyncFunctionDef))];exec(compile(ast.Module(body=nodes,type_ignores=[]),str(C/'semantic_context_authority.py'),'exec'),self.ns)
+  self.runtime=types.SimpleNamespace(uid=self.uid,provider='hermes',status='active',binding_id='binding',revision=1,profile_name='synthetic',agent_id='agent',workspace_root='/synthetic',account_user_id='owner',profile_user_id='owner')
+  services=types.ModuleType('ella.services');services.causal_diagnostics=self.causal;ella=types.ModuleType('ella');ella.services=services;database=types.ModuleType('database');dbclient=types.ModuleType('database._client');dbclient.db=object();lifecycle=types.ModuleType('database.normal_account_lifecycle');lifecycle.assert_existing_mapping=lambda *a:self.hit('mapping');lifecycle.require_callback_source=lambda *a:self.hit('admission');host=types.ModuleType('ella.services.semantic_host_context');host.HostReadBudget=object
+  modules={'ella':ella,'ella.services':services,'database':database,'database._client':dbclient,'database.normal_account_lifecycle':lifecycle,'ella.services.semantic_host_context':host};self.mp=patch.dict(sys.modules,modules);self.mp.start();self.addCleanup(self.mp.stop)
+  async def processing(uid):self.hit('processing')
+  async def resolve(*a,**kw):self.hit('resolve');return self.runtime
+  self.ns['require_transcript_processing_active']=processing;self.resolve=resolve
+  self.args={'uid':self.uid,'conversation_id':self.cid,'read_conversation':lambda *a:self.read(),'consent':lambda *a:self.consent(),'resolve':resolve,'identity':lambda r:Identity(),'repository':object()}
+ def hit(self,label):
+  self.counts[label]=self.counts.get(label,0)+1
+  if self.failure==label:raise self.failure_error
+ def read(self):self.hit('read');return {'id':self.cid,'uid':self.uid,'status':'completed','active_summary_version_id':'stock'}
+ def consent(self):self.hit('consent');return self.uid
+ def call(self,wrapper='read_context_authority'):
+  with patch.dict(os.environ,{'ELLA_ENRICHMENT_STAGE_TIMING_ACCOUNT_SHA256':hashlib.sha256(self.uid.encode()).hexdigest()}),contextlib.redirect_stdout(self.out),patch.object(logging,'getLogger') as log:
+   log.return_value.warning.side_effect=lambda msg,payload:self.logs.append(json.loads(payload));return asyncio.run(self.ns[wrapper](**self.args))
+ def events(self):return [json.loads(s.split(' ',1)[1]) for s in self.out.getvalue().splitlines() if s.startswith('ella_enrichment_stage ')]
+ def test_success_same_counts_double_and_single(self):
+  for wrapper,n in [('read_context_authority',2),('read_context_authority_sample',1)]:
+   self.counts={};result=self.call(wrapper);self.assertEqual(result['uid'],self.uid);self.assertEqual(self.counts,{'processing':3*n+1,'consent':n+1,'resolve':n,'mapping':n,'read':n,'admission':n});self.assertFalse(self.logs)
+ def test_generic_same_exception_source_read_stage_and_no_private_args(self):
+  self.failure='read';self.failure_error=RuntimeError('PRIVATE transcript/token/URL')
+  try:self.call()
+  except RuntimeError as e:self.assertIs(e,self.failure_error)
+  else:self.fail('failure swallowed')
+  self.assertEqual(self.logs[0]['diagnostic']['exception_type'],'RuntimeError');self.assertNotIn('PRIVATE',json.dumps(self.logs));self.assertNotIn(self.uid,json.dumps(self.logs));self.assertNotIn(self.cid,json.dumps(self.logs));self.assertTrue(any(e.get('stage')=='context_authority.source_read' and e.get('outcome')=='raised' for e in self.events()))
+ def test_real_deadline_timeout_marks_waiting_resolver(self):
+  original=asyncio.timeout
+  async def slow(*a,**kw):await asyncio.sleep(1)
+  self.args['resolve']=slow
+  with patch.object(asyncio,'timeout',side_effect=lambda requested:original(.005) if requested==20 else original(requested)):
+   with self.assertRaises(TimeoutError):self.call()
+  self.assertEqual(self.logs[0]['diagnostic']['exception_type'],'TimeoutError');self.assertTrue(any(e.get('stage')=='context_authority.resolve_semantic' and e.get('outcome')=='raised' for e in self.events()));self.assertEqual(self.counts.get('read',0),0)
+ def test_actual_ProvisioningError_closed_code_only(self):
+  m=load('actual_runtime_error',W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/ella/services/runtime_errors.py');self.failure='admission';self.failure_error=m.ProvisioningError('account_processing_callback_source_not_active',retryable=False,detail={'private':'never-export'})
+  with self.assertRaises(m.ProvisioningError):self.call()
+  self.assertEqual(self.logs[0]['diagnostic']['closed_code'],'account_processing_callback_source_not_active');self.assertNotIn('never-export',json.dumps(self.logs))
+ def test_unknown_ProvisioningError_code_not_exported(self):
+  m=load('actual_runtime_error2',W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/ella/services/runtime_errors.py');self.failure='mapping';self.failure_error=m.ProvisioningError('private-freeform-code',retryable=False)
+  with self.assertRaises(m.ProvisioningError):self.call()
+  self.assertNotIn('private-freeform',json.dumps(self.logs));self.assertNotIn('closed_code',self.logs[0]['diagnostic'])
+ def test_known_authority_reject_preserves_reason_type(self):
+  self.args['read_conversation']=lambda *a:{}
+  with self.assertRaises(self.ns['ContextAuthorityRejected']):self.call()
+  d=self.logs[0]['diagnostic'];self.assertEqual(d['exception_type'],'ContextAuthorityRejected');self.assertEqual(d['cause_metadata'][0]['closed_code'],'context_authority_committed_source_required')
+ def test_logger_failure_preserves_original(self):
+  e=ValueError('private');self.failure='read';self.failure_error=e
+  with patch.object(logging,'getLogger',side_effect=RuntimeError('loggerfailed')):
+   with self.assertRaises(ValueError):asyncio.run(self.ns['read_context_authority'](**self.args))
+ def test_cancel_not_wrapped_and_all_open_spans_close(self):
+  async def cancel(*a,**kw):raise asyncio.CancelledError()
+  self.args['resolve']=cancel
+  with self.assertRaises(asyncio.CancelledError):self.call()
+  self.assertFalse(self.logs);es=self.events();self.assertEqual({e['span_id'] for e in es if e['event']=='start'},{e['span_id'] for e in es if e['event']=='end'})
+ def test_sampler_AST_identical_after_removing_timing_wrappers(self):
+  base=ast.parse((W/'captured-context-factoring-v2/candidate/ella/services/semantic_context_authority.py').read_text());new=ast.parse((C/'semantic_context_authority.py').read_text())
+  class Strip(ast.NodeTransformer):
+   def visit_Call(self,n):
+    n=self.generic_visit(n)
+    if isinstance(n.func,ast.Attribute) and isinstance(n.func.value,ast.Name) and n.func.value.id=='_timing' and n.func.attr=='await_stage':return n.args[1]
+    return n
+  a=next(n for n in base.body if getattr(n,'name',None)=='_read_context_authority_samples');b=Strip().visit(next(n for n in new.body if getattr(n,'name',None)=='_read_context_authority_samples'));self.assertEqual(ast.dump(a,include_attributes=False),ast.dump(b,include_attributes=False))
+if __name__=='__main__':unittest.main()

@@ -1,0 +1,11 @@
+# Context authority failure diagnostics v2
+
+Reviewed observational source, not a serving deployment. Three exact candidate modules and nine async composition fixtures are preserved as `.py.source`. No account/source identifiers, private configuration, operational control or response bodies are included.
+
+The existing host transport retains an outer `host_backend_authority_rejected` while discarding the inner backend exception. This candidate reuses the existing causal sanitizer and account-scoped timing stream to retain recognized exception types/closed codes, filtered frames and fixed awaited-stage labels. It preserves the sampler reads, deadlines, source/consent/account guards, original exception object and HTTP result. It does not claim the historical HTTP503 cause is known or fix it by itself. Unknown exception messages/arguments/detail/URLs are excluded.
+
+Nine actual async composition cases passed with synthetic I/O leaves, including same exception identity, known/unknown errors, logger failure, a real shortened fixture deadline, cancellation settlement, source-read order and sampling counts. Actual service interpreter imports passed with all forbidden-I/O counters zero and one separately counted/closed exact-source IPv6 loopback capability probe. No provider or database request ran during import acceptance. Deployment remains a distinct reviewed operation.
+
+Fixtures require archived baseline source and existing surrounding code; this package alone is not a standalone backend checkout. The larger recovery candidate changes the same authority module and must merge these observations explicitly, never overwrite a newer algorithm with this baseline.
+
+See the [master regression analysis](../../../docs/engineering/ella-regression-analysis-2026-10-24.md).

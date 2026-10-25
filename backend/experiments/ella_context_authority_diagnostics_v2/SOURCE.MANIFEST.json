@@ -1,0 +1,17 @@
+{
+  "state": "REVIEWED_OBSERVATIONAL_CANDIDATE_NOT_DEPLOYED",
+  "files": {
+    "candidate/ella/services/causal_diagnostics.py.source": "1fb069a6f9b57a1e3904983808f4cb5e6fa5b14e31e9e30e2439e79feea43548",
+    "candidate/ella/services/enrichment_stage_timing.py.source": "4aa066553e6e60d2a8ed5f360a7331fce5b3bf80b011157b23eafff634a8b771",
+    "candidate/ella/services/semantic_context_authority.py.source": "1bca206d03fd03d5ee3baf2ba5636bc796e3bbe3a79a66f481d2becea700b107",
+    "tests/test_authority_failure.py.source": "02b6481dc3b1d34afb10d28bc758e4280b40b167f4f426a4792f18115d2e0b14"
+  },
+  "baseline_hashes": {
+    "semantic_context_authority.py": "77de910a88aac4abc31a8c368f6ab5f00c3f491304621133ad71905652339d46",
+    "causal_diagnostics.py": "c45a05dd9265e35ba6714bafca12581d731976e6dd396a200a3ad0c400c623d3",
+    "enrichment_stage_timing.py": "cff3cfc47681ebcf2b2dda104d1a3de1839fee0862e61601af8860c7436e41c6"
+  },
+  "actual_async_fixture_cases": 9,
+  "external_IO_leaves_synthetic": true,
+  "private_control_or_runtime_data_included": false
+}
