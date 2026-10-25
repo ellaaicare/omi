@@ -1,0 +1,47 @@
+import sys, unittest, hashlib, copy
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'tests'))
+from test_quote_evidence import q,source,candidate,strict,args,v3,verdict
+class IndependentBoundaries(unittest.TestCase):
+ def test_all_small_lf_run_combinations_preserve_original_intervals(self):
+  for a in range(1,5):
+   for b in range(1,5):
+    for c in range(1,5):
+     for d in range(1,5):
+      text='prefix Ω '+ 'A'+'\n'*a+'B'+'\n'*b+'C'+' suffix'
+      quote='A'+'\n'*c+'B'+'\n'*d+'C'
+      result,proof=q.canonical_core(candidate(quote),source(text))
+      actual=result['claims'][0]['evidence'][0]['quote']
+      self.assertEqual(actual,'A'+'\n'*a+'B'+'\n'*b+'C')
+      strict.validate_candidate(result,source(text))
+      if proof['resolutions']:
+       p=proof['resolutions'][0]
+       self.assertEqual(text[p['start']:p['end']],actual)
+       for key,value in [('segment_utf8_sha256',text),('raw_quote_sha256',quote),('resolved_quote_sha256',actual)]:
+        self.assertEqual(p[key],hashlib.sha256(value.encode()).hexdigest())
+ def test_lf_edge_fallback_rejects_but_exact_legacy_edges_pass(self):
+  for quote,text in [('A\n','A\n\n'),('\nA','\n\nA')]:
+   # Exact path must remain unchanged even where a longer source LF run exists.
+   result,proof=q.canonical_core(candidate(quote),source(text));self.assertEqual(proof['resolutions'],[])
+  for quote,text in [('A\n\n','A\n'),('\n\nA','\nA')]:
+   with self.assertRaises(strict.ContractError):q.canonical_core(candidate(quote),source(text))
+ def test_non_ascii_whitespace_never_equated(self):
+  for separator in ['\u00a0','\u2028','\u2029','\v','\f','\r','\t',' ']:
+   with self.subTest(separator=repr(separator)),self.assertRaises(strict.ContractError):
+    q.canonical_core(candidate('A\nB'),source('A'+separator+'B'))
+ def test_oversized_fallback_and_source_are_rejected(self):
+  with self.assertRaises(strict.ContractError):q.canonical_core(candidate('A'*16000+'\nB'),source('A'*16000+'\n\nB'))
+  with self.assertRaises(strict.ContractError):q.canonical_core(candidate('A\nB'),source('A\n\nB'+'x'*48000))
+ def test_receipt_raw_hash_method_and_segment_tamper_rejected(self):
+  a,c=args();gp,vp=v3.generate_requests(**a,candidate=c)
+  for field,value in [('raw_quote_sha256','0'*64),('method','exact'),('segment_id','foreign')]:
+   bad=copy.deepcopy(vp);bad['evidence_resolution']['resolutions'][0][field]=value
+   with self.subTest(field=field),self.assertRaisesRegex(strict.ContractError,'stored_request_changed'):
+    v3.validate_stored_review(**a,generator_request=gp,verifier_request=bad,semantic_candidate=c,verdict=verdict(c))
+ def test_duplicate_source_ids_and_malformed_evidence_fail_closed(self):
+  with self.assertRaises(strict.ContractError):q.canonical_core(candidate('A\nB'),source('A\n\nB')+source('A\n\nB'))
+  for value in [None,{},[],42]:
+   c=candidate('A\nB');c['claims'][0]['evidence'][0]['segment_id']=value
+   with self.subTest(value=value),self.assertRaises(strict.ContractError):q.canonical_core(c,source('A\n\nB'))
+if __name__=='__main__':unittest.main()

@@ -1,0 +1,19 @@
+{
+  "contract": "ella-quote-lf-source-fixture-v1",
+  "pins": {
+    "candidate/ella/services/retained_completion_enrichment.py.source": "458e998467a619e3a10c116dccda444ce5e49d4d44909cae35d493df3ab3bcc0",
+    "candidate/ella/services/semantic_quote_evidence_lf.py.source": "c0a8a0cac965388200c66519fbcfa04c8162403a74dda8e2317cb93a514e1e20",
+    "candidate/ella/services/semantic_contextual_producer_v3.py.source": "229145664fd96ea48e225bff748563d186fff7f35571981a9143ce315d20c0b3",
+    "tests/test_quote_evidence.py.source": "c8096bc5370722cdc630e1560e9f40c3113db9fbdc87a571f483099c2e0dc7e8",
+    "reviewer-tests/test_independent_quote_boundaries.py.source": "2dcca2d90baca73bde5dea4ef5cedae8b58c826fd126f4a44ec1d0d1630ffeda",
+    "baseline/ella/services/semantic_contract_v1.py.source": "9a06dbfa5aa149d9e094315559ef0b784b26e4d88cb064d42132a2b645fe9384",
+    "baseline/ella/services/semantic_contract_v2.py.source": "0599d368723d8dd5db44e7f8d472359f6ba7e5458f6fc860f126fd37a8095302",
+    "baseline/ella/services/semantic_producer_v1.py.source": "3083bc1a50d342394eb7f970d8b0f1d371dc48ecce9a0cc8e7243cf75c4efa1d",
+    "baseline/ella/services/summary_title_quality.py.source": "e9aca8fa77d8d75b5c3c62f98b151ec2dc246fd999e7c7af80af27f9013c7917"
+  },
+  "tests": "19 +6 independent cases, no real provider or Firestore",
+  "status": "not deployed",
+  "actual_service_import": "network blocked Python3.11 passed",
+  "actual_retained_result": "read-only strict transcript validation passes after2uniqueLF resolutions, rawresultunchanged",
+  "private_record_data_included": false
+}

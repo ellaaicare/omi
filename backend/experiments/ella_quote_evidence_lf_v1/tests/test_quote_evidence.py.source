@@ -1,0 +1,94 @@
+"""Actual pure contract/producer code; no network/DB/provider or application startup."""
+import ast,copy,hashlib,json,sys,types,unittest
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[1];W=ROOT.parent
+BASE=W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend'
+for name,paths in [('ella',[str(BASE/'ella')]),('ella.services',[str(ROOT/'candidate/ella/services'),str(BASE/'ella/services')])]:
+ m=types.ModuleType(name);m.__path__=paths;sys.modules[name]=m
+from ella.services import semantic_quote_evidence_lf as q
+from ella.services import semantic_contextual_producer_v3 as v3
+from ella.services import semantic_contract_v2 as strict
+from ella.services import semantic_producer_v1 as original
+
+def candidate(quote):
+ return {'outcome':'candidate','title':'Notebook plan','overview':'Mira stores a notebook and plans a library visit.','claims':[{'id':'c1','text':'Mira stores a notebook and plans a library visit.','evidence':[{'segment_id':'transcript','quote':quote}]}]}
+def source(text):return [{'id':'transcript','speaker':'unresolved','text':text}]
+def fixture():
+ raw=[{'speaker':'Other','text':'Mira stores a blue notebook.'},{'speaker':'Other','text':'Mira plans to bring it to the library Friday.'}]
+ text='\n\n'.join('Other: '+x['text'] for x in raw)
+ c={**candidate(text.replace('\n\n','\n')),'schema_version':2,'contextual_additions':[]}
+ canonical={'uid':'synthetic-owner','conversation_id':'synthetic-cid','type':'omi-conversation','started_at':'2026-01-01T00:00:00Z','finished_at':'2026-01-01T00:01:00Z','transcript':text,'segment_count':2}
+ context={'owner_uid':'synthetic-owner','revision':'synthetic-context','documents':{x:'' for x in original.CONTEXT_FIELDS}}
+ b=original.PublicationBinding('synthetic-owner','synthetic-cid',v3.digest(canonical),canonical['finished_at'],'synthetic-stock','synthetic-policy',v3.digest(context),context['revision'],v3.digest(raw))
+ return b,canonical,raw,context,c
+
+def args():
+ b,s,r,c,candidate=fixture();return dict(binding=b,canonical_source=s,transcript_segments=r,companion_context=c),candidate
+
+def verdict(c):
+ return {'outcome':'supported','claim_verdicts':{x['id']:'supported' for x in c['claims']},'dimensions':{x:'pass' for x in strict.DIMENSIONS},'all_assertions_covered':True,'contextual_verdicts':{},'contextual_relevance':{},'rejection_evidence':[],'verdict_schema_version':2}
+class EvidenceTests(unittest.TestCase):
+ def test_exact_and_repeated_exact_quotes_unchanged(self):
+  c=candidate('Mira declines.');r,p=q.canonical_core(c,source('Mira declines. Mira declines.'));self.assertEqual(c,r);self.assertEqual(p['resolutions'],[]);strict.validate_candidate(r,source('Mira declines. Mira declines.'))
+ def test_unique_missing_blank_line_returns_original_bytes(self):
+  text='Other: Mira declines.\n\nOther: Nolan waits.';c=candidate(text.replace('\n\n','\n'));before=copy.deepcopy(c);r,p=q.canonical_core(c,source(text));self.assertEqual(r['claims'][0]['evidence'][0]['quote'],text);self.assertEqual(c,before);strict.validate_candidate(r,source(text));self.assertEqual(p['resolutions'][0]['method'],'unique_lf_run_multiplicity')
+ def test_original_strict_validator_still_rejects_raw_quote(self):
+  with self.assertRaises(strict.ContractError):strict.validate_candidate(candidate('A\nB'),source('A\n\nB'))
+ def test_offset_unit_with_unicode_prefix(self):
+  text='🪶 café\n\nOther: wait';r,p=q.canonical_core(candidate('café\nOther: wait'),source(text));receipt=p['resolutions'][0];self.assertEqual(text[receipt['start']:receipt['end']],r['claims'][0]['evidence'][0]['quote']);self.assertEqual(receipt['start'],2);self.assertEqual(receipt['offset_unit'],'unicode_codepoint')
+ def test_non_lf_changes_never_resolve(self):
+  for raw,quote in [('Mira\n\ndeclines.','Mira\naccepts.'),('Mira\n\ndeclines.','mira\ndeclines.'),('Mira\n\ndeclines.','Mira declines.'),('Mira \n\ndeclines.','Mira\ndeclines.'),('Mira\n\ndeclines.','Mira\n declines.'),('Mira\n\ndeclines.','Mira\nnot declines.'),('Mira\n\nOther: declines.','Mira\ndeclines.'),('cafe\u0301\n\nwait','café\nwait'),('Mira\r\n\r\nwait','Mira\nwait'),('Mira\t\n\nwait','Mira\nwait'),('Mira\n\nwait','Mira\\nwait')]:
+   with self.subTest(raw=raw,quote=quote),self.assertRaises(strict.ContractError):q.canonical_core(candidate(quote),source(raw))
+ def test_two_normalized_matches_reject(self):
+  with self.assertRaises(strict.ContractError):q.canonical_core(candidate('A\nB'),source('A\n\nB ... A\n\nB'))
+ def test_overlapping_normalized_matches_reject(self):
+  with self.assertRaises(strict.ContractError):q.canonical_core(candidate('A\nA\nA'),source('A\n\nA\n\nA\n\nA'))
+ def test_expanded_lf_runs_still_restore_exact_source(self):
+  r,_=q.canonical_core(candidate('A\n\n\nB'),source('A\nB'));self.assertEqual(r['claims'][0]['evidence'][0]['quote'],'A\nB')
+ def test_explicit_segment_binding_cannot_borrow_another_segment(self):
+  with self.assertRaises(strict.ContractError):q.canonical_core(candidate('A\nB'),[{'id':'transcript','speaker':'unresolved','text':'Unrelated.'},{'id':'other','speaker':'unresolved','text':'A\n\nB'}])
+ def test_ambiguous_even_when_only_one_original_span_has_different_lf_count(self):
+  with self.assertRaises(strict.ContractError):q.canonical_core(candidate('A\nB'),source('A\n\nB ... A\n\n\nB'))
+ def test_insufficient_and_malformed_remain_strict(self):
+  c={'outcome':'insufficient','title':'','overview':'','claims':[]};r,_=q.canonical_core(c,source('Hello.'));strict.validate_candidate(r,source('Hello.'))
+  for c in [candidate(''),candidate('invented'),{'outcome':'candidate'},candidate(42)]:
+   with self.subTest(c=c),self.assertRaises(strict.ContractError):r,_=q.canonical_core(c,source('Hello.'));strict.validate_candidate(r,source('Hello.'))
+class CompositionTests(unittest.TestCase):
+ def test_raw_generator_immutable_verifier_copy_is_exact_source(self):
+  a,c=args();before=copy.deepcopy(c);gp,vp=v3.generate_requests(**a,candidate=c);self.assertEqual(c,before);self.assertEqual(vp['candidate']['claims'][0]['evidence'][0]['quote'],a['canonical_source']['transcript']);self.assertEqual(vp['evidence_resolution']['contract'],q.CONTRACT);self.assertEqual(len(vp['evidence_resolution']['resolutions']),1);self.assertEqual(gp['evidence_quote_contract'],vp['evidence_quote_contract']);self.assertIn(q.QUOTE_RULES,gp['instructions'])
+ def test_actual_stored_review_reconstructs_exact_copy_and_proof(self):
+  a,c=args();gp,vp=v3.generate_requests(**a,candidate=c);s=v3.validate_stored_review(**a,generator_request=gp,verifier_request=vp,semantic_candidate=c,verdict=verdict(c));self.assertEqual(s['title'],c['title']);self.assertEqual(s['overview'],c['overview'])
+ def test_changed_or_removed_proof_fails_stored_request_comparison(self):
+  a,c=args();gp,vp=v3.generate_requests(**a,candidate=c)
+  for kind in ['proof','version','raw_candidate']:
+   bad=copy.deepcopy(vp)
+   if kind=='proof':bad['evidence_resolution']['resolutions'][0]['start']+=1
+   if kind=='version':bad.pop('evidence_quote_contract')
+   if kind=='raw_candidate':bad['candidate']=copy.deepcopy(c)
+   with self.subTest(kind=kind),self.assertRaises(strict.ContractError):v3.validate_stored_review(**a,generator_request=gp,verifier_request=bad,semantic_candidate=c,verdict=verdict(c))
+ def test_contextual_addition_quote_not_normalized(self):
+  a,c=args();a['companion_context']['documents']['MEMORY.md']='Mira\n\nowns a notebook.';b=a['binding'];a['binding']=original.PublicationBinding(**{**b.__dict__,'companion_context_sha256':v3.digest(a['companion_context'])});c['contextual_additions']=[{'fact_id':'f1','text':'Mira owns a notebook.','document':'MEMORY.md','quote':'Mira\nowns a notebook.','document_sha256':v3.digest(a['companion_context']['documents']['MEMORY.md']),'context_revision':a['companion_context']['revision'],'target_claim_id':'c1'}]
+  with self.assertRaisesRegex(strict.ContractError,'contextual_evidence'):v3.generate_requests(**a,candidate=c)
+ def test_owner_source_version_and_transcript_changes_reject(self):
+  for kind in ['owner','source','version','transcript']:
+   a,c=args()
+   if kind=='owner':a['canonical_source']['uid']='foreign'
+   if kind=='source':a['canonical_source']['transcript']='Invented'
+   if kind=='version':a['canonical_source']['finished_at']='new'
+   if kind=='transcript':a['transcript_segments'][0]['text']='Changed'
+   with self.subTest(kind=kind),self.assertRaises(strict.ContractError):v3.generate_requests(**a,candidate=c)
+ def test_raw_generator_evidence_edit_invalidates_verifier_request(self):
+  a,c=args();gp,vp=v3.generate_requests(**a,candidate=c);changed=copy.deepcopy(c);changed['claims'][0]['evidence'][0]['quote']=a['canonical_source']['transcript']
+  with self.assertRaisesRegex(strict.ContractError,'stored_request_changed'):v3.validate_stored_review(**a,generator_request=gp,verifier_request=vp,semantic_candidate=changed,verdict=verdict(c))
+ def test_model_and_storage_leaves_explicit_fake_pure_producer_keeps_raw(self):
+  a,c=args();records={};raw_before=copy.deepcopy(c)
+  class Ledger:
+   def execute_once(self,*,binding,role,request,adapter):
+    result=adapter(copy.deepcopy(request));records[role]={'request':copy.deepcopy(request),'result':copy.deepcopy(result)};return {'operation_id':role+'-synthetic','result':result}
+   def issue_publication(self,*,binding,candidate,semantic_candidate,**kw):
+    self_test.assertEqual(semantic_candidate,raw_before);expected=v3.validate_stored_review(**a,generator_request=records['generator']['request'],verifier_request=records['verifier']['request'],semantic_candidate=records['generator']['result'],verdict=records['verifier']['result']);self_test.assertEqual(candidate,expected);return 'synthetic-receipt'
+  self_test=self
+  out=v3.produce(**a,current_binding=lambda:a['binding'],ledger=Ledger(),generator_adapter=lambda request:copy.deepcopy(c),verifier_adapter=lambda request:verdict(c));self.assertEqual(out['publication_receipt_id'],'synthetic-receipt');self.assertEqual(records['generator']['result'],raw_before);self.assertEqual(c,raw_before)
+ def test_policy_revision_includes_quote_contract(self):
+  text=(ROOT/'candidate/ella/services/retained_completion_enrichment.py').read_text();self.assertIn("'evidence_quote_contract': EVIDENCE_QUOTE_CONTRACT",text);ast.parse(text)
+if __name__=='__main__':unittest.main()

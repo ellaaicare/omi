@@ -1,0 +1,106 @@
+"""Pure v3 transcript-evidence projection; never an admission or semantic verdict.
+
+Exact quotes retain existing semantics. The sole fallback resolves a UNIQUE
+source interval differing only in multiplicity of nonempty literal-LF runs.
+All other characters (including spaces, CR, tabs and speaker labels) are exact.
+Raw generator data is never modified; strict validation consumes original bytes.
+"""
+from copy import deepcopy
+import hashlib
+from ella.services.semantic_contract_v2 import ContractError, validate_source
+
+CONTRACT = 'ella-transcript-evidence-unique-lf-v1'
+QUOTE_RULES = '''Evidence quotes must copy a contiguous exact substring of the
+authoritative transcript, preserving speaker labels, punctuation and whitespace.
+Prefer a short single-line quote. Do not paraphrase, insert ellipses, remove
+speaker labels, merge utterances or collapse blank lines. Use separate evidence
+entries for separate utterances. The server can only resolve an unambiguous
+literal-LF run-count difference to the original source; this cannot establish
+semantic support. All other changed or ambiguous evidence is rejected.'''
+MAX_QUOTE_CHARACTERS = 16000
+
+
+def _sha(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def _collapse_lf(text, *, offsets=False):
+    chars, spans = [], []
+    pos = 0
+    while pos < len(text):
+        end = pos + 1
+        if text[pos] == '\n':
+            while end < len(text) and text[end] == '\n':
+                end += 1
+        chars.append(text[pos])
+        if offsets:
+            spans.append((pos, end))
+        pos = end
+    return ''.join(chars), spans
+
+
+def _resolve(quote, source, collapsed):
+    if not isinstance(quote, str) or not quote.strip():
+        raise ContractError('evidence_quote')
+    if quote in source:
+        return quote, None  # Existing exact-substring path, even if repeated.
+    if (len(quote) > MAX_QUOTE_CHARACTERS or '\n' not in quote
+            or quote.startswith('\n') or quote.endswith('\n')):
+        raise ContractError('evidence_quote')
+    needle, _ = _collapse_lf(quote)
+    haystack, offsets = collapsed
+    start = haystack.find(needle)
+    if start < 0 or haystack.find(needle, start + 1) >= 0:
+        raise ContractError('evidence_quote')
+    begin, end = offsets[start][0], offsets[start + len(needle) - 1][1]
+    exact = source[begin:end]
+    if (_collapse_lf(exact)[0] != needle
+            or exact.replace('\n', '') != quote.replace('\n', '')):
+        raise ContractError('evidence_quote')
+    return exact, {
+        'method': 'unique_lf_run_multiplicity',
+        'offset_unit': 'unicode_codepoint',
+        'start': begin,
+        'end': end,
+        'segment_utf8_sha256': _sha(source),
+        'raw_quote_sha256': _sha(quote),
+        'resolved_quote_sha256': _sha(exact),
+    }
+
+
+def canonical_core(core, segments):
+    """Return a derived copy and proof; caller still MUST strict-validate it."""
+    validate_source(segments)
+    if not isinstance(core, dict) or set(core) != {'outcome', 'title', 'overview', 'claims'}:
+        raise ContractError('schema')
+    claims = core['claims']
+    if not isinstance(claims, list):
+        raise ContractError('claims_shape')
+    if len(claims) > 24:
+        raise ContractError('claim_count')
+    source = {row['id']: row['text'] for row in segments}
+    collapsed = {}
+    resolved = deepcopy(core)
+    proof = []
+    for ci, claim in enumerate(resolved['claims']):
+        if not isinstance(claim, dict) or set(claim) != {'id', 'text', 'evidence'}:
+            raise ContractError('schema')
+        evidence = claim['evidence']
+        if not isinstance(evidence, list) or not 1 <= len(evidence) <= 8:
+            raise ContractError('evidence_count')
+        for ei, item in enumerate(evidence):
+            if not isinstance(item, dict) or set(item) != {'segment_id', 'quote'}:
+                raise ContractError('schema')
+            sid = item['segment_id']
+            if not isinstance(sid, str) or sid not in source:
+                raise ContractError('evidence_segment')
+            text = source[sid]
+            # Build one bounded mapping per explicit frozen segment, not per quote.
+            if sid not in collapsed:
+                collapsed[sid] = _collapse_lf(text, offsets=True)
+            exact, receipt = _resolve(item['quote'], text, collapsed[sid])
+            item['quote'] = exact
+            if receipt is not None:
+                proof.append({'claim_index': ci, 'evidence_index': ei,
+                              'segment_id': sid, **receipt})
+    return resolved, {'contract': CONTRACT, 'resolutions': proof}
