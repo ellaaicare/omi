@@ -1,0 +1,294 @@
+"""Synthetic actual APPLY/publication/writer/DB/SDK composition; no live IO.
+
+Real source functions and real SDK retry decorator, fake serializable store.
+Protection/consent/canonical sink/runtime/graph IO leaves are explicit doubles.
+The capture scope, typed budget and publication acceptance core are real.
+"""
+import ast, asyncio, copy, hashlib, importlib.util, json, logging, socket, sys, types, typing, unittest
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from uuid import uuid4
+from enum import Enum
+from dataclasses import replace
+from google.cloud.firestore_v1.transaction import transactional
+from google.api_core.exceptions import Aborted
+W=Path(__file__).resolve().parents[2]
+C=W/'captured-context-transaction-v1/candidate'
+B=W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend'
+def load(name,path):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+def mod(name,**kw):
+ m=types.ModuleType(name);m.__dict__.update(kw);return m
+Q=load('synthetic_serializable_store',W/'tests/test_integrated_queue.py')
+R=load('synthetic_actual_capture_rig',W/'captured-context-v2/tests/test_attempt_capture_scope.py')
+def extract(name,path,names,env):
+ tree=ast.parse(path.read_text());nodes=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef)) and n.name in names]
+ m=mod(name,**env);sys.modules[name]=m;exec(compile(ast.Module(nodes,type_ignores=[]),str(path),'exec'),m.__dict__);return m
+class Tx(Q.Transaction):
+ _read_only=False;_max_attempts=3
+ def __init__(self,db):super().__init__(db);self._id=None
+ @property
+ def id(self):return self._id
+ def _clean_up(self):self.reads={};self.writes=[];self._id=None
+ def _begin(self,retry_id=None):self._id=b'synthetic';self.db.active+=1;self.db.begins+=1
+ def _rollback(self):self.db.active=max(0,self.db.active-1);self.writes=[]
+ def _commit(self):
+  if self.db.before_commit:
+   f=self.db.before_commit;self.db.before_commit=None;f(self.db)
+  if any(self.db.versions.get(p,0)!=v for p,v in self.reads.items()):self.db.active-=1;self.db.conflicts+=1;raise Aborted('synthetic conflict')
+  for action,p,v in self.writes:
+   doc=copy.deepcopy(self.db.rows[p]) if action=='update' else {}
+   for key,value in v.items():
+    parent=doc;parts=key.split('.')
+    for part in parts[:-1]:parent=parent.setdefault(part,{})
+    parent[parts[-1]]=copy.deepcopy(value)
+   self.db.put(p,doc)
+  self.db.active-=1;self.db.commits+=1;self.writes=[]
+  if self.db.after_commit:
+   hook=self.db.after_commit;self.db.after_commit=None;hook(self.db)
+class Store(Q.Store):
+ def __init__(self):super().__init__();self.active=0;self.commits=0;self.before_commit=None;self.begins=0;self.conflicts=0;self.after_commit=None
+ def transaction(self):return Tx(self)
+ def get_all(self,refs,transaction=None,**kw):return [r.get(transaction=transaction) for r in refs]
+class CategoryEnum(str,Enum):other='other'
+class Tests(unittest.TestCase):
+ def setUp(self):
+  self.network=patch.object(socket.socket,'connect',side_effect=AssertionError('network forbidden'));self.network.start()
+  self.hostroot=patch.object(R.HOST,'ROOT',Path(__file__).parent);self.hostroot.start()
+  self.r=R.Rig();r=self.r
+  r.doc['summary_versions']=[{'id':'stock',**copy.deepcopy(r.doc['structured']),'is_active':True,'source':'stock','kind':'stock'}]
+  load('ella.services.recent_context_projection_v2',W/'captured-context-canonical-projection-v1/candidate/ella/services/recent_context_projection_v2.py')
+  records=load('ella.services.semantic_context_records_v2',W/'captured-context-factoring-v2/candidate/ella/services/semantic_context_records_v2.py')
+  self.refdoc=copy.deepcopy(r.doc);self.refdoc['id']='context-a'
+  record=records._record(r.uid,'context-a',self.refdoc)
+  r.host.rows=[R.HOST.v2.RecentRow('context-a',record['render_projection'])]
+  r.host.metadata={'context-a':{k:v for k,v in record.items() if k!='render_projection'}};r.host.write_index()
+  # Candidate publication class replaces only the source module; scope/budget remain actual.
+  pub=load('ella.services.semantic_publication',C/'ella/services/semantic_publication.py');R.PUB=pub
+  self.pub=pub;r.modules['ella.services.semantic_publication']=pub
+  r.prepare()
+  self.db=Store();self.key=('users',r.uid,'conversations',r.cid)
+  self.db.put(self.key,r.doc)
+  self.db.put(('users',r.uid,'conversations','context-a'),self.refdoc)
+  self.db.put(('users',r.uid),{'ai_consent':{'receipt_id':'synthetic','granted':True}})
+  self.db.put(('users',r.uid,'ai_consent_receipts','synthetic'),{'granted':True})
+  def io():
+   if self.db.active:raise AssertionError('external IO in transaction')
+  self.io=io;self.canonical=[]
+  def graph(uid,cid):r.graph(uid,cid)
+  def txgraph(uid,cid):
+   def check(tx):r.graph(uid,cid)
+   return check
+  def current_consent(uid):
+   io();return uid if self.db.rows[('users',uid)]['ai_consent']['granted'] else None
+  leaves={
+   'database._client':mod('database._client',db=self.db),
+   'database.enrichment_graph_guard':mod('database.enrichment_graph_guard',require_current=graph,make_cas_guard=txgraph),
+   'ella.services.ai_consent':mod('ella.services.ai_consent',_is_current_grant=lambda uid,s,p:bool(s and p and s.get('granted') and p.get('granted')),assert_current_ai_consent=current_consent),
+  }
+  self.p=patch.dict(sys.modules,leaves);self.p.start()
+  # All metadata fields are actual production code; strict decode is the protection leaf.
+  load('ella.services.recent_context_projection_v2',W/'captured-context-canonical-projection-v1/candidate/ella/services/recent_context_projection_v2.py')
+  records=load('ella.services.semantic_context_records_v2',W/'captured-context-factoring-v2/candidate/ella/services/semantic_context_records_v2.py')
+  tc=load('ella.services.semantic_transaction_context',C/'ella/services/semantic_transaction_context.py');self.tc=tc
+  env=dict(vars(typing));env.update(copy=copy,datetime=datetime,timezone=timezone,uuid=__import__('uuid'),uuid4=uuid4,transactional=transactional,db=self.db,conversations_collection='conversations',_prepare_conversation_for_read=lambda d,u:copy.deepcopy(d),_prepare_conversation_for_write=lambda d,u,l:copy.deepcopy(d))
+  names={'_update_conversation_with_builder_transaction','_update_conversation_with_builder','update_conversation_with_builder','_ensure_timezone_aware','_category_value','_has_summary_content','_build_summary_version_payload','bootstrap_summary_versioning_update','build_summary_version_update'}
+  dbm=extract('database.conversations',C/'database/conversations.py',names,env);self.dbm=dbm
+  sanitize=load('ella.services.summary_sanitizer',B/'ella/services/summary_sanitizer.py')
+  # Import full actual writer after substituting only declared leaves.
+  canon=mod('utils.ella.canonical_omi',TODAY_CARD_GROUNDING_ATTESTER='synthetic',TODAY_CARD_GROUNDING_CONTRACT_VERSION=1,TODAY_CARD_PARALLEL_GROUNDING_ATTESTER='synthetic',summary_grounding_hash=lambda *a:None,today_card_grounding_identity_is_valid=lambda *a:False,transcript_grounding_hash=lambda *a:None,write_omi_canonical_event=lambda *a,**k:None)
+  sys.modules['models.conversation']=mod('models.conversation',CategoryEnum=CategoryEnum)
+  sys.modules['utils.ella.canonical_omi']=canon
+  sys.modules['database'].conversations=dbm
+  self.writer=load('ella.services.summary_writeback',C/'ella/services/summary_writeback.py')
+  self.apply=load('ella.services.semantic_retained_apply',C/'ella/services/semantic_retained_apply.py')
+  def sink(uid,doc,**kw):io();self.pending=copy.deepcopy(self.db.rows[self.key]);self.canonical.append(copy.deepcopy(doc));return {'ok':True}
+  async def writer(**kw):return await self.writer.write_conversation_summary_cas(**kw,canonical_writer=sink)
+  async def resolver(*a,**k):io();return r.runtime
+  async def revalidator(*a,**k):io();return r.runtime
+  def consent(uid):return current_consent(uid)
+  def hydrate(*a,**k):io();return r.read()
+  self.deps=self.apply._ApplyDependencies(resolver,lambda runtime:r.identity,revalidator,consent,hydrate,writer)
+  self.accepted=None
+ def tearDown(self):
+  self.p.stop();self.r.close();self.hostroot.stop();self.network.stop()
+ def accept(self):
+  r=self.r
+  # Actual receipt core with sanitizer-valid synthetic summary.
+  binding=self.pub.current_binding(r.doc,uid=r.uid,conversation_id=r.cid)
+  candidate={'title':'Fictional notebook plan','overview':'In this fictional test, Mira plans to take the blue notebook to the library on Friday.','emoji':'📘','category':'other'}
+  for role in ['generator','verifier']:
+   changes,_=self.pub.record_completed_operation(r.doc,binding=binding,operation_id=role,candidate=candidate,role=role,runtime_interaction_id='runtime-'+role,canonical_assistant_event_id='event-'+role,verifier_result={'accepted':True,'source_grounded':True,'semantic_summary':True,'context_owner_verified':True} if role=='verifier' else None);r.doc.update(changes)
+  changes,result=self.pub.issue_receipt(r.doc,binding=binding,candidate=candidate,generator_operation_id='generator',verifier_operation_id='verifier');r.doc.update(changes);self.db.put(self.key,r.doc)
+  return {'publication_receipt_id':result['receipt_id'],'policy':'ella-semantic-summary-v1','policy_revision':binding.policy_revision,'candidate_schema_version':2,'semantic_contract_version':2,'summary':candidate,'candidate_sha256':self.pub.candidate_sha256(candidate)}
+ def run_apply(self,proposal):
+  bridge=self.apply.RetainedSemanticApply(uid=self.r.uid,conversation_id=self.r.cid,repository=None,read_conversation=lambda u,c:copy.deepcopy(self.db.rows[self.key]),dependencies=self.deps)
+  return asyncio.run(bridge(proposal))
+ def test_accepted_proposal_persists_canonical_new_version(self):
+  result=self.run_apply(self.accept());self.assertEqual(result['status'],'completed');self.assertEqual(len(self.canonical),1)
+  current=self.db.rows[self.key];self.assertNotEqual(current['active_summary_version_id'],'stock');self.assertEqual(current['summary_writeback_receipt']['status'],'completed');self.assertEqual(self.canonical[0]['structured']['title'],current['structured']['title'])
+  self.assertEqual(current['transcript_segments'],self.r.doc['transcript_segments'])
+  self.assertEqual(next(v for v in current['summary_versions'] if v['id']=='stock')['title'],'Fictional')
+  projected=R.CAN.canonical_source_from_conversation(uid=self.r.uid,conversation_id=self.r.cid,conversation=self.canonical[0])
+  self.assertEqual(projected,R.CAN.canonical_source_from_conversation(uid=self.r.uid,conversation_id=self.r.cid,conversation=current))
+ def test_same_accepted_token_is_idempotent(self):
+  proposal=self.accept();first=self.run_apply(proposal);version=self.db.rows[self.key]['active_summary_version_id'];second=self.run_apply(proposal)
+  self.assertEqual(first['operation_receipt'],second['operation_receipt']);self.assertEqual(self.db.rows[self.key]['active_summary_version_id'],version);self.assertEqual(len(self.canonical),1)
+ def test_commit_conflict_retries_real_sdk_callback_without_leaking_writes(self):
+  proposal=self.accept();before=self.db.commits
+  self.db.before_commit=lambda db:db.put(self.key,copy.deepcopy(db.rows[self.key]))
+  result=self.run_apply(proposal);self.assertEqual(result['status'],'completed');self.assertEqual(len(self.canonical),1);self.assertEqual(self.db.commits-before,2);self.assertEqual(self.db.conflicts,1);self.assertEqual(self.db.begins,3)
+ def reject_race(self,mutation):
+  proposal=self.accept();before=copy.deepcopy(self.db.rows[self.key]);self.db.before_commit=mutation
+  with self.assertRaises((self.writer.ConversationSummaryOutcomeUnknownError,self.pub.SemanticPublicationRejectedError,R.FENCE.FenceRejected)):self.run_apply(proposal)
+  self.assertEqual(len(self.db.rows[self.key]['summary_versions']),1);self.assertNotIn('summary_writeback_receipt',self.db.rows[self.key]);self.assertEqual(self.canonical,[])
+ def test_source_edit_race_rejects(self):
+  self.reject_race(lambda db:db.put(self.key,{**db.rows[self.key],'transcript_segments':[{'text':'changed'}]}))
+ def test_source_version_race_rejects(self):
+  self.reject_race(lambda db:db.put(self.key,{**db.rows[self.key],'active_summary_version_id':'foreign-version'}))
+ def test_source_logical_deletion_race_rejects(self):
+  self.reject_race(lambda db:db.put(self.key,{**db.rows[self.key],'deleted':True}))
+ def test_owner_race_rejects(self):
+  self.reject_race(lambda db:db.put(self.key,{**db.rows[self.key],'uid':'foreign-owner'}))
+ def test_consent_revoked_race_rejects(self):
+  key=('users',self.r.uid)
+  self.reject_race(lambda db:db.put(key,{'ai_consent':{'receipt_id':'synthetic','granted':False}}))
+ def test_reference_edit_race_rejects(self):
+  key=('users',self.r.uid,'conversations','context-a')
+  self.reject_race(lambda db:db.put(key,{**db.rows[key],'structured':{'title':'changed'}}))
+ def test_reference_deletion_race_rejects(self):
+  key=('users',self.r.uid,'conversations','context-a')
+  self.reject_race(lambda db:db.put(key,{**db.rows[key],'deleted':True}))
+ def test_attempt_replacement_race_rejects(self):
+  def mutate(db):
+   self.r.job['lease_token']='replaced';db.put(self.key,copy.deepcopy(db.rows[self.key]))
+  self.reject_race(mutate)
+ def accepted_race(self,change=None):
+  proposal=self.accept();original=copy.deepcopy(self.db.rows[self.key]);self.run_apply(proposal)
+  completed=copy.deepcopy(self.db.rows[self.key]);self.canonical.clear();self.db.put(self.key,original)
+  if change:change(completed)
+  self.db.before_commit=lambda db:db.put(self.key,completed)
+  return proposal,completed
+ def test_exact_accepted_receipt_commit_race_reconciles_no_second_version(self):
+  proposal,completed=self.accepted_race();result=self.run_apply(proposal)
+  self.assertEqual(result['status'],'completed');self.assertEqual(self.db.rows[self.key]['summary_versions'],completed['summary_versions']);self.assertEqual(self.canonical,[])
+ def test_exact_pending_receipt_commit_race_finishes_owned_reconciliation(self):
+  proposal=self.accept();original=copy.deepcopy(self.db.rows[self.key]);self.run_apply(proposal)
+  pending=copy.deepcopy(self.pending);self.canonical.clear();self.db.put(self.key,original)
+  self.db.before_commit=lambda db:db.put(self.key,pending)
+  result=self.run_apply(proposal);current=self.db.rows[self.key]
+  self.assertEqual(result['status'],'completed');self.assertEqual(current['summary_versions'],pending['summary_versions']);self.assertEqual(len(self.canonical),1)
+ def test_raced_accepted_wrong_token_cannot_admit(self):
+  proposal,completed=self.accepted_race(lambda doc:doc['summary_writeback_receipt'].update(token='wrong'))
+  with self.assertRaises((self.writer.ConversationSummaryOutcomeUnknownError,self.pub.SemanticPublicationRejectedError)):self.run_apply(proposal)
+  self.assertEqual(self.db.rows[self.key],completed);self.assertEqual(self.canonical,[])
+ def test_raced_accepted_wrong_payload_cannot_admit(self):
+  proposal,completed=self.accepted_race(lambda doc:doc['summary_writeback_receipt'].update(payload_sha256='0'*64))
+  with self.assertRaises((self.writer.ConversationSummaryOutcomeUnknownError,self.pub.SemanticPublicationRejectedError,self.writer.CanonicalSummaryOperationConflictError)):self.run_apply(proposal)
+  self.assertEqual(self.db.rows[self.key],completed);self.assertEqual(self.canonical,[])
+ def test_raced_accepted_wrong_publication_cannot_admit(self):
+  proposal,completed=self.accepted_race(lambda doc:doc['summary_writeback_receipt'].update(semantic_publication_receipt_id='wrong'))
+  with self.assertRaises((self.writer.ConversationSummaryOutcomeUnknownError,self.pub.SemanticPublicationRejectedError)):self.run_apply(proposal)
+  self.assertEqual(self.db.rows[self.key],completed);self.assertEqual(self.canonical,[])
+ def test_raced_completed_postimage_change_cannot_admit(self):
+  proposal,completed=self.accepted_race(lambda doc:doc['structured'].update(title='External changed title'))
+  with self.assertRaises(self.writer.CanonicalSummaryOperationConflictError):self.run_apply(proposal)
+  self.assertEqual(self.db.rows[self.key],completed);self.assertEqual(self.canonical,[])
+ def mutate_after_full_remote_validation(self,mutation):
+  original=self.deps.hydrate;fired=[]
+  def hydrate(*a,**kw):
+   snapshot=original(*a,**kw)  # Actual captured scope/require_ack, never forged stamp.
+   if not fired:fired.append(True);mutation(self.db)
+   return snapshot
+  self.deps=replace(self.deps,hydrate=hydrate)
+  return fired
+ def assert_preflight_rejected_no_transaction(self,proposal):
+  with self.assertRaises(self.pub.SemanticPublicationRejectedError):self.run_apply(proposal)
+  self.assertEqual(self.db.begins,0);self.assertEqual(self.db.commits,0);self.assertEqual(self.canonical,[])
+  self.assertNotIn('summary_writeback_receipt',self.db.rows[self.key])
+ def test_reference_edit_between_remote_validation_and_after_pin_collection_rejects(self):
+  proposal=self.accept();key=('users',self.r.uid,'conversations','context-a')
+  fired=self.mutate_after_full_remote_validation(lambda db:db.put(key,{**db.rows[key],'structured':{**db.rows[key]['structured'],'title':'Changed during validation'}}))
+  self.assert_preflight_rejected_no_transaction(proposal);self.assertEqual(len(fired),1)
+ def test_delete_recreate_same_payload_changed_create_timestamp_rejects(self):
+  proposal=self.accept();key=('users',self.r.uid,'conversations','context-a');before=copy.deepcopy(self.db.rows[key]);stamp=self.db.created[key]
+  def recreate(db):
+   payload=db.rows.pop(key);db.created.pop(key);db.put(key,payload,created=stamp+timedelta(seconds=1))
+  self.mutate_after_full_remote_validation(recreate)
+  self.assert_preflight_rejected_no_transaction(proposal);self.assertEqual(self.db.rows[key],before);self.assertNotEqual(self.db.created[key],stamp)
+ def test_same_plaintext_changed_ciphertext_raw_pin_rejects(self):
+  proposal=self.accept();key=('users',self.r.uid,'conversations','context-a');plain=copy.deepcopy(self.refdoc['transcript_segments'])
+  # Explicit fake protection leaf: both synthetic encodings decode to IDENTICAL bytes.
+  self.dbm.encryption=SimpleNamespace(decrypt_strict=lambda ciphertext,uid:copy.deepcopy(plain))
+  self.db.put(key,{**self.db.rows[key],'data_protection_level':'enhanced','transcript_segments':'synthetic-ciphertext-A'})
+  self.mutate_after_full_remote_validation(lambda db:db.put(key,{**db.rows[key],'transcript_segments':'synthetic-ciphertext-B'}))
+  self.assert_preflight_rejected_no_transaction(proposal)
+  self.assertEqual(self.dbm.encryption.decrypt_strict('synthetic-ciphertext-A',self.r.uid),self.dbm.encryption.decrypt_strict('synthetic-ciphertext-B',self.r.uid))
+ def test_unrelated_new_record_outside_captured_cid_readset_allows_apply(self):
+  proposal=self.accept();key=('users',self.r.uid,'conversations','not-in-captured-readset')
+  unrelated={**copy.deepcopy(self.refdoc),'id':key[-1]}
+  fired=self.mutate_after_full_remote_validation(lambda db:db.put(key,unrelated))
+  result=self.run_apply(proposal);self.assertEqual(result['status'],'completed');self.assertEqual(len(fired),1)
+  self.assertEqual(self.db.rows[key],unrelated);self.assertEqual(len(self.canonical),1)
+ def reject_accepted_authority_race(self,*,pending,mutation):
+  proposal=self.accept();original=copy.deepcopy(self.db.rows[self.key]);self.run_apply(proposal)
+  accepted=copy.deepcopy(self.pending if pending else self.db.rows[self.key]);self.canonical.clear();self.db.put(self.key,original)
+  baseline_commits=self.db.commits
+  def raced(db):
+   db.put(self.key,accepted);mutation(db)
+  self.db.before_commit=raced
+  with self.assertRaises((self.pub.SemanticPublicationRejectedError,self.writer.CanonicalSummaryOperationConflictError,R.FENCE.FenceRejected)):
+   self.run_apply(proposal)
+  self.assertEqual(self.db.commits,baseline_commits);self.assertEqual(self.canonical,[])
+  self.assertEqual(self.db.rows[self.key]['summary_versions'],accepted['summary_versions'])
+ def revoke_current_consent(self,db):
+  key=('users',self.r.uid);db.put(key,{'ai_consent':{'receipt_id':'synthetic','granted':False}})
+ def test_pending_accepted_race_revoked_consent_blocks_reconciliation(self):
+  self.reject_accepted_authority_race(pending=True,mutation=self.revoke_current_consent)
+ def test_pending_accepted_race_foreign_uid_blocks_reconciliation(self):
+  self.reject_accepted_authority_race(pending=True,mutation=lambda db:db.put(self.key,{**db.rows[self.key],'uid':'foreign-owner'}))
+ def test_pending_accepted_race_foreign_id_blocks_reconciliation(self):
+  self.reject_accepted_authority_race(pending=True,mutation=lambda db:db.put(self.key,{**db.rows[self.key],'id':'foreign-cid'}))
+ def test_pending_accepted_race_deleted_blocks_reconciliation(self):
+  self.reject_accepted_authority_race(pending=True,mutation=lambda db:db.put(self.key,{**db.rows[self.key],'deleted':True}))
+ def test_pending_accepted_race_discarded_blocks_reconciliation(self):
+  self.reject_accepted_authority_race(pending=True,mutation=lambda db:db.put(self.key,{**db.rows[self.key],'discarded':True,'status':'discarded'}))
+ def test_pending_accepted_race_locked_blocks_reconciliation(self):
+  self.reject_accepted_authority_race(pending=True,mutation=lambda db:db.put(self.key,{**db.rows[self.key],'is_locked':True}))
+ def test_completed_accepted_race_revoked_consent_blocks_reconciliation(self):
+  self.reject_accepted_authority_race(pending=False,mutation=self.revoke_current_consent)
+ def test_completed_accepted_race_foreign_uid_blocks_reconciliation(self):
+  self.reject_accepted_authority_race(pending=False,mutation=lambda db:db.put(self.key,{**db.rows[self.key],'uid':'foreign-owner'}))
+ def test_completed_accepted_race_deleted_blocks_reconciliation(self):
+  self.reject_accepted_authority_race(pending=False,mutation=lambda db:db.put(self.key,{**db.rows[self.key],'deleted':True}))
+ def test_revocation_after_new_cas_before_canonical_dispatch_preserves_pending(self):
+  proposal=self.accept();self.db.after_commit=self.revoke_current_consent
+  result=self.run_apply(proposal);current=self.db.rows[self.key]
+  self.assertEqual(result['status'],'pending_reconciliation');self.assertEqual(self.canonical,[])
+  self.assertNotEqual(current['active_summary_version_id'],'stock');self.assertEqual(current['summary_writeback_receipt']['status'],'pending_reconciliation')
+  self.assertEqual(len(current['summary_versions']),2)
+ def prepare_pending_dispatch_race(self,*,repair):
+  proposal=self.accept();original=copy.deepcopy(self.db.rows[self.key]);self.run_apply(proposal)
+  pending=copy.deepcopy(self.pending);self.canonical.clear();self.db.put(self.key,original)
+  if repair:pending['structured']['title']='A synthetic later edit'
+  def raced(db):
+   db.put(self.key,pending)
+   if repair:
+    # After accepted read-only classifier, next actual repair-preparation CAS
+    # must finish before revocation immediately ahead of canonical dispatch.
+    db.after_commit=lambda db:setattr(db,'after_commit',self.revoke_current_consent)
+   else:db.after_commit=self.revoke_current_consent
+  self.db.before_commit=raced
+  return proposal,pending
+ def test_revocation_after_accepted_pending_before_dispatch_preserves_pending(self):
+  proposal,pending=self.prepare_pending_dispatch_race(repair=False);result=self.run_apply(proposal);current=self.db.rows[self.key]
+  self.assertEqual(result['status'],'pending_reconciliation');self.assertEqual(self.canonical,[])
+  self.assertEqual(current['summary_versions'],pending['summary_versions']);self.assertEqual(current['summary_writeback_receipt']['status'],'pending_reconciliation')
+ def test_revocation_after_supersession_repair_prepare_blocks_dispatch(self):
+  proposal,pending=self.prepare_pending_dispatch_race(repair=True);result=self.run_apply(proposal);current=self.db.rows[self.key]
+  self.assertEqual(result['status'],'pending_reconciliation');self.assertEqual(self.canonical,[])
+  self.assertEqual(current['summary_versions'],pending['summary_versions']);self.assertEqual(current['summary_writeback_receipt']['status'],'pending_reconciliation')
+  self.assertEqual(current['summary_writeback_receipt']['canonical_status'],'supersession_pending')
+if __name__=='__main__':unittest.main()

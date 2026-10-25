@@ -1,0 +1,229 @@
+"""Actual installed Firestore @transactional; fake transport and synthetic clock.
+
+This imports no app database/client and performs no network/DB/provider call.
+The deadline case models documented server bounds; it is not a server test or
+an assertion about the historical masked failure.
+"""
+import socket
+import unittest
+from unittest.mock import patch
+from google.api_core.exceptions import Aborted, DeadlineExceeded
+from google.cloud.firestore_v1.transaction import transactional
+
+
+class NonTransactionalIOForbidden(RuntimeError):
+    pass
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class FakeTransaction:
+    """Only SDK wrapper protocol; no SDK/client or server methods are replaced."""
+    def __init__(self, *, max_attempts=3, read_only=False, commit_errors=(),
+                 clock=None, synthetic_lock_limit=None):
+        self._max_attempts = max_attempts
+        self._read_only = read_only
+        self._id = None
+        self.events = []
+        self.active = False
+        self.sequence = 0
+        self.commit_calls = 0
+        self.rollback_calls = 0
+        self.commit_errors = list(commit_errors)
+        self.clock = clock or Clock()
+        self.first_read_at = None
+        self.synthetic_lock_limit = synthetic_lock_limit
+        self.business_rows = {'source': {'version': 'synthetic-v1'},
+                              'consent': {'granted': True}}
+        self.pending_writes = []
+
+    def _clean_up(self):
+        self.events.append(('cleanup',))
+        self._id = None
+        self.active = False
+        self.first_read_at = None
+        self.pending_writes = []
+
+    def _begin(self, retry_id=None):
+        self.sequence += 1
+        self._id = ('synthetic-tx-' + str(self.sequence)).encode()
+        self.active = True
+        self.events.append(('begin', retry_id, self._id))
+
+    def _commit(self):
+        assert self.active and self._id is not None
+        self.commit_calls += 1
+        self.events.append(('commit', self._id))
+        if self.synthetic_lock_limit is not None and self.first_read_at is not None:
+            if self.clock() - self.first_read_at > self.synthetic_lock_limit:
+                raise DeadlineExceeded('synthetic transaction lock deadline')
+        if self.commit_errors:
+            error = self.commit_errors.pop(0)
+            if error is not None:
+                raise error
+        self.active = False
+
+    def _rollback(self):
+        self.rollback_calls += 1
+        self.events.append(('rollback', self._id))
+        self.pending_writes = []
+        self.active = False
+
+    def read(self, key):
+        assert self.active
+        if self.first_read_at is None:
+            self.first_read_at = self.clock()
+        self.events.append(('read', key))
+        self.clock.advance(0.01)
+        return self.business_rows[key]
+
+    def write(self, key, value):
+        assert self.active and self.first_read_at is not None
+        self.events.append(('write', key))
+        self.clock.advance(0.01)
+        self.pending_writes.append((key, value))
+
+    def remote_context(self, seconds=29.0, *, forbid_in_callback=True):
+        if self.active and self.first_read_at is not None and forbid_in_callback:
+            raise NonTransactionalIOForbidden('synthetic remote I/O after first transaction read')
+        self.events.append(('remote_context', self.active))
+        self.clock.advance(seconds)
+
+
+class ActualSDKWrapperTests(unittest.TestCase):
+    def setUp(self):
+        def blocked(*args, **kwargs):
+            raise AssertionError('network forbidden in offline SDK fixture')
+        self.patches = [patch.object(socket.socket, 'connect', blocked),
+                        patch.object(socket.socket, 'connect_ex', blocked),
+                        patch.object(socket, 'create_connection', blocked)]
+        for item in self.patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def test_callback_runs_after_begin_before_commit(self):
+        tx = FakeTransaction()
+        @transactional
+        def callback(transaction):
+            self.assertTrue(transaction.active)
+            transaction.events.append(('callback', transaction._id))
+            transaction.read('source')
+            transaction.write('summary', {'title': 'Synthetic'})
+            return 'synthetic-result'
+        self.assertEqual(callback(tx), 'synthetic-result')
+        self.assertEqual([event[0] for event in tx.events],
+                         ['cleanup', 'begin', 'callback', 'read', 'write', 'commit'])
+        self.assertEqual(tx.rollback_calls, 0)
+
+    def test_callback_deadline_exception_not_retried_or_committed(self):
+        tx = FakeTransaction(max_attempts=5)
+        calls = []
+        @transactional
+        def callback(transaction):
+            calls.append(1)
+            transaction.read('source')
+            raise DeadlineExceeded('synthetic callback read failed')
+        with self.assertRaises(DeadlineExceeded):
+            callback(tx)
+        self.assertEqual((len(calls), tx.sequence, tx.commit_calls, tx.rollback_calls), (1, 1, 0, 1))
+
+    def test_callback_aborted_is_not_the_commit_retry_path(self):
+        tx = FakeTransaction(max_attempts=5)
+        calls = []
+        @transactional
+        def callback(transaction):
+            calls.append(1)
+            raise Aborted('synthetic callback aborted')
+        with self.assertRaises(Aborted):
+            callback(tx)
+        self.assertEqual((len(calls), tx.sequence, tx.commit_calls, tx.rollback_calls), (1, 1, 0, 1))
+
+    def test_commit_aborted_retries_entire_callback_with_first_retry_id(self):
+        tx = FakeTransaction(commit_errors=[Aborted('synthetic commit conflict'), None])
+        calls = []
+        @transactional
+        def callback(transaction):
+            calls.append(transaction._id)
+            transaction.read('source')
+            return 'done'
+        self.assertEqual(callback(tx), 'done')
+        self.assertEqual(len(calls), 2)
+        begins = [event for event in tx.events if event[0] == 'begin']
+        self.assertEqual(begins[0][1], None)
+        self.assertEqual(begins[1][1], begins[0][2])
+        self.assertEqual((tx.commit_calls, tx.rollback_calls), (2, 0))
+
+    def test_commit_retry_exhaustion_wraps_last_aborted_and_rolls_back(self):
+        tx = FakeTransaction(max_attempts=2,
+                             commit_errors=[Aborted('synthetic first'), Aborted('synthetic last')])
+        @transactional
+        def callback(transaction):
+            transaction.read('source')
+        with self.assertRaises(ValueError) as captured:
+            callback(tx)
+        self.assertIsInstance(captured.exception.__cause__, Aborted)
+        self.assertEqual((tx.sequence, tx.commit_calls, tx.rollback_calls), (2, 2, 1))
+
+    def test_read_only_commit_aborted_does_not_retry(self):
+        tx = FakeTransaction(read_only=True, commit_errors=[Aborted('synthetic read-only conflict')])
+        @transactional
+        def callback(transaction):
+            return transaction.read('source')
+        with self.assertRaises(Aborted):
+            callback(tx)
+        self.assertEqual((tx.sequence, tx.commit_calls, tx.rollback_calls), (1, 1, 1))
+
+    def test_external_io_guard_after_read_prevents_commit(self):
+        tx = FakeTransaction()
+        @transactional
+        def callback(transaction):
+            transaction.read('source')
+            transaction.remote_context()
+        with self.assertRaises(NonTransactionalIOForbidden):
+            callback(tx)
+        self.assertEqual((tx.commit_calls, tx.rollback_calls), (0, 1))
+
+    def test_six_remote_context_reads_occupy_open_sdk_transaction(self):
+        # Synthetic 20s lock model, not a live Firestore timer or historical proof.
+        tx = FakeTransaction(synthetic_lock_limit=20.0)
+        @transactional
+        def callback(transaction):
+            transaction.read('source')
+            for _ in range(6):
+                transaction.remote_context(29, forbid_in_callback=False)
+            transaction.write('summary', {'title': 'Synthetic'})
+        with self.assertRaises(DeadlineExceeded):
+            callback(tx)
+        remote = [event for event in tx.events if event[0] == 'remote_context']
+        self.assertEqual(remote, [('remote_context', True)] * 6)
+        self.assertGreater(tx.clock(), 174)
+        self.assertEqual((tx.sequence, tx.commit_calls, tx.rollback_calls), (1, 1, 1))
+
+    def test_external_preflight_then_pure_transaction_does_not_spend_lock_time(self):
+        tx = FakeTransaction(synthetic_lock_limit=20.0)
+        for _ in range(6):
+            tx.remote_context(29)
+        @transactional
+        def callback(transaction):
+            source = transaction.read('source')
+            consent = transaction.read('consent')
+            self.assertTrue(consent['granted'])
+            transaction.write('summary', {'based_on': source['version']})
+        callback(tx)
+        self.assertEqual((tx.commit_calls, tx.rollback_calls), (1, 0))
+        self.assertLess(tx.clock() - tx.first_read_at, 0.1)
+        self.assertEqual([event for event in tx.events if event[0] == 'remote_context'],
+                         [('remote_context', False)] * 6)
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

@@ -1,0 +1,343 @@
+--- a/database/conversations.py
++++ b/database/conversations.py
+@@ -1757,6 +1757,7 @@
+     update_builder,
+     correction_id: Optional[str] = None,
+     transaction_guard=None,
++    transaction_context=None,
+ ):
+     """Read and update one conversation and optional correction audit atomically."""
+     snapshot = conversation_ref.get(transaction=transaction)
+@@ -1764,7 +1765,11 @@
+         return None
+     stored_conversation = snapshot.to_dict() or {}
+     conversation = _prepare_conversation_for_read(stored_conversation, uid) or {}
+-    update_data, result = update_builder(conversation)
++    if transaction_context is None:
++        update_data, result = update_builder(conversation)
++    else:
++        with transaction_context(transaction, conversation):
++            update_data, result = update_builder(conversation)
+     if transaction_guard is not None:
+         transaction_guard(transaction)
+     if update_data:
+@@ -1790,6 +1795,7 @@
+     update_builder,
+     correction_id: Optional[str] = None,
+     transaction_guard=None,
++    transaction_context=None,
+ ):
+     return _update_conversation_with_builder_transaction(
+         transaction,
+@@ -1798,6 +1804,7 @@
+         update_builder,
+         correction_id,
+         transaction_guard,
++        transaction_context,
+     )
+ 
+ 
+@@ -1807,6 +1814,7 @@
+     update_builder,
+     correction_id: Optional[str] = None,
+     transaction_guard=None,
++    transaction_context=None,
+ ):
+     conversation_ref = (
+         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+@@ -1818,6 +1826,7 @@
+         update_builder,
+         correction_id,
+         transaction_guard,
++        transaction_context,
+     )
+ 
+ 
+--- a/ella/services/semantic_publication.py
++++ b/ella/services/semantic_publication.py
+@@ -259,10 +259,16 @@
+         # Schema-v2 new publication holds if no trusted hydration path is wired.
+         if not callable(read_companion_context):
+             _reject('semantic_context_publication_guard_required')
+-        from ella.services.semantic_captured_context import validation_ticket, require_validated_read
+-        ticket = validation_ticket(conversation, uid, conversation_id)
+-        snapshot = read_companion_context(uid)
+-        require_validated_read(ticket, snapshot, conversation, uid, conversation_id)
++        from ella.services.semantic_transaction_context import is_prepared_reader
++        if is_prepared_reader(read_companion_context):
++            # Exact private reader is usable only inside its atomic read-set
++            # context. It never substitutes arbitrary cached client authority.
++            snapshot = read_companion_context.read_for_publication(conversation, uid, conversation_id)
++        else:
++            from ella.services.semantic_captured_context import validation_ticket, require_validated_read
++            ticket = validation_ticket(conversation, uid, conversation_id)
++            snapshot = read_companion_context(uid)
++            require_validated_read(ticket, snapshot, conversation, uid, conversation_id)
+         if (not isinstance(snapshot, dict) or snapshot.get('owner_uid') != uid
+                 or snapshot.get('revision') != binding.companion_context_revision
+                 or digest(snapshot) != binding.companion_context_sha256):
+--- a/ella/services/semantic_retained_apply.py
++++ b/ella/services/semantic_retained_apply.py
+@@ -164,6 +164,7 @@
+         loop = asyncio.get_running_loop()
+         loop_thread = threading.get_ident()
+         runtime = identity = None
++        prepared_context = None
+ 
+         def admission_open():
+             if closed.is_set():
+@@ -191,6 +192,8 @@
+             snapshot = self._deps.hydrate(runtime, uid=owner, runtime_identity=identity)
+             admission_open()
+             return snapshot
++
++        publication_context_reader = context
+ 
+         def validate_snapshot(current):
+             admission_open()
+@@ -207,7 +210,7 @@
+                 conversation_id=self.cid,
+                 candidate=candidate,
+                 receipt_id=receipt_id,
+-                read_companion_context=context,
++                read_companion_context=publication_context_reader,
+             )
+             admission_open()
+ 
+@@ -215,6 +218,12 @@
+             admission_open()
+             if threading.get_ident() == loop_thread:
+                 _reject("semantic_apply_transaction_thread_required")
++            if prepared_context is not None:
++                # All remote validation happened before Firestore transaction.
++                # Pure publication validation is active only under its current
++                # same-transaction consent/graph/reference read-set context.
++                validate_snapshot(current)
++                return
+             future = asyncio.run_coroutine_threadsafe(revalidate(), loop)
+             try:
+                 future.result(timeout=15)
+@@ -247,7 +256,12 @@
+                     _reject("semantic_apply_retained_target_required")
+                 identity = self._deps.identity(runtime)
+                 await revalidate()
+-                await asyncio.to_thread(validate_snapshot, conversation)
++                from ella.services.semantic_transaction_context import prepare_transaction_context
++                prepared_context = await asyncio.to_thread(prepare_transaction_context,
++                    uid=self.uid, conversation_id=self.cid, conversation=conversation,
++                    validate_snapshot=validate_snapshot)
++                if prepared_context is not None:
++                    publication_context_reader = prepared_context
+             kwargs = dict(
+                 uid=self.uid,
+                 conversation_id=self.cid,
+@@ -264,7 +278,7 @@
+                 preserve_generated_results=True,
+                 semantic_publication_receipt_id=receipt_id,
+                 semantic_publication_original_candidate=copy.deepcopy(candidate),
+-                semantic_companion_context_reader=context if not replay else None,
++                semantic_companion_context_reader=publication_context_reader if not replay else None,
+                 semantic_publication_authority_guard=transaction_guard if not replay else replay_guard,
+             )
+             task = asyncio.create_task(self._deps.writer(**kwargs))
+--- /dev/null
++++ b/ella/services/semantic_transaction_context.py
+@@ -0,0 +1,131 @@
++"""Private per-attempt prepared read set; never a route, grant or reusable authority.
++
++All host/runtime/model work occurs before the Firestore transaction. The exact
++validated document images, current consent and existing attempt/account graph
++are then read INSIDE that same transaction before any write. Only transaction-
++bound Firestore reads and local transforms are allowed within its callback.
++"""
++from contextlib import contextmanager
++from contextvars import ContextVar
++from copy import deepcopy
++from datetime import datetime
++import hashlib,json
++from types import MappingProxyType
++
++_ISSUER=object()
++MAX_RAW_BYTES=16*1024*1024
++
++def _reject(code):
++ from ella.services.semantic_publication import SemanticPublicationRejectedError
++ raise SemanticPublicationRejectedError(code)
++def _digest(value):
++ return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False,default=str).encode()).hexdigest()
++def _stamp(value):
++ if not isinstance(value,datetime) or value.utcoffset() is None:_reject('semantic_transaction_snapshot_stamp_required')
++ return value.isoformat()
++def _pin(snapshot):
++ if not snapshot.exists:_reject('semantic_transaction_record_missing')
++ raw=snapshot.to_dict()
++ if type(raw) is not dict:_reject('semantic_transaction_record_invalid')
++ return raw,(_digest(raw),_stamp(snapshot.create_time),_stamp(snapshot.update_time))
++
++class PreparedContextReader:
++ __slots__=('_scope','_uid','_cid','_db','_pins','_snapshot','_guard','_active')
++ def __init__(self,issuer,*,scope,database,pins,graph_guard):
++  if issuer is not _ISSUER:_reject('semantic_transaction_reader_construction_forbidden')
++  self._scope=scope;self._uid=scope.uid;self._cid=scope.cid;self._db=database
++  self._pins=MappingProxyType(dict(pins));self._snapshot=json.dumps(scope.envelope()['snapshot'],sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
++  self._guard=graph_guard;self._active=ContextVar('ella_prepared_context_transaction',default=None)
++ def __reduce__(self):raise TypeError('private_transaction_reader_not_serializable')
++ def _check(self,conversation=None):
++  from ella.services.semantic_captured_context import current_scope
++  if current_scope(self._uid,self._cid) is not self._scope:_reject('semantic_transaction_attempt_changed')
++  self._scope.check()
++  if conversation is not None:self._scope.require_policy(conversation)
++ def __call__(self,owner):
++  if owner!=self._uid or self._active.get() is None:_reject('semantic_transaction_reader_outside_callback')
++  self._check();return json.loads(self._snapshot)
++ def read_for_publication(self,conversation,uid,cid):
++  if (uid,cid)!=(self._uid,self._cid):_reject('semantic_transaction_owner_changed')
++  self._check(conversation);return self(uid)
++ def _transaction_authority(self,transaction):
++  self._check()
++  self._guard(transaction)
++  from ella.services.ai_consent import _is_current_grant
++  user=self._db.collection('users').document(self._uid)
++  state_snapshot=user.get(transaction=transaction,timeout=5,retry=None)
++  state=(state_snapshot.to_dict() or {}).get('ai_consent') if state_snapshot.exists else None
++  receipt_id=str((state or {}).get('receipt_id') or '')
++  receipt_snapshot=user.collection('ai_consent_receipts').document(receipt_id).get(transaction=transaction,timeout=5,retry=None) if receipt_id else None
++  receipt=receipt_snapshot.to_dict() if receipt_snapshot is not None and receipt_snapshot.exists else None
++  if _is_current_grant(self._uid,state,receipt) is not True:_reject('semantic_transaction_consent_changed')
++  return user
++ @contextmanager
++ def accepted_reconciliation_context(self,transaction,conversation):
++  # The writer independently proves an exact accepted request. Its original
++  # replay classifier alone determines whether that postimage is reconcilable.
++  # Retain same-attempt and transaction-time graph/consent fences; only stock
++  # preimage/readset pins are inapplicable to the already accepted postimage.
++  if (conversation.get('id')!=self._cid or conversation.get('uid',self._uid)!=self._uid
++      or conversation.get('status')!='completed'
++      or any(conversation.get(k) for k in ('deleted','discarded','is_locked'))):
++   _reject('semantic_transaction_owner_changed')
++  self._transaction_authority(transaction)
++  yield
++ @contextmanager
++ def transaction_context(self,transaction,conversation):
++  self._check(conversation)
++  if self._active.get() is not None:_reject('semantic_transaction_nested_callback')
++  user=self._transaction_authority(transaction)
++  refs=[user.collection('conversations').document(cid) for cid in self._pins]
++  rows=list(self._db.get_all(refs,transaction=transaction,timeout=8,retry=None))
++  if len(rows)!=len(refs) or {r.id for r in rows}!=set(self._pins):_reject('semantic_transaction_readset_incomplete')
++  for row in rows:
++   _,pin=_pin(row)
++   if pin!=self._pins[row.id]:_reject('semantic_transaction_readset_changed')
++  self._check(conversation);token=self._active.set(object())
++  try:yield
++  finally:self._active.reset(token)
++
++
++def is_prepared_reader(value):return type(value) is PreparedContextReader
++
++def prepare_transaction_context(*,uid,conversation_id,conversation,validate_snapshot,database=None):
++ """Full remote preflight bracketed by identical exact raw document images.
++
++ Caller must supply its EXISTING full validate_snapshot, including receipt,
++ runtime/context/freshness checks. No caller JSON can create this private object.
++ """
++ from ella.services.semantic_captured_context import validation_ticket,current_scope
++ from ella.services.semantic_context_records_v2 import strict_record,_record
++ from database.enrichment_graph_guard import make_cas_guard
++ if database is None:
++  from database._client import db as database
++ ticket=validation_ticket(conversation,uid,conversation_id)
++ if ticket is None:
++  validate_snapshot(conversation);return None  # Legacy path deliberately unchanged.
++ scope,before_stamp=ticket;scope.check();envelope=scope.envelope()
++ expected={r['conversation_id']:{k:v for k,v in r.items() if k!='row_sha256'} for r in envelope['sidecar']['recent_index_records']}
++ cids=tuple(sorted(set(expected)|{conversation_id}));user=database.collection('users').document(uid)
++ def collect():
++  scope.check();refs=[user.collection('conversations').document(cid) for cid in cids]
++  snapshots=list(database.get_all(refs,timeout=8,retry=None))
++  if len(snapshots)!=len(cids) or {s.id for s in snapshots}!=set(cids):_reject('semantic_transaction_readset_incomplete')
++  pins={};total=0
++  for snapshot in snapshots:
++   raw,pin=_pin(snapshot);total+=len(json.dumps(raw,ensure_ascii=False,default=str).encode())
++   if total>MAX_RAW_BYTES:_reject('semantic_transaction_readset_capacity')
++   if snapshot.id in expected:
++    record=_record(uid,snapshot.id,strict_record(raw,uid))
++    metadata={k:v for k,v in record.items() if k!='render_projection'}
++    if metadata!=expected[snapshot.id]:_reject('semantic_transaction_reference_changed')
++   pins[snapshot.id]=pin
++  scope.check();return pins
++ before=collect()
++ # This is the only full host/runtime phase; never entered from a transaction.
++ validate_snapshot(conversation)
++ after=collect()
++ if before!=after:_reject('semantic_transaction_preflight_race')
++ if current_scope(uid,conversation_id) is not scope or scope._validation_stamp.get() is before_stamp:_reject('semantic_transaction_fresh_validation_required')
++ scope.require_policy(conversation)
++ return PreparedContextReader(_ISSUER,scope=scope,database=database,pins=before,graph_guard=make_cas_guard(uid,conversation_id))
+--- a/ella/services/summary_writeback.py
++++ b/ella/services/summary_writeback.py
+@@ -702,6 +702,18 @@
+         # Outside transaction-error fallback: a new closed-graph invocation
+         # cannot treat an unrelated read failure as accepted continuation.
+         await asyncio.to_thread(require_queue_graph, uid, conversation_id)
++    if semantic_publication_authority_guard is not None:
++        # Canonical publication happens after the source CAS. Keep its accepted
++        # receipt pending when consent was revoked before this external effect;
++        # do not try to revalidate the obsolete stock preimage after success.
++        canonical_effect = canonical_writer
++
++        def canonical_writer(owner, *args, **kwargs):
++            from ella.services.ai_consent import assert_current_ai_consent
++            if owner != uid or assert_current_ai_consent(owner) != owner:
++                raise SemanticPublicationRejectedError('semantic_transaction_consent_changed')
++            return canonical_effect(owner, *args, **kwargs)
++
+     sanitized = sanitize_summary_update(title=title, overview=overview, emoji=emoji, category=category)
+     if sanitized.category is not None:
+         try:
+@@ -939,6 +951,37 @@
+             'repair_required': False,
+         }
+ 
++    from ella.services.semantic_transaction_context import is_prepared_reader
++    transaction_context_kwargs = {}
++    if is_prepared_reader(semantic_companion_context_reader):
++
++        def prepared_transaction_context(transaction, current):
++            accepted = current.get(SUMMARY_WRITEBACK_RECEIPT_FIELD) or {}
++            # A same-token CAS may have committed after outside preflight (or
++            # on a prior commit attempt). Delegate ONLY the already-accepted
++            # request to the original replay/postimage classifier below. That
++            # branch returns no NEW update or raises; it cannot fall through.
++            accepted_request = (
++                isinstance(accepted, dict)
++                and current.get('id') == conversation_id
++                and current.get('uid', uid) == uid
++                and current.get('status') == 'completed'
++                and not any(current.get(key) for key in ('deleted', 'discarded', 'is_locked'))
++                and accepted.get('token') == operation_token
++                and accepted.get('status') in {SUMMARY_WRITEBACK_PENDING, SUMMARY_WRITEBACK_COMPLETED}
++                and accepted.get('semantic_publication_receipt_id') == semantic_publication_receipt_id
++                and _receipt_matches_request(accepted,
++                    operation_token=operation_token, payload_sha256=payload_sha256,
++                    source_sha256=expected_canonical_source_sha256, source_version=source_version)
++            )
++            if accepted_request:
++                # Existing build_update still enforces superseded/completed
++                # postimage and pending repair semantics on this same snapshot.
++                return semantic_companion_context_reader.accepted_reconciliation_context(transaction, current)
++            return semantic_companion_context_reader.transaction_context(transaction, current)
++
++        transaction_context_kwargs['transaction_context'] = prepared_transaction_context
++
+     try:
+         if semantic_publication_authority_guard is not None:
+             # Trusted APPLY's synchronous transaction guard revalidates on the
+@@ -951,6 +994,7 @@
+                 build_update,
+                 correction_id=correction_id,
+                 transaction_guard=make_cas_guard(uid, conversation_id),
++                **transaction_context_kwargs,
+             )
+         else:
+             transaction_result = conversations_db.update_conversation_with_builder(

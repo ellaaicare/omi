@@ -1,0 +1,17 @@
+[
+  "semantic_transaction_attempt_changed",
+  "semantic_transaction_consent_changed",
+  "semantic_transaction_fresh_validation_required",
+  "semantic_transaction_nested_callback",
+  "semantic_transaction_owner_changed",
+  "semantic_transaction_preflight_race",
+  "semantic_transaction_reader_construction_forbidden",
+  "semantic_transaction_reader_outside_callback",
+  "semantic_transaction_readset_capacity",
+  "semantic_transaction_readset_changed",
+  "semantic_transaction_readset_incomplete",
+  "semantic_transaction_record_invalid",
+  "semantic_transaction_record_missing",
+  "semantic_transaction_reference_changed",
+  "semantic_transaction_snapshot_stamp_required"
+]

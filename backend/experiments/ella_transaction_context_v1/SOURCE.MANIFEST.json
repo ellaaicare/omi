@@ -1,0 +1,60 @@
+{
+  "source_freeze_sha256": "ffe0112fc2ce40eb0a16c4a480bcf1024be416758b3e6375e5c59e4fdb4f040e",
+  "source_review_sha256": "72f18dbcc8804af7f8cc4f1bac06f335f1cc39450923326047e2d862520e1d4a",
+  "files": {
+    "candidate/database/conversations.py.source": "9bd2877297a8e8e1705de044f5d8a8cfe1bbb78949b0b4fc933d9bb10ffaa8f1",
+    "baseline/database/conversations.py.source": "25aa6d9d0820e0b541a7898f9df3e760d5a4a1c9cf57ab6f7777a2da5bc0bb6a",
+    "candidate/ella/services/semantic_publication.py.source": "3992b86fa9c589fd7b59098d6e5754570b9afff4a037e850d0b2a117c3dc9463",
+    "baseline/ella/services/semantic_publication.py.source": "0e93172f8fd77dbff8ae823a24ce05552226aef8787bb010ad5a76cdae18125d",
+    "candidate/ella/services/semantic_retained_apply.py.source": "54ef251b37b6b6c0a54e4af00b0c3e6bd620c5f17110066ac7e42aeb75509e83",
+    "baseline/ella/services/semantic_retained_apply.py.source": "32e171209ef758105cb8eb78014a14088df71d7626707082b7b29f15fef22f14",
+    "candidate/ella/services/semantic_transaction_context.py.source": "69ffb042b9b8e4d1e3009328b9ef76dbd0ada4d7db64fe3309fafa583d3b98a5",
+    "candidate/ella/services/summary_writeback.py.source": "4d30bb8c560d3c517b9d1524275888adf5b853fd3dd7c250bf8009e5fa1cc72e",
+    "baseline/ella/services/summary_writeback.py.source": "2377762a6c251521cdf81901a9307b33ae61c6de634ec430a2438a214331cae8",
+    "app-tests/test_application_transaction.py.source": "ef59873889b46ec212ebb113a7140780ea45e105dbb048c552a9a4c1dbae439f",
+    "sdk-tests/test_actual_firestore_wrapper.py.source": "f7ce1cac1ee9628af0aba78a556a217ff1f5e5882d3e743502f0227b1f1b1f66",
+    "SOURCE.patch": "4d6e4e4b018718ae00b23df2fd06023d4af5862a04fc4ad27c5299729c3190c9",
+    "diagnostics/causal_diagnostics.py.source": "1ebb854a82c57e7ba9fc0513060355e7aaa5be06fb7fafdae8cfc616cb59a905",
+    "diagnostics/test_transaction_diagnostics.py.source": "2c5c6a257c8b29ff4dd93ccc4a51d2bcbc0b455818ccc659f36a796b04b9f9cc",
+    "diagnostics/ADAPTER.CODES.json": "37df80c0e429ef14e9d55e3ab480d4722e6937b0e11cbf11201ca3fd049a0052"
+  },
+  "dependencies": [
+    {
+      "basename": "enrichment_graph_guard.py",
+      "sha256": "f4cd9cd4c7b37d242c246240cc3b104034168208c3d6ceeaeffb70e533678ba7"
+    },
+    {
+      "basename": "semantic_captured_context.py",
+      "sha256": "cb6776ad1edbfc142e5397296a9201e990fb6a567b1311afc4c73c6349b5a7c4"
+    },
+    {
+      "basename": "semantic_context_records_v2.py",
+      "sha256": "b0ddf7e68b423679d897bbea76bc3292c355a236b10c520669d76a972b6b3eca"
+    },
+    {
+      "basename": "ai_consent.py",
+      "sha256": "5f945292c67e4bb7ecc4e203449c87cdb6b28e1422ecf50ae316962dba60faf7"
+    }
+  ],
+  "effects": {
+    "deployment": false,
+    "model_calls": 0,
+    "live_db_writes": 0
+  },
+  "evidence": {
+    "application_cases": 33,
+    "sdk_cases": 9,
+    "application_receipt_sha256": "7d233042679cc371591023e3a0473f828ba6bd6f97cc475ca302e7a2b42d96d6",
+    "service_python": "3.11.0rc1",
+    "service_firestore_sdk": "2.17.0",
+    "service_sdk_cases_pass": 9,
+    "selected_import_modules_pass": 27,
+    "import_network_attempts": 0,
+    "controller_fault_cases": 17,
+    "controller_review_sha256": "f9f8922287c4acbeec7817f388c82e532ec308191f359ace9b54ebbddf6223a5",
+    "diagnostic_candidate_sha256": "1ebb854a82c57e7ba9fc0513060355e7aaa5be06fb7fafdae8cfc616cb59a905",
+    "diagnostic_tests": 11,
+    "diagnostic_review_sha256": "7ffc77c9c1dcc4186dfebfc7ecbe58617800b0e0771fa708ae7fad7769806b7e",
+    "final_adapter_code_catalog_join": true
+  }
+}
