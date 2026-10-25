@@ -1,0 +1,14 @@
+{
+  "files": {
+    "README.md": "630e8fb1138a4933f1e6193db73694a4e6714e368e618627036e574b1f08e3cb",
+    "SOURCE.FREEZE1.safe.json": "13670039c0c09e8b98f62f728ad20f8da5645a6e2cc5883cac067d2536a2eb26",
+    "SOURCE.FREEZE2.safe.json": "99c15e522d9b69507ab1000d9800aec5d32ab366cd75d8eeab10a90c10c0fffa",
+    "SOURCE.patch": "1b953703ef240ed40e1ee022d3b0d74b3ebd4df14b7c9e552386be2a9c20cb32",
+    "baseline/causal_diagnostics.py": "7dd2607728a5f26cfd8305ff558e7adbf26ddad4cf6e0bd9bb6b71bb96228784",
+    "candidate/causal_diagnostics.py": "a5d13a2656dfbf46210de6761a117cd74229aeec7e8ca1cdb1182ca38e5ae1c7",
+    "tests/test_transaction_diagnostics.py": "4e6dd77e74a9bb704b7f761060adbcc550ce9f33c3d0d7c9f76b987bbd49865f"
+  },
+  "source_candidate_sha256": "a5d13a2656dfbf46210de6761a117cd74229aeec7e8ca1cdb1182ca38e5ae1c7",
+  "deployment": false,
+  "historical_cause_proven": false
+}

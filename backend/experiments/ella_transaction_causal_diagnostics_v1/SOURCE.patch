@@ -1,0 +1,51 @@
+--- baseline/causal_diagnostics.py
++++ candidate/causal_diagnostics.py
+@@ -31,6 +31,16 @@
+         'CompanionContextUnavailable',
+         'CanonicalUserUnconfirmed',
+         'LearningHold',
++        'ConversationSummaryOutcomeUnknownError',
++        'CanonicalSummaryOperationConflictError',
++        'ConcurrentConversationSummaryChangeError',
++        'CanonicalConversationSourceMismatchError',
++        'RetryError',
++        'Aborted',
++        'DeadlineExceeded',
++        'FailedPrecondition',
++        'ServiceUnavailable',
++        'InvalidArgument',
+     }
+ )
+ _FILES = frozenset(
+@@ -47,6 +57,9 @@
+         'semantic_contract_v1.py',
+         'qualification_stock_supervisor.py',
+         'qualification_stock_worker.py',
++        'summary_writeback.py',
++        'semantic_retained_apply.py',
++        'conversations.py',
+     }
+ )
+ _STAGES = frozenset({'normal_enrichment_dispatch', 'stock_worker_execute', 'stock_supervisor'})
+@@ -79,6 +92,10 @@
+         'CompanionContextUnavailable',
+         'CanonicalUserUnconfirmed',
+         'LearningHold',
++        'ConversationSummaryOutcomeUnknownError',
++        'CanonicalSummaryOperationConflictError',
++        'ConcurrentConversationSummaryChangeError',
++        'CanonicalConversationSourceMismatchError',
+     }
+ )
+ _INNER_CODES = _CODES | frozenset(
+@@ -102,6 +119,10 @@
+         'semantic_authority_changed',
+         'semantic_context_changed',
+         'semantic_cancelled_hold',
++        'conversation_summary_outcome_unknown',
++        'canonical_summary_operation_superseded',
++        'canonical_source_changed',
++        'canonical_source_version_changed',
+     }
+ )
+ 
