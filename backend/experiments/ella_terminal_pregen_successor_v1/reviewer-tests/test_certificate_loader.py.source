@@ -1,0 +1,55 @@
+"""Actual certificate loader on disposable synthetic bytes with explicit root-stat/spec leaves.
+No real private certificate or service files read.
+"""
+import ast,copy,hashlib,json,os,stat,sys,tempfile,types,unittest
+from pathlib import Path
+from datetime import datetime
+from unittest.mock import patch
+D=Path(__file__).resolve().parents[1]
+class Cases(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory(dir=D/'evidence');self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name);self.path=self.root/'saved_source_pregen_recovery.expected.json';self.uid=0;self.gid=0;self.mode=0o600;self.links=1
+  cid='00000000-0000-0000-0000-000000000001';jid='hce_'+'1'*64
+  fields={'parent_job_id':jid,'cid':cid,'job_sha256':'a'*64,'tombstone_sha256':'b'*64,'source_created_at':'2026-01-01 00:00:00+00:00','canonical_source_sha256':'c'*64,'source_version':'2026-01-01T00:01:00+00:00','transcript_sha256':'d'*64,'stock_version':'synthetic-stock','stock_content_sha256':'e'*64,'original_semantic_sha256':'f'*64,'reviewed_detachment_sha256':'1'*64,'resource_settlement_receipt_sha256':'2'*64,'original_attempt_sha256':'3'*64,'reviewed_sync_receipts':{'sync_start_receipt_sha256':'4'*64,'sync_completed_receipt_sha256':'5'*64}}
+  self.data={'contract':'ella-terminal-pregen-successor-v1','source_spec_sha256':'6'*64,'owner_sha256':'7'*64,'record':fields};self.spec={'owner_sha256':'7'*64,'records':{cid:{'job_id':jid,'source_created_at':fields['source_created_at'],'transcript_sha256':fields['transcript_sha256'],'stock_version':fields['stock_version']}}}
+  tree=ast.parse((D/'candidate/database/saved_source_pregen_recovery.py').read_text());nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='certificate' or isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in ['PROTOCOL','RECORD_FIELDS'] for t in n.targets)];self.ns={'__file__':str(self.root/'saved_source_pregen_recovery.py'),'datetime':datetime,'sha256':hashlib.sha256}
+  def need(v,c):
+   if not v:raise ValueError(c)
+  def pairs(items):
+   d={}
+   for k,v in items:need(k not in d,'duplicate');d[k]=v
+   return d
+  self.ns.update(need=need,recovery=types.SimpleNamespace(_cohort_pairs=pairs));exec(compile(ast.Module(body=nodes,type_ignores=[]),'actual_certificate','exec'),self.ns)
+  repair=types.ModuleType('database.explicit_saved_backlog_repair');repair.SPEC_SHA256='6'*64;repair.specification=lambda:copy.deepcopy(self.spec);database=types.ModuleType('database');database.explicit_saved_backlog_repair=repair;self.mods=patch.dict(sys.modules,{'database':database,'database.explicit_saved_backlog_repair':repair});self.mods.start();self.addCleanup(self.mods.stop)
+  self.original_fstat=os.fstat;self.original_lstat=Path.lstat;self.write()
+ def write(self,raw=None):
+  raw=raw if raw is not None else json.dumps(self.data).encode();self.path.write_bytes(raw);self.ns['CERTIFICATE_SHA256']=hashlib.sha256(raw).hexdigest()
+ def read(self):
+  def meta(s):
+   v={k:getattr(s,k) for k in ['st_dev','st_ino','st_uid','st_gid','st_nlink','st_mode','st_size','st_mtime_ns','st_ctime_ns']};v.update(st_uid=self.uid,st_gid=self.gid,st_nlink=self.links,st_mode=stat.S_IFREG|self.mode);return types.SimpleNamespace(**v)
+  with patch.object(os,'fstat',lambda fd:meta(self.original_fstat(fd))),patch.object(Path,'lstat',lambda p:meta(self.original_lstat(p))):return self.ns['certificate']()
+ def test_exact_complete_schema_accepts(self):self.assertEqual(self.read(),self.data)
+ def test_unbound_pre_file_open(self):
+  self.ns['CERTIFICATE_SHA256']='UNBOUND'
+  with patch.object(os,'open',side_effect=AssertionError('must not open')):
+   with self.assertRaisesRegex(ValueError,'disabled'):self.read()
+ def test_root_mode_group_and_link_reject(self):
+  for field,value in [('uid',501),('gid',501),('mode',0o644),('links',2)]:
+   old=getattr(self,field);setattr(self,field,value)
+   with self.assertRaisesRegex(ValueError,'metadata'):self.read()
+   setattr(self,field,old)
+ def test_foreign_owner_original_job_source_stock_reject(self):
+  original=copy.deepcopy(self.data)
+  for field in ['parent_job_id','source_created_at','transcript_sha256','stock_version']:
+   self.data=copy.deepcopy(original);self.data['record'][field]='other' if field!='transcript_sha256' else 'a'*64;self.write()
+   with self.assertRaises(Exception):self.read()
+  self.data=copy.deepcopy(original);self.data['owner_sha256']='8'*64;self.write()
+  with self.assertRaisesRegex(ValueError,'owner'):self.read()
+ def test_null_sync_bad_digest_duplicate_reject(self):
+  original=copy.deepcopy(self.data)
+  for val in [None,{}, {'sync_start_receipt_sha256':'bad','sync_completed_receipt_sha256':'a'*64}]:
+   self.data=copy.deepcopy(original);self.data['record']['reviewed_sync_receipts']=val;self.write()
+   with self.assertRaises(ValueError):self.read()
+  self.write(b'{"contract":"a","contract":"b"}')
+  with self.assertRaisesRegex(ValueError,'duplicate'):self.read()
+if __name__=='__main__':unittest.main()

@@ -1,0 +1,153 @@
+"""Actual new admission + existing claim/begin/graph/callback/namespace selection.
+Serialized fake Firestore; source decryption and consent predicate are explicit
+existing harness leaves. No provider, real DB, credentials or live config.
+"""
+import ast,copy,hashlib,importlib.util,pathlib,sys,unittest
+W=pathlib.Path(__file__).resolve().parents[3];ROOT=W/'quarantine-recovery-v1/no-completion-successor-v1'
+def load(name,path):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+M=load('pregen_existing_integration',W/'quarantine-recovery-v1/integration-v3/tests/test_admission_worker.py')
+class Cases(unittest.TestCase):
+ @classmethod
+ def setUpClass(cls):
+  M.Cases.setUpClass.__func__(cls)
+  exec(compile((ROOT/'candidate/database/saved_source_recovery.py').read_text(),'new_recovery','exec'),cls.recovery.__dict__)
+  cls.pregen=load('database.saved_source_pregen_recovery',ROOT/'candidate/database/saved_source_pregen_recovery.py');cls.original_certificate=staticmethod(cls.pregen.certificate)
+ @classmethod
+ def tearDownClass(cls):M.Cases.tearDownClass.__func__(cls)
+ def setUp(self):
+  M.Cases.setUp(self)
+  for key in self.ns.FIELDS:self.doc.pop(key,None)
+  self.doc['semantic_retained_completion_jobs_v1']={'old-start':{'status':'started','client':self.parent['client_interaction_id'],'transcript':self.parent['transcript_sha256'],'runtime_binding_id':'synthetic-old-binding','canonical_user':{'confirmed':True},'learning':{'status':'no_learning','reason':'synthetic_disabled'}}}
+  self.parent['operation']={'lease_token':'old-lease'};self.parent['lease_token']='old-lease';self.parent[self.h.lifecycle.TAG]={'route_sha256':self.proof.image_sha256}
+  attempt=self.h.isolation.attempt(self.parent);fence=self.h.fence.reserve(attempt,claims_open=True,previously_quarantined=False);fence=self.h.fence.begin(fence,attempt,claims_open=True);self.parent[self.h.isolation.FENCE_FIELD]=self.h.fence.finish(fence,attempt,outcome='unknown_quarantined');self.parent['lease_token']=None
+  self.db.put((self.h.activation.JOBS,'parent-Q'),self.parent);self.db.put(self.key,self.doc)
+  source=self.can.canonical_source_from_conversation(uid='u',conversation_id='c',conversation=self.doc)
+  self.record={'parent_job_id':'parent-Q','cid':'c','job_sha256':self.h.lifecycle.digest(self.parent),'tombstone_sha256':self.h.lifecycle.digest(self.tomb),'source_created_at':str(self.db.collection('users').document('u').collection('conversations').document('c').get().create_time),'canonical_source_sha256':self.can.canonical_source_sha256(source),'source_version':str(source['finished_at']),'transcript_sha256':self.parent['transcript_sha256'],'stock_version':'stock','stock_content_sha256':self.expected['stock_content'],'original_semantic_sha256':self.ns.digest({k:self.doc.get(k) for k in self.ns.FIELDS}),'resource_settlement_receipt_sha256':'9'*64,'original_attempt_sha256':self.ns.digest(self.h.fence._key(attempt)),'reviewed_detachment_sha256':'f'*64,'reviewed_sync_receipts':{'sync_start_receipt_sha256':'a'*64,'sync_completed_receipt_sha256':'b'*64}}
+  self.cert={'contract':self.pregen.PROTOCOL,'owner_sha256':hashlib.sha256(b'u').hexdigest(),'record':self.record}
+  self.pregen.certificate=lambda:copy.deepcopy(self.cert)
+  self.expected.update(source=self.h.lifecycle.digest(self.doc),parent_job=self.record['job_sha256'])
+ def admit(self):return self.pregen.admit_pregen(self.db.transaction(),self.db,proof=self.proof,parent_job_id='parent-Q',expected=self.expected,reviewed_detachment_sha256='f'*64,protocol_revision=self.pregen.PROTOCOL,now=M.H.h.NOW,reviewed_sync_receipts=self.record['reviewed_sync_receipts'])
+ def mutate(self,fn):
+  fn();self.db.put(self.key,self.doc);self.expected['source']=self.h.lifecycle.digest(self.doc)
+ def start(self):
+  result=self.admit();job=self.db.rows[(self.h.activation.JOBS,result['recovery_job_id'])];self.h.issue(job);claimed=self.h.claim(job);self.assertIsNotNone(claimed);self.assertTrue(self.h.begin(claimed));return self.db.rows[(self.h.activation.JOBS,job['job_id'])]
+ def test_actual_admit_claim_begin_graph_callback_namespace(self):
+  before=copy.deepcopy(self.db.rows);job=self.start();self.h.graph.require_in_transaction(self.db.transaction(),self.db,job,'u','c');value=self.r.current_host_context(self.db,'u','c');self.assertEqual(value['job_id'],job['job_id']);self.assertEqual(value['sync_completed_receipt_sha256'],'b'*64)
+  key=self.h.fence._key(self.h.isolation.attempt(job));raw=self.db.rows[self.key];view=self.ns.view(raw,admission=job[self.r.TAG],worker_job=job,attempt_key=key)
+  self.assertNotIn('semantic_retained_completion_jobs_v1',view)
+  update=self.ns.semantic_update(raw,{'semantic_producer_executions_v1':{'new':'fictional'}},admission=job[self.r.TAG],worker_job=job,attempt_key=key);self.assertEqual(len(update),1)
+  self.assertEqual(self.db.rows[(self.h.activation.JOBS,'parent-Q')],before[(self.h.activation.JOBS,'parent-Q')]);self.assertEqual(self.db.rows[self.h.isolation.tombstone_ref(self.db,self.parent).key],self.tomb)
+  for f in self.ns.FIELDS:self.assertEqual(raw.get(f),self.doc.get(f))
+  self.assertEqual(raw['transcript_segments'],self.doc['transcript_segments']);self.assertEqual(raw['summary_versions'],self.doc['summary_versions'])
+ def test_late_old_callback_never_joins_successor(self):
+  self.start();before=copy.deepcopy(self.db.rows)
+  with self.assertRaises(self.h.fence.FenceRejected):self.h.graph.require_in_transaction(self.db.transaction(),self.db,self.parent,'u','c')
+  self.assertEqual(self.db.rows,before)
+ def test_duplicate_no_rearm_and_stock_lock(self):
+  first=self.admit();before=copy.deepcopy(self.db.rows)
+  with self.assertRaises(ValueError):self.admit()
+  self.assertEqual(self.db.rows,before)
+  self.expected['source']=self.h.lifecycle.digest(self.db.rows[self.key])
+  with self.assertRaisesRegex(ValueError,'source_recovery_already_exists'):self.admit()
+ def test_idempotent_identity_without_second_write(self):
+  self.assertEqual(self.ns.identity(uid='u',cid='c',parent_job_id='p',parent_job_sha256='a'*64,parent_tombstone_sha256='b'*64,transcript_sha256='c'*64,stock_version='s',stock_content_sha256='d'*64,canonical_source_sha256='e'*64,source_version='v',account_epoch='a',route_sha256='f'*64,policy_epoch='p',protocol_revision=self.pregen.PROTOCOL),self.ns.identity(uid='u',cid='c',parent_job_id='p',parent_job_sha256='a'*64,parent_tombstone_sha256='b'*64,transcript_sha256='c'*64,stock_version='s',stock_content_sha256='d'*64,canonical_source_sha256='e'*64,source_version='v',account_epoch='a',route_sha256='f'*64,policy_epoch='p',protocol_revision=self.pregen.PROTOCOL))
+ def test_all_suspicious_ledger_presence_rejects_even_null_empty(self):
+  for field in self.pregen.ABSENT_FIELDS:
+   for value in [None,{}, {'op':{'status':'started'}},{'op':{'status':'completed'}}]:
+    with self.subTest(field=field,value=value):
+     raw=copy.deepcopy(self.doc);raw[field]=value
+     with self.assertRaisesRegex(ValueError,'prior_or_unknown_effect'):self.pregen.need_pregen_source(raw,self.parent,self.record)
+ def test_retained_ambiguity_result_proposal_or_completed_rejects(self):
+  for change in [lambda e:e.update(status='completed'),lambda e:e.update(result={}),lambda e:e.update(proposal={}),lambda e:e.update(status='unknown')]:
+   raw=copy.deepcopy(self.doc);change(raw['semantic_retained_completion_jobs_v1']['old-start']);record={**self.record,'original_semantic_sha256':self.ns.digest({k:raw.get(k) for k in self.ns.FIELDS})}
+   with self.assertRaises(ValueError):self.pregen.need_pregen_source(raw,self.parent,record)
+  for entries in [None,{}, {'a':{},'b':{}}]:
+   raw=copy.deepcopy(self.doc);raw['semantic_retained_completion_jobs_v1']=entries;record={**self.record,'original_semantic_sha256':self.ns.digest({k:raw.get(k) for k in self.ns.FIELDS})}
+   with self.assertRaisesRegex(ValueError,'retained_ambiguous'):self.pregen.need_pregen_source(raw,self.parent,record)
+ def test_pending_or_completed_accepted_receipt_always_holds(self):
+  for value in [None,{}, {'status':'pending_reconciliation'},{'status':'completed'}]:
+   raw={**self.doc,'summary_writeback_receipt':value}
+   with self.assertRaises(ValueError):self.pregen.need_pregen_source(raw,self.parent,self.record)
+ def test_changed_source_stock_transcript_deleted(self):
+  for change in [lambda d:d.update(uid='foreign'),lambda d:d.update(deleted=True),lambda d:d.update(active_summary_version_id='new'),lambda d:d['transcript_segments'][0].update(text='edited'),lambda d:d['summary_versions'][0].update(overview='edited')]:
+   old=copy.deepcopy(self.doc);self.mutate(lambda:change(self.doc))
+   with self.assertRaises(ValueError):self.admit()
+   self.doc=old;self.db.put(self.key,self.doc);self.expected['source']=self.h.lifecycle.digest(self.doc)
+ def test_revocation_at_admission_and_after_begin(self):
+  self.db.put(('users','u'),{'ai_consent':{'approved':False}})
+  with self.assertRaises(ValueError):self.admit()
+  self.db.put(('users','u'),{'ai_consent':{'approved':True}});job=self.start();self.db.put(('users','u'),{'ai_consent':{'approved':False}})
+  with self.assertRaises(self.h.fence.FenceRejected):self.h.graph.require_in_transaction(self.db.transaction(),self.db,job,'u','c')
+ def test_foreign_route_or_owner_rejects(self):
+  self.proof=self.h.lifecycle.VerifiedRoute('foreign','a'*64,'b'*64,'c'*64)
+  with self.assertRaises(ValueError):self.admit()
+ def test_unreviewed_or_changed_certificate_rejects(self):
+  self.pregen.certificate=self.original_certificate
+  with self.assertRaisesRegex(ValueError,'pregen_certificate_disabled'):self.admit()
+ def test_closed_fence_required(self):
+  self.parent[self.h.isolation.FENCE_FIELD]['phase']='started';self.parent[self.h.isolation.FENCE_FIELD]['outcome']=None;self.db.put((self.h.activation.JOBS,'parent-Q'),self.parent);self.record['job_sha256']=self.h.lifecycle.digest(self.parent);self.expected['parent_job']=self.record['job_sha256']
+  with self.assertRaisesRegex(ValueError,'pregen_attempt_not_closed'):self.admit()
+ def test_missing_sync_or_review_refuses(self):
+  with self.assertRaisesRegex(ValueError,'pregen_review_changed'):self.pregen.admit_pregen(self.db.transaction(),self.db,proof=self.proof,parent_job_id='parent-Q',expected=self.expected,reviewed_detachment_sha256='0'*64,protocol_revision=self.pregen.PROTOCOL,now=M.H.h.NOW,reviewed_sync_receipts=self.record['reviewed_sync_receipts'])
+ def test_unknown_commit_never_creates_second_successor(self):
+  self.db.commit_unknown=True
+  with self.assertRaises(TimeoutError):self.admit()
+  before=copy.deepcopy(self.db.rows)
+  successors=[v for k,v in self.db.rows.items() if k[0]==self.h.activation.JOBS and str(v.get('job_id','')).startswith('hcer_')]
+  self.assertEqual(len(successors),1)
+  with self.assertRaises(ValueError):self.admit()
+  self.assertEqual(self.db.rows,before);self.assertEqual(self.db.rows[(self.h.activation.JOBS,'parent-Q')],self.parent)
+ def test_transaction_conflict_has_no_partial_namespace_or_job(self):
+  tx=self.db.transaction();original_commit=tx.commit
+  def conflict():
+   changed=copy.deepcopy(self.db.rows[self.key]);changed['discarded']=True;self.db.put(self.key,changed);original_commit()
+  tx.commit=conflict
+  with self.assertRaises(Exception):self.pregen.admit_pregen(tx,self.db,proof=self.proof,parent_job_id='parent-Q',expected=self.expected,reviewed_detachment_sha256='f'*64,protocol_revision=self.pregen.PROTOCOL,now=M.H.h.NOW,reviewed_sync_receipts=self.record['reviewed_sync_receipts'])
+  self.assertNotIn(self.ns.ROOT,self.db.rows[self.key]);self.assertFalse(any(str(v.get('job_id','')).startswith('hcer_') for v in self.db.rows.values()))
+  with self.assertRaises(ValueError):self.admit()
+ def test_operation_token_absent_or_changed_or_live_top_lease_rejects(self):
+  original=copy.deepcopy(self.parent)
+  for change in [lambda p:p.pop('operation'),lambda p:p['operation'].update(lease_token='foreign'),lambda p:p.update(lease_token='live-top')]:
+   self.parent=copy.deepcopy(original);change(self.parent);self.db.put((self.h.activation.JOBS,'parent-Q'),self.parent);self.record['job_sha256']=self.h.lifecycle.digest(self.parent);self.expected['parent_job']=self.record['job_sha256']
+   with self.assertRaises(Exception):self.admit()
+ def test_resource_hold_or_consumed_permit_rejects_before_write(self):
+  original=self.h.activation.read_policy(self.db)
+  for key,value in [(self.h.activation.SINGLE_CLAIM,{'state':'started'}),('queue_unresolved_resources',[{'uid':'u','job_id':'parent-Q'}])]:
+   policy=copy.deepcopy(original);policy[key]=value;self.db.put(self.h.activation.reference(self.db).key,policy);self.expected['policy']=self.h.lifecycle.digest(policy);before=copy.deepcopy(self.db.rows)
+   with self.assertRaises(ValueError):self.admit()
+   self.assertEqual(self.db.rows,before)
+ def test_postadmission_source_change_rejects_real_callback(self):
+  self.start();changed=self.db.rows[self.key];changed['transcript_segments'][0]['text']='edited';self.db.put(self.key,changed)
+  with self.assertRaises(Exception):self.r.current_host_context(self.db,'u','c')
+ def test_postadmission_owner_route_epoch_change_rejects_real_callback(self):
+  self.start();account=self.h.account('u');account['epoch']='foreign';self.db.put(self.h.lifecycle.account_ref(self.db,'u').key,account)
+  with self.assertRaises(Exception):self.r.current_host_context(self.db,'u','c')
+ def test_ordinary_claim_works_while_pregen_certificate_unavailable(self):
+  self.pregen.certificate=self.original_certificate
+  self.h.setUp();a,b,c=self.h.setup_jobs();self.h.issue(a);claimed=self.h.claim(a);self.assertIsNotNone(claimed);self.assertTrue(self.h.begin(claimed));self.h.graph.require_in_transaction(self.h.db.transaction(),self.h.db,claimed,a['uid'],a['conversation_id'])
+ def test_existing_completed_admission_remains_distinct(self):
+  source=self.can.canonical_source_from_conversation(uid='u',conversation_id='c',conversation=self.doc)
+  doc=copy.deepcopy(self.doc);doc.pop('semantic_retained_completion_jobs_v1');doc['semantic_producer_executions_v1']={'completed':{'status':'completed','result':{'synthetic':'immutable'},'runtime_interaction_id':'event','canonical_assistant_event_id':'assistant','binding':{'uid':'u','conversation_id':'c','source_sha256':self.can.canonical_source_sha256(source),'source_version':str(source['finished_at']),'transcript_sha256':self.parent['transcript_sha256'],'active_summary_version_id':'stock'}}}
+  self.db.put(self.key,doc);self.expected['source']=self.h.lifecycle.digest(doc)
+  self.r.approved_parents=lambda:{'parent-Q':{'cid':'c','job_sha256':self.record['job_sha256'],'source_created_at':self.record['source_created_at']}}
+  self.pregen.certificate=self.original_certificate
+  result=self.r.admit(self.db.transaction(),self.db,proof=self.proof,parent_job_id='parent-Q',expected=self.expected,reviewed_detachment_sha256='f'*64,protocol_revision='existing-completed-protocol',now=M.H.h.NOW,reviewed_sync_receipts=self.record['reviewed_sync_receipts'])
+  self.assertTrue(result['parent_preserved'])
+ def test_unchanged_resource_settlement_once_then_repeat_rejects(self):
+  self.h.setUp();h=self.h;account=h.owner('one');candidate=h.job('one');policy=h.activation.read_policy(h.db);policy['queue_isolation']['claims_open']=False;h.db.put(h.activation.reference(h.db).key,policy);h.issue(candidate);job=h.claim(candidate);self.assertTrue(h.begin(job));h.finish(job)
+  tomb=h.isolation.tombstone_ref(h.db,job).get().to_dict();tenant=h.activation.tenant_ref(h.db,'one').get().to_dict();current=h.db.rows[(h.activation.JOBS,job['job_id'])]
+  # Execute EXACT unchanged reviewed helper source on genuine existing harness.
+  source=W/'control/queue_policy_transition.py';self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(),'da515ebefebf1dd9d220a8f2e40b8be0e3eacfcc6611cb797f59698ebf023101')
+  exec(compile(source.read_text(),str(source),'exec'),h.transition.__dict__)
+  proof=h.transition.ReviewedResourceSettlement(h.lifecycle.VerifiedRoute('one',account['route_sha256'],account['account_owner_sha256'],account['profile_sha256']),job['job_id'],h.lifecycle.digest(tomb),h.lifecycle.digest(tenant),'f'*64,h.lifecycle.digest(account),h.lifecycle.digest(current))
+  before=copy.deepcopy(current);result=h.transition.settle_resource(h.db.transaction(),h.db,proof=proof,expected_policy_sha256=h.lifecycle.digest(h.activation.read_policy(h.db)),now=M.H.h.NOW)
+  self.assertEqual(result['job_writes'],0);self.assertEqual(h.db.rows[(h.activation.JOBS,job['job_id'])],before);after=copy.deepcopy(h.db.rows)
+  with self.assertRaises(Exception):h.transition.settle_resource(h.db.transaction(),h.db,proof=proof,expected_policy_sha256=h.lifecycle.digest(h.activation.read_policy(h.db)),now=M.H.h.NOW)
+  self.assertEqual(h.db.rows,after)
+ def test_original_completed_admission_function_unchanged(self):
+  original=ast.parse((W/'quarantine-recovery-v1/integration-v3/candidate/database/saved_source_recovery.py').read_text());candidate=ast.parse((ROOT/'candidate/database/saved_source_recovery.py').read_text())
+  for name in ['admit','approved_parents','eligible','tag_of','_current_host_context']:
+   get=lambda t:next(n for n in t.body if isinstance(n,ast.FunctionDef) and n.name==name)
+   self.assertEqual(ast.dump(get(original),include_attributes=False),ast.dump(get(candidate),include_attributes=False))
+if __name__=='__main__':unittest.main()

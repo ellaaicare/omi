@@ -1,0 +1,112 @@
+"""Disabled terminal-PREGEN successor admission; never a completed-result replay.
+Only a source-pinned private reviewed certificate enables this separate branch.
+No import I/O, endpoint, credential access, model call or ordinary-path change.
+"""
+from datetime import datetime,timezone
+from hashlib import sha256
+from google.cloud.firestore_v1 import transactional
+from database import normal_enrichment_activation as activation,normal_account_lifecycle as lifecycle,enrichment_job_isolation as isolation
+from database import saved_source_recovery as recovery
+from ella.services import semantic_recovery_namespace as ns
+from database.saved_source_recovery import need,source_ref,source_lock_ref,marker_ref,_parent,_source,_current_consent,TAG
+PROTOCOL='ella-terminal-pregen-successor-v1'
+CERTIFICATE_SHA256='UNBOUND'
+ABSENT_FIELDS=frozenset({'semantic_producer_executions_v1','semantic_learning_operations_v3','semantic_learning_receipts_v3','semantic_publication_operations','semantic_publication_receipts','semantic_learning_policy_v3','semantic_publication_policy'})
+RECORD_FIELDS=frozenset({'parent_job_id','cid','job_sha256','tombstone_sha256','source_created_at','canonical_source_sha256','source_version','transcript_sha256','stock_version','stock_content_sha256','original_semantic_sha256','reviewed_detachment_sha256','reviewed_sync_receipts','resource_settlement_receipt_sha256','original_attempt_sha256'})
+
+def certificate():
+ """Lazy fixed sibling root0600 certificate. UNBOUND rejects before file access."""
+ import os,stat,json,re
+ from pathlib import Path
+ from uuid import UUID
+ from database import explicit_saved_backlog_repair as repair
+ need(type(CERTIFICATE_SHA256) is str and re.fullmatch('[0-9a-f]{64}',CERTIFICATE_SHA256),'pregen_certificate_disabled')
+ path=Path(__file__).with_name('saved_source_pregen_recovery.expected.json')
+ fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+ try:
+  a=os.fstat(fd);signature=lambda v:(v.st_dev,v.st_ino,v.st_uid,v.st_gid,v.st_nlink,stat.S_IMODE(v.st_mode),v.st_size,v.st_mtime_ns,v.st_ctime_ns)
+  need(stat.S_ISREG(a.st_mode) and a.st_uid==0 and a.st_gid==0 and a.st_nlink==1 and stat.S_IMODE(a.st_mode)==0o600 and 0<a.st_size<=16384,'pregen_certificate_metadata')
+  raw=os.read(fd,16385);need(len(raw)<=16384 and signature(a)==signature(os.fstat(fd))==signature(path.lstat()),'pregen_certificate_changed')
+ finally:os.close(fd)
+ need(sha256(raw).hexdigest()==CERTIFICATE_SHA256,'pregen_certificate_digest_changed')
+ data=json.loads(raw,object_pairs_hook=recovery._cohort_pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError('recovery_pregen_certificate_nonfinite')))
+ need(type(data) is dict and set(data)=={'contract','source_spec_sha256','owner_sha256','record'} and data['contract']==PROTOCOL,'pregen_certificate_schema')
+ need(data['source_spec_sha256']==repair.SPEC_SHA256,'pregen_original_scope_changed')
+ spec=repair.specification();need(data['owner_sha256']==spec['owner_sha256'],'pregen_owner_changed')
+ record=data['record'];need(type(record) is dict and set(record)==RECORD_FIELDS,'pregen_record_schema')
+ need(all(type(v) is str and 0<len(v)<=512 for k,v in record.items() if k!='reviewed_sync_receipts'),'pregen_record_shape')
+ for k in ['job_sha256','tombstone_sha256','canonical_source_sha256','transcript_sha256','stock_content_sha256','original_semantic_sha256','reviewed_detachment_sha256','resource_settlement_receipt_sha256','original_attempt_sha256']:need(re.fullmatch('[0-9a-f]{64}',record[k]),'pregen_record_digest')
+ need(re.fullmatch('hce_[0-9a-f]{64}',record['parent_job_id']) and str(UUID(record['cid']))==record['cid'],'pregen_record_identity')
+ original=spec['records'].get(record['cid']);need(type(original) is dict and original['job_id']==record['parent_job_id'] and original['source_created_at']==record['source_created_at'] and original['transcript_sha256']==record['transcript_sha256'] and original['stock_version']==record['stock_version'],'pregen_original_record_changed')
+ for k in ['source_created_at','source_version']:need(datetime.fromisoformat(record[k]).utcoffset() is not None,'pregen_stamp')
+ refs=record['reviewed_sync_receipts'];need(type(refs) is dict and set(refs)=={'sync_start_receipt_sha256','sync_completed_receipt_sha256'} and all(type(v) is str and re.fullmatch('[0-9a-f]{64}',v) for v in refs.values()),'pregen_sync_proof')
+ return data
+
+def approved_parent(parent_job_id):
+ record=certificate()['record'];need(parent_job_id==record['parent_job_id'],'pregen_parent_not_reviewed')
+ return {'cid':record['cid'],'job_sha256':record['job_sha256'],'source_created_at':record['source_created_at']}
+
+def need_pregen_source(raw,parent,record):
+ need(type(raw) is dict and not any(k in raw for k in ABSENT_FIELDS),'pregen_prior_or_unknown_effect')
+ need('summary_writeback_receipt' not in raw,'pregen_accepted_effect')
+ need(ns.digest({k:raw.get(k) for k in ns.FIELDS})==record['original_semantic_sha256'],'pregen_semantic_preimage_changed')
+ entries=raw.get('semantic_retained_completion_jobs_v1');need(type(entries) is dict and len(entries)==1,'pregen_retained_ambiguous')
+ entry=next(iter(entries.values()))
+ need(type(entry) is dict and set(entry)=={'status','client','transcript','runtime_binding_id','canonical_user','learning'} and entry['status']=='started','pregen_retained_not_before_generation')
+ need(entry['client']==parent['client_interaction_id'] and entry['transcript']==parent['transcript_sha256'] and type(entry['runtime_binding_id']) is str and bool(entry['runtime_binding_id']),'pregen_retained_identity_changed')
+ need(type(entry['canonical_user']) is dict and entry['canonical_user'].get('confirmed') is True,'pregen_canonical_user_unconfirmed')
+ learning=entry['learning'];need(type(learning) is dict and set(learning)=={'status','reason'} and learning.get('status')=='no_learning' and type(learning.get('reason')) is str and 0<len(learning['reason'])<=256,'pregen_learning_uncertain')
+
+@transactional
+def admit_pregen(tx,db,*,proof,parent_job_id,expected,reviewed_detachment_sha256,protocol_revision,now,reviewed_sync_receipts=None):
+ """Exact reviewed CAS creates one new job/admission/semantic namespace only.
+ expected pins are source-review-bound operator inputs, not HTTP authority.
+ """
+ from database.conversations import _prepare_conversation_for_read
+ from ella.services.canonical_summary_source import canonical_source_from_conversation,canonical_source_sha256
+ from models.hermes_cloud_enrichment_contract import transcript_source
+ need(type(proof) is lifecycle.VerifiedRoute,'verified_original_route_required')
+ need(type(reviewed_detachment_sha256) is str and len(reviewed_detachment_sha256)==64 and all(c in '0123456789abcdef' for c in reviewed_detachment_sha256),'reviewed_detachment_required')
+ need(type(reviewed_sync_receipts) is dict and set(reviewed_sync_receipts)=={'sync_start_receipt_sha256','sync_completed_receipt_sha256'} and all(type(v) is str and len(v)==64 and all(c in '0123456789abcdef' for c in v) for v in reviewed_sync_receipts.values()),'reviewed_completed_sync_required')
+ need(protocol_revision==PROTOCOL,'pregen_protocol_required')
+ cert=certificate();pin=approved_parent(parent_job_id);uid=proof.uid;cid=pin['cid']
+ need(sha256(uid.encode()).hexdigest()==cert['owner_sha256'],'pregen_owner_changed')
+ need(reviewed_detachment_sha256==cert['record']['reviewed_detachment_sha256'] and reviewed_sync_receipts==cert['record']['reviewed_sync_receipts'],'pregen_review_changed')
+ ps=activation.reference(db).get(transaction=tx,timeout=5,retry=None);policy=ps.to_dict() if ps.exists else {}
+ account=lifecycle.account_ref(db,uid).get(transaction=tx,timeout=5,retry=None).to_dict() or {};tenant=activation.tenant_ref(db,uid).get(transaction=tx,timeout=5,retry=None).to_dict() or {}
+ need(all(lifecycle.digest(v)==expected[k] for k,v in [('policy',policy),('account',account),('tenant',tenant)]),'processing_preimage_changed')
+ need(lifecycle.valid_policy(policy,now) and policy['version']==4 and not any(v.get('uid')==uid for v in policy['active']) and not any(v.get('uid')==uid for v in policy['queue_unresolved_resources']) and not policy['queue_isolation']['claims_open'] and activation.SINGLE_CLAIM not in policy,'processing_not_idle_for_admission')
+ need(account.get('uid')==uid and account.get('state')=='active' and account['route_sha256']==proof.image_sha256 and account['account_owner_sha256']==proof.account_owner_sha256 and account['profile_sha256']==proof.profile_sha256,'original_account_changed')
+ need(lifecycle.read_account(tx,db,uid,tenant,now,policy=policy) is not None and not tenant.get('active_job_id') and not tenant.get('queue_resource_hold'),'current_account_unavailable')
+ source=source_ref(db,uid,cid).get(transaction=tx,timeout=5,retry=None);raw=source.to_dict() if source.exists else {};need(source.exists and str(source.create_time)==pin['source_created_at'],'source_recreated');need(lifecycle.digest(raw)==expected['source'],'source_preimage_changed');doc=_prepare_conversation_for_read(raw,uid) if source.exists else {}
+ need(doc.get('uid')==uid and doc.get('id')==cid and not doc.get('summary_writeback_receipt'),'accepted_effects_hold')
+ parent=db.collection(activation.JOBS).document(parent_job_id).get(transaction=tx,timeout=5,retry=None).to_dict() or {};need(lifecycle.digest(parent)==pin['job_sha256']==expected['parent_job'],'parent_changed')
+ tomb=isolation.tombstone_ref(db,parent).get(transaction=tx,timeout=5,retry=None).to_dict() or {};need(bool(tomb) and lifecycle.digest(tomb)==expected['parent_tombstone'],'parent_tombstone_changed')
+ need(parent.get('uid')==uid and parent.get('conversation_id')==cid and parent.get('status')=='quarantined' and parent.get('dispatch_state')=='unknown_quarantined','parent_not_quarantined')
+ need_pregen_source(raw,parent,cert['record'])
+ from database import enrichment_attempt_fence as fence
+ operation=parent.get('operation');token=operation.get('lease_token') if type(operation) is dict else None
+ need(parent.get('lease_token') is None and type(token) is str and bool(token),'pregen_terminal_operation_token_required')
+ prior=isolation.attempt(dict(parent,lease_token=token));fence._require(parent.get(isolation.FENCE_FIELD),prior)
+ need(ns.digest(fence._key(prior))==cert['record']['original_attempt_sha256'],'pregen_original_attempt_changed')
+ need(parent[isolation.FENCE_FIELD]['phase']=='closed' and parent[isolation.FENCE_FIELD]['outcome']=='unknown_quarantined','pregen_attempt_not_closed')
+ source_image=canonical_source_from_conversation(uid=uid,conversation_id=cid,conversation=doc);source_sha=canonical_source_sha256(source_image);source_version=str(source_image.get('finished_at') or source_image.get('started_at') or '')
+ transcript=transcript_source(doc)[1];need(transcript==parent['transcript_sha256']==cert['record']['transcript_sha256'],'transcript_changed')
+ need(source_sha==cert['record']['canonical_source_sha256'] and source_version==cert['record']['source_version'],'pregen_canonical_source_changed')
+ need(lifecycle.digest(tomb)==cert['record']['tombstone_sha256'],'pregen_tombstone_changed')
+ stock_id=doc.get('active_summary_version_id');stock=[v for v in doc.get('summary_versions',[]) if type(v) is dict and v.get('id')==stock_id]
+ need(len(stock)==1 and stock[0].get('is_active') is True and stock[0].get('source')=='omi' and stock[0].get('kind')=='generated','not_generic_stock')
+ stock_sha=ns.digest({k:v for k,v in stock[0].items() if k!='is_active'});need(stock_sha==expected['stock_content']==cert['record']['stock_content_sha256'] and stock_id==cert['record']['stock_version'],'stock_changed')
+ tag=ns.identity(uid=uid,cid=cid,parent_job_id=parent_job_id,parent_job_sha256=pin['job_sha256'],parent_tombstone_sha256=expected['parent_tombstone'],transcript_sha256=transcript,stock_version=stock_id,stock_content_sha256=stock_sha,canonical_source_sha256=source_sha,source_version=source_version,account_epoch=account['epoch'],route_sha256=account['route_sha256'],policy_epoch=policy['epoch'],protocol_revision=protocol_revision)
+ _parent(tx,db,tag);_source(tx,db,tag,allow_accepted=False);_current_consent(tx,db,uid)
+ jr=db.collection(activation.JOBS).document(tag['job_id']);mr=marker_ref(db,tag);lock=source_lock_ref(db,tag)
+ need(not lock.get(transaction=tx,timeout=5,retry=None).exists,'source_recovery_already_exists_no_duplicate')
+ need(not jr.get(transaction=tx,timeout=5,retry=None).exists and not mr.get(transaction=tx,timeout=5,retry=None).exists,'already_admitted_no_rearm')
+ record=ns.fresh_namespace(raw,admission=tag)
+ job={k:parent[k] for k in ['uid','conversation_id','client_interaction_id','transcript_sha256','policy_version','trace_id'] if k in parent}
+ job.update(job_id=tag['job_id'],status='pending',dispatch_state='never_started',attempt_count=0,lease_token=None,lease_expires_at=None,account_routing_contract=1,admission_epoch=policy['epoch'],source_completed_at=parent['source_completed_at'],created_at=now,updated_at=now,next_attempt_at=now)
+ job[TAG]=tag
+ marker={'contract':ns.CONTRACT,'identity':tag,'job_id':tag['job_id'],'state':'prepared','source_created_at':str(source.create_time),'reviewed_detachment_sha256':reviewed_detachment_sha256,'reviewed_sync_receipts':dict(reviewed_sync_receipts),'admitted_at':now,'original_semantic_sha256':ns.digest({k:raw.get(k) for k in ns.FIELDS})}
+ tx.create(jr,job);tx.create(mr,marker);tx.create(lock,{'identity':tag,'job_id':job['job_id']});tx.update(source.reference,{ns.ROOT+'.'+tag['recovery_id']:record})
+ return {'recovery_job_id':tag['job_id'],'recovery_id':tag['recovery_id'],'parent_preserved':True,'claims_open':False,'provider_calls':0}
+

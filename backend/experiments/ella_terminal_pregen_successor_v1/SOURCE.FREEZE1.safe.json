@@ -1,0 +1,57 @@
+{
+  "state": "OFFLINE_PREGEN_SUCCESSOR_CANDIDATE_FROZEN_DISABLED_PENDING_INDEPENDENT_REVIEW",
+  "observed_at": "2026-10-25T14:15:35.182983+00:00",
+  "pins": {
+    "quarantine-recovery-v1/no-completion-successor-v1/candidate/database/saved_source_recovery.py": "98c533d96441684e187b3248744b5352c2f5d0d9bee7620f20dd2a9a868867f2",
+    "quarantine-recovery-v1/no-completion-successor-v1/candidate/database/saved_source_pregen_recovery.py": "97605ed07bb90ce3d4d9dfc421dc3bf736f9a66647aca9c78ace631f5a1acd6e",
+    "quarantine-recovery-v1/no-completion-successor-v1/tests/test_pregen_apply_composition.py": "9ce5790e1113ad185af2731e9f665dc6d97b6ac1f498fa02f80890d2251677f9",
+    "quarantine-recovery-v1/no-completion-successor-v1/tests/test_pregen_successor.py": "1c5a3c448019ae29b7c1011d958db7b86bf851680e8ae02f0dee105a42f88ea3"
+  },
+  "baseline_runtime_pins": {
+    "saved_source_recovery.py": "9dffabb2e5bec222673ed0115d971b09eceb82a8f74f89e87878f0c75bde7ea7",
+    "semantic_recovery_namespace.py": "d6297f870cb8584ee3eabc9943b772006a6139930759dd6b7ee1145f99aa5edb"
+  },
+  "tests": [
+    {
+      "command": [
+        "python3",
+        "-B",
+        "quarantine-recovery-v1/no-completion-successor-v1/tests/test_pregen_successor.py"
+      ],
+      "exit_code": 0,
+      "test_count": 23,
+      "wall_seconds": 0.193518,
+      "log_path": "quarantine-recovery-v1/no-completion-successor-v1/evidence/ACTUAL.test_pregen_successor.py.log",
+      "log_sha256": "01a3361790affbbb7f05249396624d280422febb36bfe07f37a85876115130fc"
+    },
+    {
+      "command": [
+        "python3",
+        "-B",
+        "quarantine-recovery-v1/no-completion-successor-v1/tests/test_pregen_apply_composition.py"
+      ],
+      "exit_code": 0,
+      "test_count": 8,
+      "wall_seconds": 1.783722,
+      "log_path": "quarantine-recovery-v1/no-completion-successor-v1/evidence/ACTUAL.test_pregen_apply_composition.py.log",
+      "log_sha256": "54e26554eb85ae08524396ab995435f2e923eb0883a5a7f611108a460dfdd731"
+    }
+  ],
+  "actual_tests_total": 31,
+  "private_certificate_created": false,
+  "certificate_digest": "UNBOUND",
+  "runtime_files": 2,
+  "source_contract": "One fixed sibling root0600 certificate with exact original roster/owner/source/stock/parentQ/tomb/semantic preimages/old closed attempt/reviewed detachment+sync+settlement audit pins. New reserved protocol distinct completed-parent path; old completed admit remains AST-identical.",
+  "real08_shape_join": "Root PREGEN.SEMANTIC.SHAPE.ACTUAL confirms seven strict absent fields and one retained START with exactly canonical_user/client/learning/runtime_binding_id/status/transcript; learning exact reason/status no_learning. Synthetic fixture mirrors schema without private values.",
+  "actual_composition": "Newadmit through actual existing claim/begin/graph/currentcallback/namespace; separate existing captured-v2 strict producer/issuer/APPLY/SDK/canonical readback/replays/lateparent/consent tests retargeted only pregen protocol+original retained map fixture. Existing exact da515 resource settlement actual fakeTX once then repeat reject.",
+  "fake_boundaries": [
+    "Serialized fake Firestore transaction/store",
+    "Explicit synthetic plaintext decoder and current grant leaf",
+    "APPLY fixtures use existing SDK plus fake DB/graph/crypto/external transports; not actual auth/Firestore/model proof"
+  ],
+  "live_actions": 0,
+  "serving_files_written": false,
+  "auth_or_private_config_read": false,
+  "models_called": false,
+  "review_gate": "No edits until independent review coordination. This task does not authorize live certificate/admission/deployment/claims/provider/replay."
+}

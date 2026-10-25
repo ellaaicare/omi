@@ -1,0 +1,228 @@
+"""Explicit saved-Q recovery admission, separate from ordinary first completion.
+Private operator/source-only candidate. No endpoint, startup activation or grants.
+"""
+from datetime import datetime,timezone
+from hashlib import sha256
+from google.cloud.firestore_v1 import transactional
+from database import normal_enrichment_activation as activation,normal_account_lifecycle as lifecycle,enrichment_job_isolation as isolation
+from ella.services import semantic_recovery_namespace as ns
+TAG='saved_source_recovery_admission'
+ADMISSIONS='ella_saved_source_recovery_admissions_v1'
+COHORT_SHA256='87184540c54ed4840df1557ef1f2fe7396c21ba027f766dbb3efb2cae495553d'
+
+def need(v,code):
+ if not v:raise ValueError('recovery_'+code)
+
+
+def _cohort_pairs(items):
+ result={}
+ for k,v in items:
+  need(k not in result,'cohort_duplicate_key');result[k]=v
+ return result
+
+def approved_parents():
+ """Lazy fixed-path noncredential private cohort; never a body/env authority."""
+ import os,stat,json,re
+ from pathlib import Path
+ from uuid import UUID
+ from database import explicit_saved_backlog_repair as repair
+ path=Path(__file__).with_name('saved_source_recovery.expected.json')
+ fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+ try:
+  before=os.fstat(fd)
+  def signature(v):return (v.st_dev,v.st_ino,v.st_uid,v.st_gid,v.st_nlink,stat.S_IMODE(v.st_mode),v.st_size,v.st_mtime_ns)
+  need(stat.S_ISREG(before.st_mode) and before.st_uid==0 and before.st_gid==0 and stat.S_IMODE(before.st_mode)==0o600 and before.st_nlink==1 and 0<before.st_size<=65536,'cohort_file_metadata')
+  parts=[];total=0
+  while True:
+   chunk=os.read(fd,65537-total)
+   if not chunk:break
+   parts.append(chunk);total+=len(chunk);need(total<=65536,'cohort_capacity')
+  raw=b''.join(parts)
+  need(signature(before)==signature(os.fstat(fd))==signature(path.lstat()),'cohort_file_changed')
+ finally:os.close(fd)
+ need(sha256(raw).hexdigest()==COHORT_SHA256,'cohort_digest_changed')
+ data=json.loads(raw,object_pairs_hook=_cohort_pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError('recovery_cohort_nonfinite')))
+ need(type(data) is dict and set(data)=={'contract','source_spec_sha256','owner_sha256','records'} and data['contract']=='ella-reviewed-saved-recovery-cohort-v1','cohort_schema')
+ need(data['source_spec_sha256']==repair.SPEC_SHA256=='59091879a32cab719305f14883e6158f94c0e0a8e87b0aed2bf122ac348a1eaf','cohort_original_scope_changed')
+ need(type(data['owner_sha256']) is str and re.fullmatch('[0-9a-f]{64}',data['owner_sha256']),'cohort_owner_shape')
+ spec=repair.specification();need(type(spec.get('records')) is dict and len(spec['records'])==20 and data['owner_sha256']==spec['owner_sha256'],'cohort_owner_changed')
+ records=data['records'];need(type(records) is dict and len(records)==5,'cohort_count')
+ for jid,record in records.items():
+  need(type(jid) is str and re.fullmatch('hce_[0-9a-f]{64}',jid) and type(record) is dict and set(record)=={'cid','job_sha256','source_created_at'},'cohort_record_schema')
+  cid=record['cid'];need(type(cid) is str and str(UUID(cid))==cid and type(record['job_sha256']) is str and re.fullmatch('[0-9a-f]{64}',record['job_sha256']),'cohort_record_identity')
+  stamp=record['source_created_at'];need(type(stamp) is str and 0<len(stamp)<=128 and datetime.fromisoformat(stamp).utcoffset() is not None,'cohort_source_stamp')
+  expected=spec['records'].get(cid);need(type(expected) is dict and expected.get('job_id')==jid and expected.get('source_created_at')==stamp,'cohort_record_not_in_original_scope')
+ return records
+
+def source_ref(db,uid,cid):return db.collection('users').document(uid).collection('conversations').document(cid)
+def marker_ref(db,tag):return db.collection(ADMISSIONS).document(tag['recovery_id'])
+def source_lock_ref(db,tag):return db.collection(ADMISSIONS).document('source-lock-'+ns.digest({'uid':tag['uid'],'cid':tag['conversation_id'],'stock':tag['stock_version']}))
+def _current_consent(tx,db,uid):
+ from ella.services.ai_consent import _is_current_grant
+ user=db.collection('users').document(uid);s=user.get(transaction=tx,timeout=5,retry=None);state=(s.to_dict() or {}).get('ai_consent') if s.exists else None
+ rid=str((state or {}).get('receipt_id') or '');r=user.collection('ai_consent_receipts').document(rid).get(transaction=tx,timeout=5,retry=None) if rid else None
+ need(_is_current_grant(uid,state,r.to_dict() if r is not None and r.exists else None) is True,'current_consent_required')
+def tag_of(job):
+ tag=job.get(TAG)
+ if tag is None:return None
+ ns.validate_identity(tag)
+ need(all(job.get(k)==tag[k] for k in ('uid','conversation_id','job_id','transcript_sha256')),'job_tag_changed')
+ need(job.get('admission_epoch')==tag['policy_epoch'],'policy_epoch_changed')
+ return tag
+
+def _approved_parent(tag):
+ if tag.get('protocol_revision')=='ella-terminal-pregen-successor-v1':
+  from database.saved_source_pregen_recovery import approved_parent
+  return approved_parent(tag['parent_job_id'])
+ return approved_parents().get(tag['parent_job_id'])
+
+def _parent(tx,db,tag):
+ pinned=_approved_parent(tag);need(type(pinned) is dict and pinned['cid']==tag['conversation_id'] and pinned['job_sha256']==tag['parent_job_sha256'],'parent_not_reviewed')
+ s=db.collection(activation.JOBS).document(tag['parent_job_id']).get(transaction=tx,timeout=5,retry=None);p=s.to_dict() if s.exists else {}
+ need(p.get('uid')==tag['uid'] and p.get('conversation_id')==tag['conversation_id'] and p.get('status')=='quarantined' and p.get('dispatch_state')=='unknown_quarantined' and lifecycle.digest(p)==tag['parent_job_sha256'],'parent_changed')
+ t=isolation.tombstone_ref(db,p).get(transaction=tx,timeout=5,retry=None);tomb=t.to_dict() if t.exists else {}
+ need(bool(tomb) and lifecycle.digest(tomb)==tag['parent_tombstone_sha256'],'parent_tombstone_changed')
+ return p
+
+def original_source_matches(doc,tag):
+ from copy import deepcopy
+ from models.hermes_cloud_enrichment_contract import transcript_source
+ from ella.services.canonical_summary_source import canonical_source_from_conversation,canonical_source_sha256
+ if type(doc) is not dict or doc.get('uid')!=tag['uid'] or doc.get('id')!=tag['conversation_id'] or doc.get('status')!='completed' or any(doc.get(k) for k in ['deleted','discarded','is_locked','capture_finalization_claim_token']):return False
+ if doc.get('capture_state') not in (None,'terminal'):return False
+ for k in ('capture_lease_expires_at','capture_finalization_lease_expires_at'):
+  stamp=doc.get(k)
+  if stamp is not None and (not lifecycle.aware(stamp) or stamp>datetime.now(timezone.utc)):return False
+ if transcript_source(doc)[1]!=tag['transcript_sha256']:return False
+ versions=[v for v in doc.get('summary_versions',[]) if type(v) is dict and v.get('id')==tag['stock_version']]
+ if len(versions)!=1 or ns.digest({k:v for k,v in versions[0].items() if k!='is_active'})!=tag['stock_content_sha256']:return False
+ original=deepcopy(doc);original['structured']={k:versions[0].get(k) for k in ('title','overview','emoji','category')}
+ source=canonical_source_from_conversation(uid=tag['uid'],conversation_id=tag['conversation_id'],conversation=original)
+ return canonical_source_sha256(source)==tag['canonical_source_sha256'] and str(source.get('finished_at') or source.get('started_at') or '')==tag['source_version']
+
+def _source(tx,db,tag,*,allow_accepted):
+ from database.conversations import _prepare_conversation_for_read
+ snap=source_ref(db,tag['uid'],tag['conversation_id']).get(transaction=tx,timeout=5,retry=None);raw=snap.to_dict() if snap.exists else {}
+ # The actual DB decoder may project the worker view. Inspect physical maps
+ # through raw and derive canonical source through decoded transcript only.
+ doc=_prepare_conversation_for_read(raw,tag['uid']) if snap.exists else {}
+ need(original_source_matches(doc,tag),'source_changed')
+ need(str(snap.create_time)==_approved_parent(tag)['source_created_at'],'source_recreated')
+ need(doc.get('active_summary_version_id')==tag['stock_version'] or allow_accepted and ns.accepted_postimage(raw,admission=tag),'source_already_enhanced_or_uncertain')
+ capture=db.collection('users').document(tag['uid']).collection('capture_authority').document('current').get(transaction=tx,field_paths=['conversation_id'],timeout=5,retry=None).to_dict() or {}
+ need(capture.get('conversation_id')!=tag['conversation_id'],'target_source_active')
+ return raw,doc,snap
+
+def eligible(tx,db,current,policy,tenant,now,*,admission=False,consumed=False):
+ if admission:return None
+ tag=tag_of(current)
+ if tag is None:return None
+ try:
+  need(lifecycle.valid_policy(policy,now) and policy['version']==4 and policy['epoch']==tag['policy_epoch'],'policy_changed')
+  authority=lifecycle.read_account(tx,db,tag['uid'],tenant,now,policy=policy);need(authority is not None,'account_unavailable');account=authority[0]
+  need(account['epoch']==tag['account_epoch'] and account['route_sha256']==tag['route_sha256'],'account_changed')
+  need(not isolation.replay_forbidden(tx,db,current,account,tenant),'recovery_job_quarantined')
+  parent=_parent(tx,db,tag);need(current.get('client_interaction_id')==parent.get('client_interaction_id'),'client_changed')
+  r=marker_ref(db,tag);s=r.get(transaction=tx,timeout=5,retry=None);marker=s.to_dict() if s.exists else {}
+  need(marker.get('identity')==tag and marker.get('job_id')==current['job_id'],'admission_changed')
+  lock=source_lock_ref(db,tag).get(transaction=tx,timeout=5,retry=None)
+  need(lock.exists and lock.to_dict()=={'identity':tag,'job_id':current['job_id']},'source_lock_changed')
+  if consumed:need(marker.get('state')=='consumed' and marker.get('lease_token')==current.get('lease_token') and type(current.get('attempt_count')) is int and current['attempt_count']==1,'consumed_attempt_changed')
+  else:need(marker.get('state')=='prepared' and current.get('attempt_count')==0 and current.get('dispatch_state')=='never_started','not_fresh_recovery')
+  raw,doc,snap=_source(tx,db,tag,allow_accepted=consumed)
+  need(ns.digest({k:raw.get(k) for k in ns.FIELDS})==marker.get('original_semantic_sha256'),'original_semantic_history_changed')
+  need(str(snap.create_time)==marker.get('source_created_at'),'source_recreated')
+  spaces=raw.get(ns.ROOT,{});need(type(spaces) is dict and type(spaces.get(tag['recovery_id'])) is dict and spaces[tag['recovery_id']].get('identity')==tag,'namespace_changed')
+  _current_consent(tx,db,tag['uid'])
+  return r
+ except (ValueError,KeyError,TypeError):return None
+
+@transactional
+def admit(tx,db,*,proof,parent_job_id,expected,reviewed_detachment_sha256,protocol_revision,now,reviewed_sync_receipts=None):
+ """Exact reviewed CAS creates one new job/admission/semantic namespace only.
+ expected pins are source-review-bound operator inputs, not HTTP authority.
+ """
+ from database.conversations import _prepare_conversation_for_read
+ from ella.services.canonical_summary_source import canonical_source_from_conversation,canonical_source_sha256
+ from models.hermes_cloud_enrichment_contract import transcript_source
+ need(type(proof) is lifecycle.VerifiedRoute,'verified_original_route_required')
+ need(type(reviewed_detachment_sha256) is str and len(reviewed_detachment_sha256)==64 and all(c in '0123456789abcdef' for c in reviewed_detachment_sha256),'reviewed_detachment_required')
+ need(type(reviewed_sync_receipts) is dict and set(reviewed_sync_receipts)=={'sync_start_receipt_sha256','sync_completed_receipt_sha256'} and all(type(v) is str and len(v)==64 and all(c in '0123456789abcdef' for c in v) for v in reviewed_sync_receipts.values()),'reviewed_completed_sync_required')
+ pin=approved_parents().get(parent_job_id);need(type(pin) is dict,'parent_not_reviewed');uid=proof.uid;cid=pin['cid']
+ ps=activation.reference(db).get(transaction=tx,timeout=5,retry=None);policy=ps.to_dict() if ps.exists else {}
+ account=lifecycle.account_ref(db,uid).get(transaction=tx,timeout=5,retry=None).to_dict() or {};tenant=activation.tenant_ref(db,uid).get(transaction=tx,timeout=5,retry=None).to_dict() or {}
+ need(all(lifecycle.digest(v)==expected[k] for k,v in [('policy',policy),('account',account),('tenant',tenant)]),'processing_preimage_changed')
+ need(lifecycle.valid_policy(policy,now) and policy['version']==4 and not any(v.get('uid')==uid for v in policy['active']) and not any(v.get('uid')==uid for v in policy['queue_unresolved_resources']) and not policy['queue_isolation']['claims_open'] and activation.SINGLE_CLAIM not in policy,'processing_not_idle_for_admission')
+ need(account.get('uid')==uid and account.get('state')=='active' and account['route_sha256']==proof.image_sha256 and account['account_owner_sha256']==proof.account_owner_sha256 and account['profile_sha256']==proof.profile_sha256,'original_account_changed')
+ need(lifecycle.read_account(tx,db,uid,tenant,now,policy=policy) is not None and not tenant.get('active_job_id') and not tenant.get('queue_resource_hold'),'current_account_unavailable')
+ source=source_ref(db,uid,cid).get(transaction=tx,timeout=5,retry=None);raw=source.to_dict() if source.exists else {};need(source.exists and str(source.create_time)==pin['source_created_at'],'source_recreated');need(lifecycle.digest(raw)==expected['source'],'source_preimage_changed');doc=_prepare_conversation_for_read(raw,uid) if source.exists else {}
+ need(doc.get('uid')==uid and doc.get('id')==cid and not doc.get('summary_writeback_receipt'),'accepted_effects_hold')
+ parent=db.collection(activation.JOBS).document(parent_job_id).get(transaction=tx,timeout=5,retry=None).to_dict() or {};need(lifecycle.digest(parent)==pin['job_sha256']==expected['parent_job'],'parent_changed')
+ tomb=isolation.tombstone_ref(db,parent).get(transaction=tx,timeout=5,retry=None).to_dict() or {};need(bool(tomb) and lifecycle.digest(tomb)==expected['parent_tombstone'],'parent_tombstone_changed')
+ need(parent.get('uid')==uid and parent.get('conversation_id')==cid and parent.get('status')=='quarantined' and parent.get('dispatch_state')=='unknown_quarantined','parent_not_quarantined')
+ need(not any(k in raw for k in ('semantic_learning_policy_v3','semantic_learning_operations_v3','semantic_learning_receipts_v3')),'prior_learning_effects_require_separate_review')
+ ops=raw.get('semantic_producer_executions_v1') or {};need(type(ops) is dict and 1<=len(ops)<=8,'completed_parent_operations_required')
+ source_image=canonical_source_from_conversation(uid=uid,conversation_id=cid,conversation=doc);source_sha=canonical_source_sha256(source_image);source_version=str(source_image.get('finished_at') or source_image.get('started_at') or '')
+ transcript=transcript_source(doc)[1];need(transcript==parent['transcript_sha256'],'transcript_changed')
+ for op in ops.values():
+  b=op.get('binding') or {};need(op.get('status')=='completed' and type(op.get('result')) is dict and all(type(op.get(k)) is str and bool(op[k]) for k in ['runtime_interaction_id','canonical_assistant_event_id']) and all(b.get(k)==v for k,v in {'uid':uid,'conversation_id':cid,'source_sha256':source_sha,'source_version':source_version,'transcript_sha256':transcript,'active_summary_version_id':doc.get('active_summary_version_id')}.items()),'parent_unknown_or_foreign_operation')
+ stock_id=doc.get('active_summary_version_id');stock=[v for v in doc.get('summary_versions',[]) if type(v) is dict and v.get('id')==stock_id]
+ need(len(stock)==1 and stock[0].get('is_active') is True and stock[0].get('source')=='omi' and stock[0].get('kind')=='generated','not_generic_stock')
+ stock_sha=ns.digest({k:v for k,v in stock[0].items() if k!='is_active'});need(stock_sha==expected['stock_content'],'stock_changed')
+ tag=ns.identity(uid=uid,cid=cid,parent_job_id=parent_job_id,parent_job_sha256=pin['job_sha256'],parent_tombstone_sha256=expected['parent_tombstone'],transcript_sha256=transcript,stock_version=stock_id,stock_content_sha256=stock_sha,canonical_source_sha256=source_sha,source_version=source_version,account_epoch=account['epoch'],route_sha256=account['route_sha256'],policy_epoch=policy['epoch'],protocol_revision=protocol_revision)
+ _parent(tx,db,tag);_source(tx,db,tag,allow_accepted=False);_current_consent(tx,db,uid)
+ jr=db.collection(activation.JOBS).document(tag['job_id']);mr=marker_ref(db,tag);lock=source_lock_ref(db,tag)
+ need(not lock.get(transaction=tx,timeout=5,retry=None).exists,'source_recovery_already_exists_no_duplicate')
+ need(not jr.get(transaction=tx,timeout=5,retry=None).exists and not mr.get(transaction=tx,timeout=5,retry=None).exists,'already_admitted_no_rearm')
+ record=ns.fresh_namespace(raw,admission=tag)
+ job={k:parent[k] for k in ['uid','conversation_id','client_interaction_id','transcript_sha256','policy_version','trace_id'] if k in parent}
+ job.update(job_id=tag['job_id'],status='pending',dispatch_state='never_started',attempt_count=0,lease_token=None,lease_expires_at=None,account_routing_contract=1,admission_epoch=policy['epoch'],source_completed_at=parent['source_completed_at'],created_at=now,updated_at=now,next_attempt_at=now)
+ job[TAG]=tag
+ marker={'contract':ns.CONTRACT,'identity':tag,'job_id':tag['job_id'],'state':'prepared','source_created_at':str(source.create_time),'reviewed_detachment_sha256':reviewed_detachment_sha256,'reviewed_sync_receipts':dict(reviewed_sync_receipts),'admitted_at':now,'original_semantic_sha256':ns.digest({k:raw.get(k) for k in ns.FIELDS})}
+ tx.create(jr,job);tx.create(mr,marker);tx.create(lock,{'identity':tag,'job_id':job['job_id']});tx.update(source.reference,{ns.ROOT+'.'+tag['recovery_id']:record})
+ return {'recovery_job_id':tag['job_id'],'recovery_id':tag['recovery_id'],'parent_preserved':True,'claims_open':False,'provider_calls':0}
+
+
+def admission_tag(job):
+ tag=tag_of(job)
+ return tag if tag is not None else job.get(lifecycle.TAG,{})
+
+def require_callback(uid,cid,db):
+ from database.normal_future_source_disposition import _worker_job
+ from database.enrichment_graph_guard import require_current
+ job=_worker_job.get();need(type(job) is dict and TAG in job and (job.get('uid'),job.get('conversation_id'))==(uid,cid),'worker_required')
+ require_current(uid,cid)
+
+
+@transactional
+def _current_host_context(tx,db,uid,cid):
+ """Authenticated callback selects ONLY the server's active matching recovery.
+ No request job/attempt/flag is accepted. All current graph/consent reads are
+ in the same read-only transaction; no ContextVar is assumed across HTTP.
+ """
+ from database.enrichment_graph_guard import require_in_transaction
+ from ella.services.semantic_captured_context import expected_attempt_digest
+ tenant_snap=activation.tenant_ref(db,uid).get(transaction=tx,timeout=5,retry=None)
+ tenant=tenant_snap.to_dict() if tenant_snap.exists else {}
+ jid=tenant.get('active_job_id')
+ if type(jid) is not str or not jid.startswith('hcer_'):return None
+ snap=db.collection(activation.JOBS).document(jid).get(transaction=tx,timeout=5,retry=None)
+ job=snap.to_dict() if snap.exists else {}
+ if TAG not in job or job.get('conversation_id')!=cid:return None
+ need(job.get('uid')==uid and job.get('job_id')==jid,'callback_owner_changed')
+ tag=tag_of(job)
+ require_in_transaction(tx,db,job,uid,cid)
+ _current_consent(tx,db,uid)
+ marker=marker_ref(db,tag).get(transaction=tx,timeout=5,retry=None).to_dict() or {}
+ proof=marker.get('reviewed_sync_receipts')
+ need(type(proof) is dict and set(proof)=={'sync_start_receipt_sha256','sync_completed_receipt_sha256'} and all(type(v) is str and len(v)==64 and all(c in '0123456789abcdef' for c in v) for v in proof.values()),'callback_sync_proof_missing')
+ detachment=marker.get('reviewed_detachment_sha256')
+ need(type(detachment) is str and len(detachment)==64 and all(c in '0123456789abcdef' for c in detachment),'callback_detachment_missing')
+ return {'contract':'ella-server-recovery-context-v1','uid':uid,'conversation_id':cid,
+         'source_sha256':tag['canonical_source_sha256'],'source_version':tag['source_version'],
+         'stock_version':tag['stock_version'],'recovery_id':tag['recovery_id'],'job_id':jid,
+         'parent_job_sha256':tag['parent_job_sha256'],'attempt_scope_sha256':expected_attempt_digest(job),
+         'reviewed_detachment_sha256':detachment,**proof}
+
+def current_host_context(db,uid,cid):
+ return _current_host_context(db.transaction(max_attempts=1),db,uid,cid)
