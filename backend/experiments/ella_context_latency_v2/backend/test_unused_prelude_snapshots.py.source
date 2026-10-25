@@ -1,0 +1,143 @@
+"""Actual retained service and real captured scope/budget/fence; external leaves synthetic, no live effects."""
+import ast,asyncio,copy,importlib.util,sys,threading,unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+W=Path(__file__).resolve().parents[2]
+p=W/'captured-context-v2/tests/test_attempt_capture_scope.py'
+spec=importlib.util.spec_from_file_location('actual_scope_for_prelude',p);actual=importlib.util.module_from_spec(spec);sys.modules[spec.name]=actual;spec.loader.exec_module(actual)
+ROOT=actual.ROOT;SCOPE=actual.SCOPE;BUDGET=actual.BUDGET;PUB=actual.PUB;ID=actual.ID;FENCE=actual.FENCE;ISOLATION=actual.ISOLATION;HOST=actual.HOST;LIFECYCLE=actual.LIFECYCLE;CAN=actual.CAN;module=actual.module;load=actual.load
+COORDINATOR=W/'captured-context-latency-v2-prelude-quote/candidate/ella/services/retained_completion_enrichment.py'
+class Tests(unittest.TestCase):
+ def scenario(self, *, legacy=False, mutation=None, applied=False):
+     from dataclasses import dataclass
+     from contextlib import nullcontext
+     import threading
+     r = actual.Rig()
+     legacy_token = BUDGET._CURRENT.set(None) if legacy else None
+     counts = {'hydrate': 0, 'capture': 0, 'produce': 0, 'learning': 0}
+     r.context.__exit__(None, None, None)
+     r.context = __import__('contextlib').nullcontext()
+     queued = ID.build_enrichment_identity(uid=r.uid, conversation_id=r.cid, conversation=r.doc)
+     r.job['client_interaction_id'] = queued.client_interaction_id
+     r.fenced = FENCE.begin(FENCE.reserve(ISOLATION.attempt(r.job), claims_open=True, previously_quarantined=False), ISOLATION.attempt(r.job), claims_open=True)
+     r.host.attempt = SCOPE.expected_attempt_digest(r.job)
+
+     async def wait(_, value):
+         return await value
+
+     async def nohold(uid):
+         pass
+     timing = module('ella.services.enrichment_stage_timing', stage=lambda *a: nullcontext(), operation=lambda *a: nullcontext(), await_stage=wait)
+     companion = module('ella.services.semantic_companion_context', SOURCES=HOST.snapshot.SOURCES, MAX_DOCUMENT_BYTES=65536, MAX_SNAPSHOT_BYTES=131072, CompanionContextUnavailable=HOST.snapshot.CompanionContextUnavailable)
+     hold = module('ella.services.transcript_processing_hold', assert_transcript_processing_active=lambda uid: None, require_transcript_processing_active=nohold)
+     lifecycle = module('database.normal_account_lifecycle', TAG=LIFECYCLE.TAG, digest=LIFECYCLE.digest, require_dispatch_context=lambda *a: None)
+     mods = {'ella.services.enrichment_stage_timing': timing, 'ella.services.semantic_companion_context': companion, 'ella.services.transcript_processing_hold': hold, 'database.normal_account_lifecycle': lifecycle, 'database._client': module('database._client', db=object()), 'ella.services.semantic_quote_evidence_lf': module('ella.services.semantic_quote_evidence_lf', CONTRACT='ella-transcript-evidence-unique-lf-v1')}
+
+     class StopProduce(Exception):
+         pass
+
+     async def runtime(*a, **kw):
+         return r.runtime
+
+     async def user(**kw):
+         return {'confirmed': True, 'event_id': 'synthetic-user-event'}
+
+     async def sync_context(*a, **kw):
+         return None
+
+     async def learning(**kw):
+         counts['learning'] += 1
+         self.assertNotIn('snapshot', kw)
+         self.assertNotIn('companion_context', kw)
+         scope = SCOPE.current_scope(r.uid, r.cid)
+         if mutation == 'closed':
+             scope.closed = True
+         if mutation == 'budget':
+             BUDGET._CURRENT.set(BUDGET.OperationBudget(BUDGET.attempt_scope({**r.job, 'lease_token': 'foreign'}), clock=lambda: r.clock))
+         if mutation == 'replacement':
+             SCOPE._CURRENT.set(SimpleNamespace(uid=r.uid, cid=r.cid))
+         if mutation == 'source':
+             r.doc['active_summary_version_id'] = 'changed'
+         if applied:
+             (r.host.path / 'MEMORY.md').write_text('fictional learned value')
+         return {'status': 'learning_applied' if applied else 'no_learning'}
+     updates = []
+     seen = {}
+
+     def update(uid, cid, builder):
+         changes, result = builder(copy.deepcopy(r.doc))
+         updates.append(copy.deepcopy(changes))
+         r.doc.update(changes)
+         return {'result': result}
+
+     async def produce(**kw):
+         counts['produce'] += 1
+         seen['scope'] = SCOPE.current_scope(r.uid, r.cid)
+         if legacy:
+             self.assertIsNone(seen['scope'])
+         else:
+             self.assertTrue(seen['scope'].admitted)
+             self.assertEqual(seen['scope'].fields()['context_contract_version'], 2)
+             if applied:
+                 self.assertEqual(seen['scope'].envelope()['snapshot']['documents']['MEMORY.md'], 'fictional learned value')
+         raise StopProduce()
+     original = SCOPE._exchange_async
+
+     async def exchange(**kw):
+         if kw['url'].endswith('/snapshot-v2'):
+             counts['capture'] += 1
+             entries = r.doc['semantic_retained_completion_jobs_v1']
+             self.assertEqual(next(iter(entries.values()))['learning']['status'], 'learning_applied' if applied else 'no_learning')
+             seen['after_learning'] = True
+         return await original(**kw)
+     try:
+         with patch.dict(sys.modules, mods):
+             host_module = load('ella.services.semantic_host_context', ROOT / 'candidate/ella/services/semantic_host_context.py')
+
+             def hydrate(runtime, **kw):
+                 counts['hydrate'] += 1
+                 scope = SCOPE.current_scope(r.uid, r.cid)
+                 if scope is not None and scope._sealed is not None:
+                     return host_module.host_context(runtime=runtime, uid=r.uid, conversation_id=r.cid, runtime_identity=r.identity, read_conversation=r.reader, read_budget=kw['host_read_budget'])
+                 return HOST.snapshot.hydrate_owned_workspace(runtime, uid=r.uid, runtime_identity=r.identity)
+             scope = {'__name__': 'actual_captured_retained_coordinator', 'asyncio': asyncio, 'copy': copy, 'threading': threading, 'dataclass': dataclass, 'SimpleNamespace': SimpleNamespace, 'admission': PUB, '_timing': timing, 'canonical_source_from_conversation': CAN.canonical_source_from_conversation, 'canonical_source_sha256': CAN.canonical_source_sha256, 'transcript_source': ID.transcript_source, 'build_enrichment_identity': ID.build_enrichment_identity, 'require_initial_source': lambda *a: None, 'require_current_runtime': lambda *a: None, 'require_transcript_processing_active': nohold, 'JOBS_FIELD': 'semantic_retained_completion_jobs_v1', 'MAX_JOBS': 8}
+             sys.modules[scope['__name__']] = module(scope['__name__'])
+             tree = ast.parse(COORDINATOR.read_text())
+             nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in {'reject', 'owned', 'source_pin', 'Dependencies', 'RetainedCompletionEnrichmentService'}]
+             exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), 'actual_retained_coordinator', 'exec'), scope)
+             deps = scope['Dependencies'](selected=lambda uid: True, resolve=runtime, identity=lambda x: r.identity, revalidate=runtime, consent=lambda uid: uid, hydrate=hydrate, produce=produce, apply_factory=lambda **k: None, canonical_user=user, sync_context=sync_context, learning=learning)
+             service = scope['RetainedCompletionEnrichmentService'](repository=object(), read_conversation=r.reader, update_conversation=update, dependencies=deps)
+             with patch.object(SCOPE, '_exchange_async', exchange), self.assertRaises(PUB.SemanticPublicationRejectedError if mutation else StopProduce):
+                 asyncio.run(service._enrich(r.uid, r.cid, False, queued.client_interaction_id, queued.transcript_sha256))
+         if mutation:
+             self.assertEqual(counts['capture'], 0)
+             self.assertEqual(counts['hydrate'], 0)
+             self.assertEqual(counts['produce'], 0)
+             self.assertNotIn(PUB.POLICY_FIELD, r.doc)
+         elif legacy:
+             self.assertEqual(counts['hydrate'], 3)
+             self.assertEqual(counts['capture'], 0)
+             self.assertNotIn('context_contract_version', r.doc[PUB.POLICY_FIELD])
+         else:
+             self.assertTrue(seen['after_learning'])
+             self.assertTrue(seen['scope'].closed)
+             self.assertEqual(len(updates), 4)
+             self.assertEqual(r.doc[PUB.POLICY_FIELD]['context_contract_version'], 2)
+             self.assertEqual(counts['hydrate'], 1)
+             self.assertEqual(counts['capture'], 1)
+         self.assertEqual(counts['learning'], 1)
+         return counts
+     finally:
+         if legacy_token is not None:
+             BUDGET._CURRENT.reset(legacy_token)
+         r.close()
+
+ def test_actual_captured_path_skips_two_unused_reads_but_full_admission_read_remains(self):self.scenario()
+ def test_legacy_scope_none_keeps_all_three_old_hydrates(self):self.scenario(legacy=True)
+ def test_learning_applied_new_memory_is_captured_after_save(self):self.scenario(applied=True)
+ def test_closed_scope_during_learning_never_captures(self):self.scenario(mutation='closed')
+ def test_changed_budget_during_learning_never_captures(self):self.scenario(mutation='budget')
+ def test_replaced_scope_during_learning_never_captures(self):self.scenario(mutation='replacement')
+ def test_changed_source_during_learning_never_captures(self):self.scenario(mutation='source')
+if __name__=='__main__':unittest.main()

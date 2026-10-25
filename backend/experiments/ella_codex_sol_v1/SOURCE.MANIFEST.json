@@ -1,0 +1,13 @@
+{
+  "state": "SOURCE_REVIEWED_FAKE_TRANSPORT_ONLY_NOT_DEPLOYED",
+  "pins": {
+    "candidate/gateway/platforms/semantic_codex_transport.py.source": "6c73959fc5deaa52f353abba7d65b2702afbbfe6bd4ebe5a2d1541747d817393",
+    "candidate/gateway/platforms/semantic_direct_role.py.source": "e68af156f612f0cf5be3dba036acfdd95c148b20032b537f64c9dbc2597a2ed8",
+    "tests/test_sol_route.py.source": "bf4f0c3e17238d591ee88dba5bcb6efb7c04a187fdbe9b510bd2473950660c2e"
+  },
+  "tests_actual": 11,
+  "chosen_candidate_provider": "openai-codex",
+  "chosen_candidate_model": "gpt-6.1-sol",
+  "reasoning": "medium",
+  "live_model_switch": false
+}

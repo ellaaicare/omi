@@ -1,0 +1,18 @@
+{
+  "state": "REVIEWED_SOURCE_ONLY_NOT_DEPLOYED",
+  "pins": {
+    "host/semantic_context_snapshot_host_v2.py.source": "a009a26ae1764726f122f6fb54d5310894bcde31bfb31968be5ea2e5165ad9d2",
+    "host/test_private_authority_sample.py.source": "d527a7a3dfaead9585b95c0e9fe24429b8a1893403d9e18224b580effe201289",
+    "backend/retained_completion_enrichment.py.source": "33e07a84d0242f030142e8e3a6e60b4bc7b87709312bfbb2a7d34ae3cf05aee1",
+    "backend/test_unused_prelude_snapshots.py.source": "8b0c44fe8dd429cd37f5645e118482b3089e9d6126e922dea3ee8d525b514af9"
+  },
+  "tests": {
+    "prelude_composition": 7,
+    "host_actual_classes_fake_http": 12
+  },
+  "limitations": [
+    "Tests depend on retained local source closures; this bundle alone is not an import-ready backend.",
+    "Host reduction4a+b to2a+b is a call-count proof, not measured latency or paid model success.",
+    "No host limits, source freshness, consent, owner, runtime, receipt or publication guards removed."
+  ]
+}

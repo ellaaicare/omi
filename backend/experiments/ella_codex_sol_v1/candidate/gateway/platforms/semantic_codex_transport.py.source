@@ -1,0 +1,538 @@
+"""Opt-in semantic role inference. Importing this module does no I/O.
+
+Root must qualify the exact existing owner/profile and canonical auth path first.
+This is deliberately stricter than production pool selection: ambiguity holds.
+No fallback, token refresh, CLI recovery, credential export, or personal agent.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import math
+import os
+import stat
+import threading
+import time
+import zlib
+from pathlib import Path
+
+ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
+MODEL = "gpt-5.6-sol"
+from gateway.platforms.completed_items import CompletedItems,ProvenanceHold
+
+_EVENT_TYPES = frozenset(("response.created", "response.in_progress", "response.output_item.added",
+    "response.output_item.done", "response.content_part.added", "response.content_part.done",
+    "response.output_text.delta", "response.output_text.done", "response.completed",
+    "response.failed", "response.incomplete", "error"))
+_EXCEPTION_NAMES = frozenset(("IsolationHold", "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout",
+    "ReadError", "WriteError", "ConnectError", "RemoteProtocolError", "LocalProtocolError", "DecodingError",
+    "UnicodeDecodeError", "JSONDecodeError", "TypeError", "AttributeError", "ValueError", "RuntimeError",
+    "KeyboardInterrupt", "CancelledError", "TimeoutError", "OSError", "ConnectionError"))
+
+
+def _event_json(data):
+    def pairs(values):
+        out={}
+        for key,value in values:
+            if key in out:raise IsolationHold('response_invalid')
+            out[key]=value
+        return out
+    return json.loads(data,object_pairs_hook=pairs,parse_constant=lambda _:(_ for _ in ()).throw(IsolationHold('response_invalid')))
+
+def _header_category(value, kind):
+    if value is None: return "missing"
+    if not isinstance(value, str): return "unknown_redacted"
+    normalized = value.strip().lower()
+    if not normalized: return "empty"
+    if kind == "type":
+        return "sse" if normalized.split(";", 1)[0].strip() == "text/event-stream" else "unknown_redacted"
+    return normalized if normalized in ("identity", "gzip", "deflate") else "unknown_redacted"
+
+
+def _event_diagnostic(state, kind):
+    label = kind if isinstance(kind, str) and kind in _EVENT_TYPES else "other_event"
+    if len(state["event_sequence"]) < 64:
+        state["event_sequence"].append(label)
+    else:
+        state["sequence_truncated"] = True
+    counts = state["event_counts"]
+    counts[label] = min(counts.get(label, 0) + 1, 1000000)
+
+
+def _terminal_output_category(result):
+    if not isinstance(result,dict):return "terminal_non_mapping"
+    if "output" not in result:return "missing"
+    items=result["output"]
+    if items is None:return "null"
+    if not isinstance(items,list):return "non_list"
+    if not items:return "empty"
+    if any(not isinstance(i,dict) for i in items):return "non_mapping_item"
+    return "nonempty_mapping_list"
+
+
+def _terminal_structure(result):
+    """Bounded content-free shape receipt; never used for acceptance."""
+    category=_terminal_output_category(result)
+    items=result.get('output') if isinstance(result,dict) else None
+    rows=[]
+    if isinstance(items,list):
+        for item in items[:32]:
+            if not isinstance(item,dict):rows.append({'type':'non_mapping','content_count':None,'content_types':[],'text_bytes':None});continue
+            kind=item.get('type');kind=kind if kind in {'message','reasoning','function_call','custom_tool_call','web_search_call'} else 'other'
+            content=item.get('content');parts=[];text_bytes=0
+            if isinstance(content,list):
+                for part in content[:32]:
+                    pk=part.get('type') if isinstance(part,dict) else 'non_mapping'
+                    parts.append(pk if pk in {'output_text','refusal','non_mapping'} else 'other')
+                    if isinstance(part,dict) and isinstance(part.get('text'),str):text_bytes+=len(part['text'].encode())
+            rows.append({'type':kind,'content_count':len(content) if isinstance(content,list) else None,'content_types':parts,'text_bytes':text_bytes})
+    return {'version':1,'output_category':category,'output_count':len(items) if isinstance(items,list) else None,'truncated':isinstance(items,list) and (len(items)>32 or any(isinstance(i,dict) and isinstance(i.get('content'),list) and len(i['content'])>32 for i in items[:32])),'items':rows}
+
+
+def _terminal_checks(result, text, expected_model=MODEL):
+    checks = {k: False for k in ("model_matches", "status_completed", "id_valid", "output_shape", "tool_free", "message_shape", "content_shape", "text_equal")}
+    if not isinstance(result, dict): return checks
+    rid = result.get("id")
+    checks["model_matches"] = result.get("model") == expected_model
+    checks["status_completed"] = result.get("status") == "completed"
+    checks["id_valid"] = isinstance(rid, str) and bool(rid) and len(rid) <= 256 and all(33 <= ord(c) <= 126 for c in rid)
+    items = result.get("output")
+    checks["output_shape"] = isinstance(items, list) and bool(items) and all(isinstance(i, dict) for i in items)
+    if not checks["output_shape"]: return checks
+    checks["tool_free"] = all(i.get("type") in ("message", "reasoning") for i in items)
+    messages = [i for i in items if i.get("type") == "message"]
+    checks["message_shape"] = bool(messages) and all(i.get("role") == "assistant" and i.get("status") == "completed" for i in messages)
+    checks["content_shape"] = bool(messages) and all(isinstance(i.get("content"), list) and bool(i["content"]) and all(isinstance(c,dict) and c.get("type") == "output_text" and isinstance(c.get("text"),str) for c in i["content"]) for i in messages)
+    if checks["content_shape"]:
+        checks["text_equal"] = "".join(c["text"] for i in messages for c in i["content"]) == "".join(text)
+    return checks
+
+
+def _exception_diagnostic(exc):
+    """Bounded causal types + sanitized source locations; no exception strings."""
+    chain = []
+    seen = set()
+    while exc is not None and len(chain) < 3 and id(exc) not in seen:
+        seen.add(id(exc))
+        name = type(exc).__name__
+        frames = []
+        tb = exc.__traceback__
+        while tb is not None and len(frames) < 8:
+            code = tb.tb_frame.f_code
+            own = code.co_filename == __file__
+            function = code.co_name if own and code.co_name in ("send", "_send", "_bounded_decoded_chunks", "authority", "_credential", "_read_snapshot") else "external"
+            frames.append({"module": "candidate" if own else "external", "function": function,
+                           "line": tb.tb_lineno if own else None})
+            tb = tb.tb_next
+        chain.append({"class": name if name in _EXCEPTION_NAMES else "other_exception", "locations": frames})
+        exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+    return chain
+
+
+def _bounded_decoded_chunks(response, started, metadata):
+    """Explicit identity/gzip/HTTP-deflate only; never an unbounded decoder.
+
+    HTTPX's installed decoder supports gzip and zlib/raw deflate. We reproduce
+    those wire formats with a strict 1MB compressed AND expanded limit, and
+    require complete single streams. No automatic brotli/zstd/format fallback.
+    """
+    encoding = response.headers.get("content-encoding", "").strip().lower() or "identity"
+    raw_type = response.headers.get("content-type", "").strip()
+    media_type = raw_type.split(";", 1)[0].strip().lower()
+    metadata.update(content_encoding=response.headers.get("content-encoding"),
+                    content_type=response.headers.get("content-type"), parsing_stage="headers")
+    # The existing SDK takes its SSE branch from stream=True before its MIME
+    # checks (openai/_response.py BaseAPIResponse._parse). The fixed Codex
+    # streaming endpoint may therefore omit MIME, but the actual body must
+    # still pass strict SSE framing and terminal response validation below.
+    if encoding not in ("identity", "gzip", "deflate") or (raw_type and media_type != "text/event-stream"):
+        raise IsolationHold("response_encoding_invalid")
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip" else None
+    prefix = b""
+    for raw in response.iter_raw():
+        metadata["wire_bytes"] += len(raw)
+        metadata["parsing_stage"] = "decode"
+        if time.monotonic() - started > 80 or metadata["wire_bytes"] > 1000000:
+            raise IsolationHold("response_bound_exceeded")
+        if encoding == "deflate" and decoder is None:
+            prefix += raw
+            if len(prefix) < 2:
+                continue
+            # RFC1950 header distinguishes zlib-wrapped vs raw HTTP-deflate.
+            wrapped = prefix[0] & 15 == 8 and ((prefix[0] << 8) + prefix[1]) % 31 == 0
+            decoder = zlib.decompressobj(zlib.MAX_WBITS if wrapped else -zlib.MAX_WBITS)
+            raw = prefix
+            prefix = b""
+        try:
+            decoded = raw if decoder is None else decoder.decompress(raw, 1000001 - metadata["decoded_bytes"])
+        except zlib.error:
+            raise IsolationHold("response_compression_invalid") from None
+        metadata["decoded_bytes"] += len(decoded)
+        if metadata["decoded_bytes"] > 1000000 or (decoder is not None and decoder.unconsumed_tail):
+            raise IsolationHold("response_bound_exceeded")
+        if decoder is not None and decoder.unused_data:
+            raise IsolationHold("response_compression_trailing_data")
+        yield decoded
+    if encoding != "identity" and (decoder is None or not decoder.eof):
+        raise IsolationHold("response_compression_truncated")
+    metadata["parsing_stage"] = "decoded_eof"
+
+
+class IsolationHold(RuntimeError):
+    """Content-free failure; never include upstream exceptions or auth data."""
+
+
+def _read_snapshot(path: Path) -> bytes:
+    """Read a fixed authorized file without following any symlink or writing locks."""
+    if not path.is_absolute() or ".." in path.parts:
+        raise IsolationHold("auth_path_invalid")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        f = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            before = os.fstat(f)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                    or before.st_nlink != 1 or before.st_mode & 0o077
+                    or before.st_size > 1024 * 1024):
+                raise IsolationHold("auth_file_unsafe")
+            data = bytearray()
+            while True:
+                chunk = os.read(f, 65536)
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > 1024 * 1024:
+                    raise IsolationHold("auth_file_too_large")
+            after = os.fstat(f)
+            linked = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+            signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+            if signature(before) != signature(after) or signature(after) != signature(linked):
+                raise IsolationHold("auth_snapshot_changed")
+            return bytes(data)
+        finally:
+            os.close(f)
+    except IsolationHold:
+        raise
+    except Exception:
+        raise IsolationHold("auth_snapshot_unavailable") from None
+    finally:
+        os.close(fd)
+
+
+def _credential(snapshot: bytes, now: float) -> tuple[str, str, float]:
+    """Pure internal parser; only one existing own OAuth identity is admissible."""
+    try:
+        store = json.loads(snapshot)
+        if not isinstance(store, dict):
+            raise ValueError()
+        pool = store.get("credential_pool", {})
+        if not isinstance(pool, dict):
+            raise ValueError()
+        entries = pool.get("openai-codex")
+        if "openai-codex" in pool and (not isinstance(entries, list) or not entries):
+            raise IsolationHold("credential_pool_unavailable")
+        if entries is not None and not isinstance(entries, list):
+            raise ValueError()
+        if entries:
+            # No ranking, cooldown reset, rotation, recovery, or alternate selection.
+            if len(entries) != 1:
+                raise IsolationHold("credential_pool_ambiguous")
+            entry = entries[0]
+            if (entry.get("source") not in ("device_code", "manual:device_code")
+                    or entry.get("auth_type") != "oauth"
+                    or entry.get("last_status") not in (None, "ok")
+                    or entry.get("base_url") not in (None, "", ENDPOINT.rsplit("/", 1)[0])
+                    or any("borrow" in str(k).lower() for k in entry)):
+                raise IsolationHold("credential_source_unqualified")
+            token = entry.get("access_token")
+        else:
+            token = store.get("providers", {}).get("openai-codex", {}).get("tokens", {}).get("access_token")
+        if (not isinstance(token, str) or token != token.strip() or len(token) > 32768
+                or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_." for c in token)):
+            raise ValueError()
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise ValueError()
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        expiry = claims.get("exp")
+        account = claims.get("https://api.openai.com/auth", {}).get("chatgpt_account_id")
+        if (isinstance(expiry, bool) or not isinstance(expiry, (int, float))
+                or not math.isfinite(expiry) or expiry <= now + 60
+                or not isinstance(account, str) or not account or len(account) > 256
+                or any(ord(c) < 33 or ord(c) > 126 for c in account)):
+            raise IsolationHold("credential_unavailable_or_expiring")
+        return token, account, float(expiry)
+    except IsolationHold:
+        raise
+    except Exception:
+        raise IsolationHold("credential_unqualified") from None
+
+
+def build_isolated_client(*, auth_path: Path, authority_digest: str,
+                          revalidate_authority, approved_request_hashes: frozenset[str],
+                          response_observer=None, diagnostic_observer=None, replay_fixture=None,
+                          require_durable_diagnostic=False, assembled_output_observer=None, require_durable_assembled=False, expected_model=MODEL, reasoning_effort=None):
+    """Return only a bounded send closure. Calling the factory reads existing auth.
+
+    auth_path must be the caller-proven existing store, not a caller-selected
+    recovery source. approved hashes bind reviewed artificial requests exactly.
+    No raw credentials are returned, persisted, or placed in exceptions.
+    """
+    if (not isinstance(expected_model, str) or not expected_model or len(expected_model) > 128
+        or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:/" for c in expected_model)):
+        raise IsolationHold("configured_model_invalid")
+    # Only the explicitly qualified Sol6.1 route supplies this option. Older
+    # models preserve their existing wire contract with None. No client prompt
+    # can select effort: direct-role takes it from the frozen runtime policy.
+    if reasoning_effort is not None and (expected_model != 'gpt-6.1-sol' or reasoning_effort != 'medium'):
+        raise IsolationHold('configured_reasoning_unsupported')
+    try:
+        approved_request_hashes = frozenset(approved_request_hashes)
+    except Exception:
+        raise IsolationHold("authority_or_fixture_unqualified") from None
+    if (not isinstance(authority_digest, str) or len(authority_digest) != 64 or any(c not in "0123456789abcdef" for c in authority_digest)
+            or not callable(revalidate_authority) or not approved_request_hashes
+            or len(approved_request_hashes) > 6 or any(
+                not isinstance(h, str) or len(h) != 64 or any(c not in "0123456789abcdef" for c in h)
+                for h in approved_request_hashes)):
+        raise IsolationHold("authority_or_fixture_unqualified")
+    def authority():
+        try:
+            matched = revalidate_authority() == authority_digest
+        except Exception:
+            matched = False
+        if not matched:
+            raise IsolationHold("runtime_authority_changed")
+    authority()
+    if replay_fixture is None:
+        snapshot = _read_snapshot(auth_path)
+        fingerprint = hashlib.sha256(snapshot).digest()
+        token, account, expiry = _credential(snapshot, time.time())
+        del snapshot
+    else:
+        # Replay is structurally synthetic; NO auth read or network transport.
+        token, account, expiry, fingerprint = "", "", float("inf"), None
+    used = set()
+    lock = threading.Lock()
+
+    def persist_assembled(state,diagnostics):
+        if not state["admitted"] or state["persisted"] or assembled_output_observer is None:return
+        text="".join(state["parts"])
+        value={"schema_version":1,"scope":"approved-artificial-unvalidated-output-fields",
+            "request_sha256":state["request_sha256"],"assembled_text":text,"done_texts":state["done"],"final_texts":state["final"],
+            "text_sha256":hashlib.sha256(text.encode()).hexdigest(),
+            "observed_utf8_bytes":sum(len(x.encode()) for x in [text,*state["done"],*state["final"]]),
+            "terminal_seen":diagnostics["terminal_seen"],"terminal_output_category":diagnostics["terminal_output_category"],
+            "validated":False,"caller_returned":False}
+        assembled_output_observer(value)
+        state["persisted"]=getattr(assembled_output_observer,"persisted",False) is True
+        if require_durable_assembled and not state["persisted"]:raise IsolationHold("assembled_capture_unavailable")
+
+    def _send(request: dict, diagnostics, assembled) -> str:
+        """One exact reviewed synthetic request; failed/unknown sends are consumed."""
+        try:
+            body = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except Exception:
+            raise IsolationHold("request_invalid") from None
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        if digest not in approved_request_hashes or len(body.encode()) > 200000:
+            raise IsolationHold("request_not_reviewed")
+        # Freeze payload before admission; no external mutable references on wire.
+        with lock:
+            if digest in used or len(used) >= 6:
+                raise IsolationHold("request_already_consumed_or_cap")
+            used.add(digest)
+        assembled["admitted"]=True;assembled["request_sha256"]=digest
+        authority()
+        if replay_fixture is None and hashlib.sha256(_read_snapshot(auth_path)).digest() != fingerprint:
+            raise IsolationHold("credential_snapshot_changed")
+        if time.time() + 60 >= expiry:
+            raise IsolationHold("credential_expiring")
+        # Import only HTTP transport; no Hermes resolver, tools, session, or memory.
+        if replay_fixture is None:
+            import httpx
+        else:
+            from synthetic_replay_transport import make_transport
+            httpx = make_transport(replay_fixture)
+        payload = {"model": expected_model, "store": False, "stream": True,
+                   "instructions": request["instructions"],
+                   "input": [{"role": "user", "content": body}]}
+        if reasoning_effort is not None:
+            payload['reasoning'] = {'effort': reasoning_effort}
+        headers = {"Authorization": "Bearer " + token, "ChatGPT-Account-ID": account,
+                   "originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.0.0 (Hermes Agent)",
+                   "Accept-Encoding": "identity, gzip, deflate", "Accept": "text/event-stream"}
+        text = assembled["parts"]
+        lifecycle = CompletedItems(expected_model)
+        completed = False
+        completed_id = None
+        started = time.monotonic()
+        metadata = {"status": None, "content_type": None, "content_encoding": None,
+                    "wire_bytes": 0, "decoded_bytes": 0, "parsing_stage": "before_response"}
+        diagnostics["phase"] = "opening_client"
+        try:
+            # No redirects, retry, proxy-env credentials, cookies, or persistent client.
+            with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=30.0, write=2.0, pool=2.0), trust_env=False,
+                              follow_redirects=False) as client:
+                diagnostics["phase"] = "opening_response"
+                with client.stream("POST", ENDPOINT, headers=headers, json=payload) as response:
+                    metadata["status"] = response.status_code
+                    metadata["content_encoding"] = response.headers.get("content-encoding")
+                    metadata["content_type"] = response.headers.get("content-type")
+                    metadata["parsing_stage"] = "headers"
+                    if response.status_code != 200:
+                        raise IsolationHold("provider_http_failure")
+                    diagnostics["phase"] = "reading_stream"
+                    pending = b""
+                    for chunk in _bounded_decoded_chunks(response, started, metadata):
+                        metadata["parsing_stage"] = "sse"
+                        pending += chunk
+                        diagnostics["pending_line_bytes"] = len(pending)
+                        while b"\n" in pending:
+                            raw_line, pending = pending.split(b"\n", 1)
+                            diagnostics["pending_line_bytes"] = len(pending)
+                            diagnostics["last_line_bytes"] = len(raw_line)
+                            if len(raw_line) > 100000:
+                                raise IsolationHold("response_line_oversize")
+                            line = raw_line.rstrip(b"\r").decode("utf-8")
+                            if not line.startswith("data:"):
+                                if line and not line.startswith((":", "event:", "id:", "retry:")):
+                                    raise IsolationHold("response_sse_framing_invalid")
+                                continue
+                            event_data = line[5:]
+                            if event_data.startswith(" "):
+                                event_data = event_data[1:]
+                            if event_data == "[DONE]":
+                                continue
+                            if completed:
+                                raise IsolationHold("response_event_after_completed")
+                            event = _event_json(event_data)
+                            diagnostics["root_event_shape"] = "mapping" if isinstance(event, dict) else "list" if isinstance(event, list) else "scalar"
+                            if not isinstance(event, dict):
+                                _event_diagnostic(diagnostics, None)
+                            kind = event.get("type")
+                            lifecycle.observe(event)
+                            _event_diagnostic(diagnostics, kind)
+                            if kind == "response.output_item.added" and event.get("item", {}).get("type") not in ("message", "reasoning"):
+                                raise IsolationHold("response_tool_event")
+                            if kind == "response.output_text.delta":
+                                delta = event.get("delta")
+                                if not isinstance(delta, str):
+                                    raise IsolationHold("response_invalid")
+                                text.append(delta)
+                            elif kind == "response.output_text.done":
+                                if isinstance(event.get("text"),str):assembled["done"].append(event["text"])
+                            elif kind == "response.completed":
+                                diagnostics["terminal_seen"] = True
+                                result = event.get("response", {})
+                                diagnostics["terminal_output_category"]=_terminal_output_category(result)
+                                diagnostics["terminal_structure"]=_terminal_structure(result)
+                                if isinstance(result,dict) and isinstance(result.get("output"),list):
+                                    for item in result["output"]:
+                                        if isinstance(item,dict) and item.get("type")=="message" and isinstance(item.get("content"),list):
+                                            for part in item["content"]:
+                                                if isinstance(part,dict) and part.get("type")=="output_text" and isinstance(part.get("text"),str):assembled["final"].append(part["text"])
+                                # Durable unvalidated text checkpoint BEFORE strict terminal checks.
+                                persist_assembled(assembled,diagnostics)
+                                diagnostics["terminal_checks"] = _terminal_checks(result, text, expected_model)
+                                try:result=lifecycle.reconcile(result,text)
+                                except ProvenanceHold as error:raise IsolationHold(str(error)) from None
+                                diagnostics["terminal_checks"] = _terminal_checks(result,text,expected_model)
+                                rid = result.get("id")
+                                if (not isinstance(rid, str) or not rid or len(rid) > 256
+                                        or any(ord(c) < 33 or ord(c) > 126 for c in rid)
+                                        or result.get("model") != expected_model
+                                        or result.get("status") != "completed" or not result.get("output") or any(
+                                        item.get("type") not in ("message", "reasoning")
+                                        for item in result.get("output", []))):
+                                    raise IsolationHold("response_nonterminal_or_tool")
+                                final_text = []
+                                for item in result["output"]:
+                                    if item.get("type") == "reasoning":
+                                        continue
+                                    if item.get("role") != "assistant" or item.get("status") != "completed" or not item.get("content"):
+                                        raise IsolationHold("response_message_invalid")
+                                    for content in item["content"]:
+                                        if content.get("type") != "output_text" or not isinstance(content.get("text"), str):
+                                            raise IsolationHold("response_content_invalid")
+                                        final_text.append(content["text"])
+                                if not final_text or "".join(final_text) != "".join(text):
+                                    raise IsolationHold("response_text_mismatch")
+                                completed = True
+                                completed_id = result["id"]
+                                diagnostics["terminal_validated"] = True
+                            elif kind in ("response.failed", "response.incomplete", "error"):
+                                raise IsolationHold("provider_terminal_failure")
+                        if len(pending) > 100000:
+                            raise IsolationHold("response_line_oversize")
+                    diagnostics["eof"] = True
+                    if pending.strip():
+                        raise IsolationHold("response_sse_unterminated")
+                    metadata["parsing_stage"] = "completed" if completed else "eof_without_terminal"
+                    diagnostics["phase"] = "closing_response"
+                diagnostics["phase"] = "closing_client"
+            diagnostics["phase"] = "postcheck"
+        except IsolationHold:
+            raise
+        except Exception:
+            raise IsolationHold("provider_transport_failure") from None
+        finally:
+            safe_metadata = dict(metadata)
+            for key in ("content_type", "content_encoding"):
+                if isinstance(safe_metadata[key], str):
+                    safe_metadata[key] = "".join(c for c in safe_metadata[key][:128] if 32 <= ord(c) <= 126)
+            safe_metadata["content_type"] = _header_category(metadata["content_type"], "type")
+            safe_metadata["content_encoding"] = _header_category(metadata["content_encoding"], "encoding")
+            diagnostics["protocol_metadata"] = safe_metadata
+            diagnostics["completed_lifecycle"] = lifecycle.diagnostic()
+            if response_observer is not None:
+                # Only approved content-free fields. Never headers/auth/body/error.
+                observed = dict(metadata)
+                for key in ("content_type", "content_encoding"):
+                    if isinstance(observed[key], str):
+                        observed[key] = "".join(c for c in observed[key][:128] if 32 <= ord(c) <= 126)
+                try:
+                    response_observer(observed)
+                except Exception:
+                    raise IsolationHold("response_metadata_observer_failed") from None
+        authority()
+        if replay_fixture is None and hashlib.sha256(_read_snapshot(auth_path)).digest() != fingerprint:
+            raise IsolationHold("credential_snapshot_changed")
+        output = "".join(text)
+        if not completed or not output or len(output.encode()) > 100000:
+            raise IsolationHold("response_incomplete_or_oversize")
+        return {"text": output, "provider_response_id": completed_id, "model": expected_model}
+    def send(request):
+        diagnostics = dict(phase="admission", terminal_seen=False, terminal_validated=False,
+                           function_return_ready=False, eof=False, event_sequence=[], event_counts={},
+                           sequence_truncated=False, pending_line_bytes=0, last_line_bytes=0,
+                           root_event_shape=None, terminal_checks=None, terminal_output_category=None)
+        assembled={"parts":[],"done":[],"final":[],"admitted":False,"request_sha256":None,"persisted":False}
+        try:
+            result = _send(request, diagnostics, assembled)
+            persist_assembled(assembled,diagnostics)
+            diagnostics["function_return_ready"] = True
+            return result
+        except BaseException as exc:
+            try:persist_assembled(assembled,diagnostics)
+            except BaseException:pass  # Preserve the original rejection/cancellation.
+            diagnostics["exception"] = _exception_diagnostic(exc)
+            raise
+        finally:
+            if diagnostic_observer is not None:
+                try:
+                    # Structural snapshot ONLY, never body/error text/locals.
+                    diagnostic_observer(json.loads(json.dumps(diagnostics)))
+                except BaseException:
+                    pass  # Never mask the ORIGINAL failure or cancellation.
+            if (require_durable_assembled and "exception" not in diagnostics and not assembled["persisted"]):
+                raise IsolationHold("assembled_capture_unavailable")
+            if (require_durable_diagnostic and "exception" not in diagnostics
+                    and getattr(diagnostic_observer, "persisted", False) is not True):
+                raise IsolationHold("diagnostic_capture_unavailable")
+    return send

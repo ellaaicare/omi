@@ -1,0 +1,116 @@
+"""Real host/adapter/operation classes; HTTP/registry leaves doubled, no live I/O."""
+import asyncio,copy,hashlib,importlib.util,json,sys,unittest
+from pathlib import Path
+from types import SimpleNamespace
+ROOT=Path(__file__).resolve().parents[1];W=ROOT.parent
+sys.path[:0]=[str(ROOT/'candidate'),str(W/'captured-context-canonical-projection-v1/host'),str(W/'context-snapshot-v2-host/candidate'),str(W/'context-snapshot-v2-host/baseline')]
+import semantic_context_snapshot_host_v2 as host
+from semantic_sync_host import BackendAuthorityAdapter,CONTRACT
+from semantic_sync_operation import SyncOnlyOperation,SyncHold,Authority,digest
+class Rig:
+ def __init__(self):
+  self.calls=0;self.before=None;self.status=200;self.workspace='/synthetic/workspace'
+  source={'uid':'owner','conversation_id':'cid','transcript':'Fictional source.'}
+  self.value={'contract':CONTRACT,'uid':'owner','conversation_id':'cid','canonical_source':source,'source_sha256':digest(source),'transcript_sha256':'b'*64,'source_version':'version','active_summary_version_id':'stock','runtime':{'uid':'owner','provider':'hermes','status':'active','binding_id':'binding','revision':1,'profile_name':'profile','agent_id':'agent','workspace_root':self.workspace,'account_user_id':'user','profile_user_id':'user'},'runtime_identity':{'uid':'owner','target_mode':'hermes-cloud-transcript','digest':'a'*64}}
+  self.registry={'agent_owners':{'agent':'owner','profile':'owner'},'agent_workspaces':{'agent':self.workspace,'profile':self.workspace},'users':{'user':{'omiUid':'owner','userId':'user','hermes':{'userProfile':'profile','userAgentId':'agent','userWorkspace':self.workspace}}}}
+  rig=self
+  class Response:
+   @property
+   def status_code(self):return rig.status
+   async def __aenter__(self):
+    rig.calls+=1
+    if rig.before:rig.before(rig.calls)
+    return self
+   async def __aexit__(self,*a):pass
+   async def aiter_bytes(self):yield json.dumps(rig.value).encode()
+  class Client:
+   def __init__(self,**kwargs):pass
+   async def __aenter__(self):return self
+   async def __aexit__(self,*a):pass
+   def stream(self,*args,**kwargs):return Response()
+  self.adapter=BackendAuthorityAdapter(backend_url='http://127.0.0.1:1234',service_key='synthetic',load_registry=lambda:copy.deepcopy(self.registry),agent_id='agent',client_factory=Client,snapshot_only=True)
+  self.op=host._CapturedAuthorityOperation(journal=None,adapter=self.adapter,mapped=self.workspace,workspace_for_agent=lambda agent,uid:self.workspace)
+ async def fresh(self):return await self.op._fresh('owner','cid')
+class Tests(unittest.IsolatedAsyncioTestCase):
+ async def test_single_fetch_per_call_and_no_cache_across_calls(self):
+  r=Rig();a,s=await r.fresh();self.assertEqual(r.calls,1);self.assertEqual(s,digest(r.value['canonical_source']))
+  r.value['runtime_identity']['digest']='c'*64
+  b,t=await r.fresh();self.assertEqual(r.calls,2);self.assertNotEqual(a,b)
+ async def test_actual_generic_operation_still_double_fetches(self):
+  r=Rig();op=SyncOnlyOperation(journal=None,resolve=r.adapter.resolve,read_source=r.adapter.read_source,sync=None)
+  await op._fresh('owner','cid');self.assertEqual(r.calls,2)
+ async def test_generic_blocking_source_authority_change_rejects(self):
+  r=Rig()
+  async def read(uid,cid):
+   source=await r.adapter.read_source(uid,cid);r.value['runtime_identity']['digest']='d'*64;await asyncio.sleep(0);return source
+  op=SyncOnlyOperation(journal=None,resolve=r.adapter.resolve,read_source=read,sync=None)
+  with self.assertRaisesRegex(SyncHold,'authority_changed_during_source_read'):await op._fresh('owner','cid')
+  self.assertEqual(r.calls,2)
+ async def test_registry_change_during_http_rejects(self):
+  r=Rig();r.before=lambda n:r.registry['agent_owners'].__setitem__('agent','foreign')
+  with self.assertRaises(SyncHold):await r.fresh()
+ async def test_workspace_change_during_http_rejects(self):
+  r=Rig();r.before=lambda n:setattr(r,'workspace','/foreign')
+  with self.assertRaisesRegex(SyncHold,'host_request_workspace_changed'):await r.fresh()
+ async def test_consent_or_deletion_backend_rejection_propagates(self):
+  for status in [403,404,409]:
+   r=Rig();r.status=status
+   with self.subTest(status=status),self.assertRaisesRegex(SyncHold,'host_backend_authority_rejected'):await r.fresh()
+ async def test_wrong_source_owner_digest_and_runtime_reject(self):
+  for change in ['owner','source','runtime','mode','identity','deleted_payload']:
+   r=Rig()
+   if change=='owner':r.value['canonical_source']['uid']='foreign'
+   if change=='source':r.value['canonical_source']['transcript']='changed'
+   if change=='runtime':r.value['runtime']['status']='inactive'
+   if change=='mode':r.value['runtime_identity']['target_mode']='wrong'
+   if change=='identity':r.value['runtime_identity']['digest']='private'
+   if change=='deleted_payload':r.value['canonical_source']=None
+   with self.subTest(change=change),self.assertRaises(SyncHold):await r.fresh()
+ async def test_prior_adapter_last_payload_never_reused(self):
+  r=Rig();r.adapter.last={'canonical_source':{'uid':'foreign'}}
+  await r.fresh();self.assertEqual(r.calls,1)
+ async def test_no_cross_source_reuse_and_source_change_sampled(self):
+  r=Rig();await r.fresh();r.value['canonical_source']['transcript']='new';r.value['source_sha256']=digest(r.value['canonical_source']);_,h=await r.fresh();self.assertEqual(h,r.value['source_sha256']);self.assertEqual(r.calls,2)
+  with self.assertRaises(SyncHold):await r.op._fresh('owner','foreign')
+ async def test_unknown_adapter_subclass_rejected(self):
+  class Unknown(BackendAuthorityAdapter):pass
+  a=Unknown(backend_url='http://127.0.0.1:1234',service_key='synthetic',load_registry=lambda:{},agent_id='agent')
+  with self.assertRaisesRegex(SyncHold,'full_runtime_authority_required'):host._CapturedAuthorityOperation(journal=None,adapter=a,mapped='/tmp',workspace_for_agent=lambda *a:'/tmp')
+
+class CaptureComposition(unittest.IsolatedAsyncioTestCase):
+ async def exercise(self,change=None):
+  # Existing real hydration fixture creates only a disposable synthetic workspace.
+  spec=importlib.util.spec_from_file_location('synthetic_manifest_fixture',W/'context-snapshot-v2-host/tests/test_host_manifest.py')
+  fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+  f=fixture.Rig();r=Rig()
+  try:
+   r.value['uid']=f.uid;r.value['conversation_id']=f.cid;r.value['canonical_source']=copy.deepcopy(f.source);r.value['source_sha256']=f.source_sha
+   r.value['runtime']['uid']=f.uid;r.value['runtime']['workspace_root']=str(f.path);r.value['runtime_identity']['uid']=f.uid
+   r.workspace=str(f.path)
+   r.registry['agent_owners']={'agent':f.uid,'profile':f.uid};r.registry['agent_workspaces']={'agent':r.workspace,'profile':r.workspace};r.registry['users']['user']['omiUid']=f.uid;r.registry['users']['user']['hermes']['userWorkspace']=r.workspace
+   authority=host.parse_authority(r.value,f.uid,f.cid,'agent',r.registry)
+   binding={'uid':f.uid,'conversation_id':f.cid,'source_sha256':f.source_sha,'runtime_authority_sha256':authority.identity.digest,'registry_revision':authority.registry_revision}
+   f.receipts['start']['binding']=binding;f.receipts['completed']['binding']=binding
+   op=host._CapturedAuthorityOperation(journal=SimpleNamespace(read=lambda key,suffix:copy.deepcopy(f.receipts[suffix])),adapter=r.adapter,mapped=r.workspace,workspace_for_agent=lambda agent,uid:r.workspace)
+   async def batch(**kw):
+    records={cid:{**copy.deepcopy(f.metadata[cid]),'owner_sha256':hashlib.sha256(f.uid.encode()).hexdigest(),'render_projection':copy.deepcopy(f.rows[0].projection)} for cid in kw['conversation_ids']}
+    response={'contract':'ella-context-records-v2.1','owner_sha256':hashlib.sha256(f.uid.encode()).hexdigest(),'target_conversation_id':f.cid,'target_source_sha256':f.source_sha,'runtime_authority_sha256':authority.identity.digest,'attempt_scope_sha256':f.attempt,'records':records}
+    if change=='runtime':r.value['runtime_identity']['digest']='d'*64
+    if change=='source':r.value['canonical_source']['transcript']='changed';r.value['source_sha256']=digest(r.value['canonical_source'])
+    if change=='consent':r.status=403
+    if change=='registry':r.registry['agent_owners']['agent']='foreign'
+    if change=='record_owner':next(iter(records.values()))['owner_sha256']='f'*64
+    if change=='record_deleted':next(iter(records.values()))['deleted']=True
+    return response
+   service=host.CapturedContextHostV2(sync_operation=op,read_materialized_rows=lambda **kw:copy.deepcopy(f.rows),read_record_batch=batch)
+   result=await service.capture(uid=f.uid,conversation_id=f.cid,expected_source_sha256=f.source_sha)
+   return result,r.calls
+  finally:f.close()
+ async def test_full_capture_keeps_two_fresh_samples_and_record_batch(self):
+  captured,calls=await self.exercise();self.assertEqual(calls,2);self.assertEqual(len(captured['sidecar']['recent_index_records']),1)
+ async def test_after_batch_runtime_source_consent_registry_changes_reject(self):
+  for change in ['runtime','source','consent','registry','record_owner','record_deleted']:
+   with self.subTest(change=change),self.assertRaises((SyncHold,host.ManifestHold)):
+    await self.exercise(change)
+
+if __name__=='__main__':unittest.main()
