@@ -1,0 +1,150 @@
+"""Existing-service-auth bounded owner metadata for captured context compatibility.
+No grant, source mutation, admission, model or implicit retry. Caller UID must be
+resolved by require_callback_service, never a JSON body identity.
+"""
+from __future__ import annotations
+import asyncio,re,json,hashlib,copy,zlib
+from dataclasses import dataclass
+from datetime import datetime,timezone
+from ella.services.canonical_summary_source import canonical_source_from_conversation,canonical_source_sha256,conversation_data_payload
+from models.hermes_cloud_enrichment_contract import transcript_source
+from ella.services.recent_context_projection_v2 import projection_from_payload
+CONTRACT='ella-context-records-v2.1'
+MAX_RECORDS=80
+MAX_SOURCE_BYTES=16*1024*1024
+MAX_RESPONSE_BYTES=262144
+TOKEN=re.compile(r'^[A-Za-z0-9_.:-]{1,200}$')
+SHA=re.compile(r'^[0-9a-f]{64}$')
+class ContextRecordsRejected(ValueError):pass
+def reject(code):raise ContextRecordsRejected(code)
+def digest(v):return hashlib.sha256(json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False,default=str).encode()).hexdigest()
+@dataclass(frozen=True)
+class Dependencies:
+ authority:object
+ attempt:object
+ records:object
+
+def strict_record(raw,uid):
+ """Silent bounded decode; a present undecodable document is NEVER missing."""
+ if type(raw) is not dict:reject('context_record_invalid')
+ if raw.get('deleted'):
+  return {k:raw[k] for k in ('id','uid','user_id','deleted') if k in raw}
+ data=copy.deepcopy(raw);segments=data.get('transcript_segments')
+ try:
+  if data.get('data_protection_level')=='enhanced' and isinstance(segments,str):
+   from database.conversations import encryption
+   segments=encryption.decrypt_strict(segments,uid)
+  if data.get('transcript_segments_compressed'):
+   if isinstance(segments,str):segments=bytes.fromhex(segments)
+   if not isinstance(segments,bytes) or len(segments)>MAX_SOURCE_BYTES:reject('context_record_decode_invalid')
+   decoder=zlib.decompressobj();plain=decoder.decompress(segments,MAX_SOURCE_BYTES+1)
+   if len(plain)>MAX_SOURCE_BYTES or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:reject('context_record_decode_capacity')
+   segments=json.loads(plain.decode('utf-8'))
+  elif isinstance(segments,str):
+   if len(segments.encode())>MAX_SOURCE_BYTES:reject('context_record_decode_capacity')
+   segments=json.loads(segments)
+ except ContextRecordsRejected:raise
+ except Exception:reject('context_record_decode_invalid')
+ if type(segments) is not list or any(type(v) is not dict for v in segments):reject('context_record_segments_invalid')
+ data['transcript_segments']=segments
+ if len(json.dumps(data,ensure_ascii=False,default=str).encode())>MAX_SOURCE_BYTES:reject('context_record_decode_capacity')
+ return data
+
+def _production(db):
+ from database import conversations,normal_enrichment_activation as activation,normal_account_lifecycle as lifecycle,enrichment_job_isolation as isolation,enrichment_attempt_fence as fence
+
+ from ella.services.semantic_context_authority import read_context_authority_sample as read_context_authority
+ from ella.services.semantic_runtime_authority import resolve_semantic_runtime,semantic_runtime_authority_identity
+ from ella.services.ai_consent import assert_current_ai_consent
+ from models.hermes_cloud_enrichment_contract import build_enrichment_identity
+ def strict_get(uid,cid):
+  snap=db.collection('users').document(uid).collection('conversations').document(cid).get(timeout=5,retry=None)
+  return strict_record(snap.to_dict(),uid) if snap.exists else None
+ async def authority(uid,cid):
+  return await read_context_authority(uid=uid,conversation_id=cid,read_conversation=strict_get,consent=assert_current_ai_consent,resolve=resolve_semantic_runtime,identity=semantic_runtime_authority_identity)
+ def attempt(uid,cid):
+  doc=strict_get(uid,cid)
+  if not isinstance(doc,dict):reject('context_target_missing')
+  recovery_context=lifecycle.require_callback_source(db,uid,cid,doc)
+  identity=build_enrichment_identity(uid=uid,conversation_id=cid,conversation=doc)
+  selected_job_id=identity.job_id
+  if recovery_context is not None:
+   if (type(recovery_context) is not dict or recovery_context.get('contract')!='ella-server-recovery-context-v1'
+       or recovery_context.get('uid')!=uid or recovery_context.get('conversation_id')!=cid
+       or type(recovery_context.get('job_id')) is not str or not recovery_context['job_id'].startswith('hcer_')):reject('context_attempt_not_active')
+   # Only the authenticated server callback chooses recovery; no body flag/job ID.
+   selected_job_id=recovery_context['job_id']
+  js=db.collection(activation.JOBS).document(selected_job_id).get(timeout=5,retry=None);job=js.to_dict() if js.exists else {}
+  if job.get('uid')!=uid or job.get('conversation_id')!=cid or job.get('job_id')!=selected_job_id or job.get('client_interaction_id')!=identity.client_interaction_id or job.get('transcript_sha256')!=identity.transcript_sha256 or job.get('status')!='running' or job.get('dispatch_state')!='started_unknown':reject('context_attempt_not_active')
+  if recovery_context is not None:
+   from database import saved_source_recovery as recovery
+   tag=recovery.tag_of(job)
+   if (tag is None or tag['recovery_id']!=recovery_context.get('recovery_id')
+       or tag['parent_job_sha256']!=recovery_context.get('parent_job_sha256')):reject('context_attempt_not_active')
+  actual=isolation.attempt(job);stored=job.get(isolation.FENCE_FIELD)
+  fence._require(stored,actual)
+  if not fence.callback_allowed(stored,actual):reject('context_attempt_closed')
+  policy=activation.read_policy(db)
+  attempt_sha=digest({'contract':'ella-captured-context-attempt-v2','fence_key':stored['key'],'admission_epoch':job['admission_epoch'],'policy_epoch':policy['epoch'],'account_source_lineage':lifecycle.admission_tag(job)})
+  if recovery_context is not None and attempt_sha!=recovery_context.get('attempt_scope_sha256'):reject('context_attempt_not_active')
+  return attempt_sha
+ def records(uid,cids):
+  refs=[db.collection('users').document(uid).collection('conversations').document(cid) for cid in cids]
+  snapshots=list(db.get_all(refs,timeout=8,retry=None)) if refs else []
+  if len(snapshots)!=len(refs) or len({s.id for s in snapshots})!=len(refs) or {s.id for s in snapshots}!=set(cids):reject('context_records_incomplete')
+  output={};total=0;decoded_total=0
+  for snap in snapshots:
+   if not snap.exists:
+    output[snap.id]=None;continue
+   raw=snap.to_dict();total+=len(json.dumps(raw,ensure_ascii=False,default=str).encode())
+   if total>MAX_SOURCE_BYTES:reject('context_records_source_capacity')
+   prepared=strict_record(raw,uid)
+   decoded_total+=len(json.dumps(prepared,ensure_ascii=False,default=str).encode())
+   if decoded_total>MAX_SOURCE_BYTES:reject('context_records_decoded_capacity')
+   output[snap.id]=prepared
+  return output
+ return Dependencies(authority,attempt,records)
+
+def _record(uid,cid,doc):
+ owner=hashlib.sha256(uid.encode()).hexdigest()
+ missing={'conversation_id':cid,'owner_sha256':owner,'canonical_source_sha256':None,'transcript_sha256':None,'active_summary_version_id':None,'deleted':True,'render_projection_sha256':None,'render_projection':None}
+ if doc is None:return missing
+ if not isinstance(doc,dict) or doc.get('id')!=cid or any(k in doc and doc[k]!=uid for k in ['uid','user_id']):reject('context_record_owner_changed')
+ if doc.get('deleted'):return missing
+ if doc.get('status')!='completed' or doc.get('discarded') or doc.get('is_locked'):reject('context_record_unavailable')
+ version=doc.get('active_summary_version_id')
+ if not isinstance(version,str) or not version:reject('context_record_version_missing')
+ source=canonical_source_from_conversation(uid=uid,conversation_id=cid,conversation=doc)
+ projection=projection_from_payload(conversation_id=cid,payload=conversation_data_payload(uid=uid,conversation_id=cid,conversation=doc))
+ if set(projection)!={'stamp','title','emoji','category','segments','overview'} or any(type(v) is not str for v in projection.values()):reject('context_render_projection_invalid')
+ return {'conversation_id':cid,'owner_sha256':owner,'canonical_source_sha256':canonical_source_sha256(source),'transcript_sha256':transcript_source(doc)[1],'active_summary_version_id':version,'deleted':False,'render_projection_sha256':digest(projection),'render_projection':projection}
+
+async def read_context_records(*,db,uid,target_cid,arguments,dependencies=None):
+ if not isinstance(uid,str) or not uid or not isinstance(target_cid,str) or not TOKEN.fullmatch(target_cid) or '..' in target_cid:reject('context_records_identity_invalid')
+ if type(arguments) is not dict or set(arguments)!={'expected_target_source_sha256','expected_runtime_authority_sha256','conversation_ids'}:reject('context_records_arguments_invalid')
+ if any(type(arguments[k]) is not str or not SHA.fullmatch(arguments[k]) for k in ['expected_target_source_sha256','expected_runtime_authority_sha256']):reject('context_records_arguments_invalid')
+ cids=arguments['conversation_ids']
+ if type(cids) is not list or len(cids)>MAX_RECORDS or any(type(cid) is not str or not TOKEN.fullmatch(cid) or '..' in cid for cid in cids) or len(cids)!=len(set(cids)):reject('context_records_ids_invalid')
+ d=dependencies or _production(db)
+ def bind(value):
+  if value.get('uid')!=uid or value.get('conversation_id')!=target_cid or value.get('source_sha256')!=arguments['expected_target_source_sha256'] or value.get('runtime_identity',{}).get('uid')!=uid or value.get('runtime_identity',{}).get('digest')!=arguments['expected_runtime_authority_sha256']:reject('context_records_target_changed')
+  return value
+ async with asyncio.timeout(23):
+  before,attempt=await asyncio.gather(d.authority(uid,target_cid),asyncio.to_thread(d.attempt,uid,target_cid));before=bind(before)
+  raw=await asyncio.to_thread(d.records,uid,cids)
+  if type(raw) is not dict or set(raw)!=set(cids):reject('context_records_incomplete')
+  rows={cid:_record(uid,cid,raw[cid]) for cid in cids}
+  after,after_attempt=await asyncio.gather(d.authority(uid,target_cid),asyncio.to_thread(d.attempt,uid,target_cid));after=bind(after)
+  if before!=after or attempt!=after_attempt:reject('context_records_authority_changed')
+  result={'contract':CONTRACT,'owner_sha256':hashlib.sha256(uid.encode()).hexdigest(),'target_conversation_id':target_cid,'target_source_sha256':arguments['expected_target_source_sha256'],'runtime_authority_sha256':arguments['expected_runtime_authority_sha256'],'attempt_scope_sha256':attempt,'records':rows}
+  if len(json.dumps(result,ensure_ascii=False).encode())>MAX_RESPONSE_BYTES:reject('context_records_capacity')
+  return result
+
+
+RECORD_HOLD_CODES=frozenset(['context_attempt_closed', 'context_attempt_not_active', 'context_record_decode_capacity', 'context_record_decode_invalid', 'context_record_invalid', 'context_record_owner_changed', 'context_record_segments_invalid', 'context_record_unavailable', 'context_record_version_missing', 'context_records_arguments_invalid', 'context_records_authority_changed', 'context_records_capacity', 'context_records_decoded_capacity', 'context_records_identity_invalid', 'context_records_ids_invalid', 'context_records_incomplete', 'context_records_source_capacity', 'context_records_target_changed', 'context_render_projection_invalid', 'context_target_missing'])
+def closed_failure_code(error):
+ if type(error) is ContextRecordsRejected and len(error.args)==1 and type(error.args[0]) is str and error.args[0] in RECORD_HOLD_CODES:return error.args[0]
+ if isinstance(error,TimeoutError):return 'context_records_timeout'
+ if type(error).__name__ in {'ContextAuthorityRejected','ProvisioningError'}:return 'context_records_authority_changed'
+ if type(error).__name__=='FenceRejected':return 'context_attempt_closed'
+ return 'unknown'

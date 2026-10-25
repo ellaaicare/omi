@@ -1,0 +1,15 @@
+{
+  "state": "SOURCE_QUALIFIED_ONE_FILE_CANDIDATE_NOT_YET_DEPLOYED",
+  "files": {
+    "candidate/ella/services/semantic_context_records_v2.py.source": "da9a2fe2518ae24a34cf5bb40c47319e5cb29af758d10e130a5a2c8f44b16afd",
+    "baseline/ella/services/semantic_context_records_v2.py.source": "b0ddf7e68b423679d897bbea76bc3292c355a236b10c520669d76a972b6b3eca",
+    "tests/test_production_attempt.py.source": "ceb6e5d0e7bbe2bb80f217710e42d126deb2af21fdf39b7faa99a0db8dfb7d4c"
+  },
+  "source_freeze_sha256": "a98e8f311a7b88b40ce86f06eb76f36070e379153e30aa51e35e7ffc119e1c7a",
+  "independent_review_sha256": "7333693174e21d060a6bb1d5f542f093e8ae9da3d633d80ce17b2ba31df8ea1d",
+  "author_cases": 8,
+  "independent_cases": 8,
+  "test_boundary": "Real production dependency factory, callback, graph and recovery eligibility over serialized fake Firestore; external consent/route/crypto boundaries explicit. Not real service import, Firestore RPC or model execution.",
+  "private_records_or_credentials_included": false,
+  "live_retry_or_quarantine_reopening_authorized": false
+}

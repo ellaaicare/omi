@@ -1,0 +1,69 @@
+"""Actual _production.attempt + real callback/graph/recovery/consent functions.
+Only existing serialized datastore, plaintext decrypt/grant leaves and unused
+runtime/authority imports are synthetic. No override of d.attempt or callback.
+"""
+import ast,copy,importlib.util,pathlib,sys,types,unittest
+from unittest.mock import patch
+W=pathlib.Path(__file__).resolve().parents[3];ROOT=W/'quarantine-recovery-v1/recovery-context-attempt-v1';BASE=W/'captured-context-factoring-v2/candidate/ella/services/semantic_context_records_v2.py'
+def load(name,path):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+F=load('real_recovery_callback_fixture',W/'quarantine-recovery-v1/no-completion-successor-v1/decoded-stock-v3/tests/test_pregen_successor.py')
+class Cases(unittest.TestCase):
+ @classmethod
+ def setUpClass(cls):F.Cases.setUpClass()
+ @classmethod
+ def tearDownClass(cls):F.Cases.tearDownClass()
+ def setUp(self):
+  self.f=F.Cases(methodName='test_actual_admit_claim_begin_graph_callback_namespace');self.f.setUp();f=self.f
+  identity=f.model.build_enrichment_identity(uid='u',conversation_id='c',conversation=f.doc);self.identity=identity
+  # Match actual persisted parent/current-enrichment identity, not arbitrary test IDs.
+  f.parent.update(job_id=identity.job_id,client_interaction_id=identity.client_interaction_id,policy_version=identity.policy_version,trace_id=identity.trace_id)
+  old_attempt=f.h.isolation.attempt(dict(f.parent,lease_token=f.parent['operation']['lease_token']));f.parent[f.h.isolation.FENCE_FIELD]=f.h.fence.finish(f.h.fence.begin(f.h.fence.reserve(old_attempt,claims_open=True,previously_quarantined=False),old_attempt,claims_open=True),old_attempt,outcome='unknown_quarantined')
+  f.db.put((f.h.activation.JOBS,identity.job_id),f.parent);f.db.put(f.h.isolation.tombstone_ref(f.db,f.parent).key,f.tomb)
+  f.doc['semantic_retained_completion_jobs_v1']['old-start']['client']=identity.client_interaction_id;f.db.put(f.key,f.doc)
+  f.record.update(parent_job_id=identity.job_id,job_sha256=f.h.lifecycle.digest(f.parent),original_attempt_sha256=f.ns.digest(f.h.fence._key(old_attempt)),original_semantic_sha256=f.ns.digest({k:f.doc.get(k) for k in f.ns.FIELDS}));f.expected.update(parent_job=f.record['job_sha256'],source=f.h.lifecycle.digest(f.doc))
+  result=f.pregen.admit_pregen(f.db.transaction(),f.db,proof=f.proof,parent_job_id=identity.job_id,expected=f.expected,reviewed_detachment_sha256='f'*64,protocol_revision=f.pregen.PROTOCOL,now=F.M.H.h.NOW,reviewed_sync_receipts=f.record['reviewed_sync_receipts']);job=f.db.rows[(f.h.activation.JOBS,result['recovery_job_id'])];f.h.issue(job);claimed=f.h.claim(job);self.assertTrue(f.h.begin(claimed));self.job=f.db.rows[(f.h.activation.JOBS,job['job_id'])]
+  # Unused dependency imports are explicit leaves; actual callback and graph stay real.
+  async def unused(*a,**kw):raise AssertionError('unused_runtime_io')
+  a=types.ModuleType('ella.services.semantic_context_authority');a.read_context_authority_sample=unused
+  r=types.ModuleType('ella.services.semantic_runtime_authority');r.resolve_semantic_runtime=unused;r.semantic_runtime_authority_identity=lambda *a:None
+  self.p=patch.dict(sys.modules,{a.__name__:a,r.__name__:r});self.p.start();self.addCleanup(self.p.stop)
+  f.consent.assert_current_ai_consent=lambda uid:uid
+  load('ella.services.recent_context_projection_v2',W/'captured-context-canonical-projection-v1/candidate/ella/services/recent_context_projection_v2.py')
+  self.new=load('candidate_context_records',ROOT/'candidate/ella/services/semantic_context_records_v2.py');self.old=load('baseline_context_records',BASE)
+ def test_exact_baseline_reproduces_closed_hold_corrected_real_callback_passes(self):
+  self.assertEqual(self.f.db.rows[(self.f.h.activation.JOBS,self.identity.job_id)]['status'],'quarantined')
+  with self.assertRaisesRegex(self.old.ContextRecordsRejected,'context_attempt_not_active'):self.old._production(self.f.db).attempt('u','c')
+  expected=sys.modules['ella.services.semantic_captured_context'].expected_attempt_digest(self.job);self.assertEqual(self.new._production(self.f.db).attempt('u','c'),expected)
+ def test_real_callback_also_passes_inside_worker_context_after_retained_start(self):
+  raw=self.f.db.rows[self.f.key];raw[self.f.ns.ROOT][self.job[self.f.r.TAG]['recovery_id']]['state']={'semantic_retained_completion_jobs_v1':{'new':{'status':'started','canonical_user':{'confirmed':True},'learning':{'status':'no_learning'}}}};self.f.db.put(self.f.key,raw)
+  future=sys.modules['database.normal_future_source_disposition'];token=future._worker_job.set(self.job)
+  try:self.assertEqual(self.new._production(self.f.db).attempt('u','c'),sys.modules['ella.services.semantic_captured_context'].expected_attempt_digest(self.job))
+  finally:future._worker_job.reset(token)
+ def test_closed_or_wrong_lease_actual_graph_rejects(self):
+  self.job['lease_token']='foreign';self.f.db.put((self.f.h.activation.JOBS,self.job['job_id']),self.job)
+  with self.assertRaises(Exception):self.new._production(self.f.db).attempt('u','c')
+ def test_real_consent_revocation_rejects(self):
+  self.f.db.put(('users','u'),{'ai_consent':{'approved':False}})
+  with self.assertRaises(Exception):self.new._production(self.f.db).attempt('u','c')
+ def test_actual_source_edit_or_wrong_owner_rejects(self):
+  raw=self.f.db.rows[self.f.key];raw['transcript_segments'][0]['text']='edited';self.f.db.put(self.f.key,raw)
+  with self.assertRaises(Exception):self.new._production(self.f.db).attempt('u','c')
+ def test_descriptor_new_attempt_or_foreign_job_never_accepted(self):
+  # Negative wire-proof seam only; positive cases above use genuine callback.
+  real=self.f.h.lifecycle.require_callback_source;descriptor=real(self.f.db,'u','c',self.f.doc,now=F.M.H.h.NOW)
+  for key,value in [('job_id',self.identity.job_id),('uid','foreign'),('attempt_scope_sha256','0'*64),('recovery_id','0'*64)]:
+   changed={**descriptor,key:value}
+   with self.subTest(key=key),patch.object(self.f.h.lifecycle,'require_callback_source',lambda *a,**kw:changed),self.assertRaises(self.new.ContextRecordsRejected):self.new._production(self.f.db).attempt('u','c')
+ def test_ordinary_actual_callback_and_digest_unchanged(self):
+  h=F.M.H.SingleClaimTests(methodName='test_single_exact_job_reserved_once_then_begin_closes_atomically');h.setUp();h.owner('ordinary');job=h.job('ordinary');cid=job['conversation_id'];key=('users','ordinary','conversations',cid);doc=h.db.rows[key]
+  doc.update(active_summary_version_id='stock',started_at=F.M.H.h.NOW,finished_at=F.M.H.h.NOW,structured={'title':'fictional','overview':'fictional','emoji':'x','category':'other'},transcript_segments=[{'text':'fictional ordinary fixture'}])
+  identity=self.f.model.build_enrichment_identity(uid='ordinary',conversation_id=cid,conversation=doc);job.update(job_id=identity.job_id,client_interaction_id=identity.client_interaction_id,transcript_sha256=identity.transcript_sha256,policy_version=identity.policy_version,trace_id=identity.trace_id)
+  pin=sys.modules['ella.services.retained_completion_enrichment'].source_pin(doc,'ordinary',cid);binding={'source_family':'synthetic','source_sha256':pin[0],'source_version':pin[1],'stock_summary_version_sha256':h.lifecycle.digest(pin[2]),'transcript_sha256':job['transcript_sha256'],'client_interaction_id':job['client_interaction_id']};doc['test_binding']=binding;tag=job[h.lifecycle.TAG];tag.update(source_binding=binding,binding_sha256=h.lifecycle.digest(binding))
+  h.db.put(key,doc,created=tag['source_created_at']);h.db.put((h.activation.JOBS,job['job_id']),job);marker={k:job[k] for k in h.activation.IDENTITY};marker.update(contract=h.lifecycle.CONTRACT,state='prepared',tag=tag,epoch=h.policy['epoch']);h.db.put((h.lifecycle.ADMISSIONS,tag['marker_id']),marker)
+  policy=h.activation.read_policy(h.db);policy['queue_isolation']['claims_open']=False;h.db.put(h.activation.reference(h.db).key,policy);h.issue(job);claimed=h.claim(job);self.assertIsNotNone(claimed);self.assertTrue(h.begin(claimed))
+  old=self.old._production(h.db).attempt('ordinary',cid);new=self.new._production(h.db).attempt('ordinary',cid);self.assertEqual(old,new)
+ def test_unaffected_functions_exact_ast(self):
+  get=lambda p:{n.name:ast.dump(n,include_attributes=False) for n in ast.parse(p.read_text()).body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef))}
+  before=get(BASE);after=get(ROOT/'candidate/ella/services/semantic_context_records_v2.py');self.assertEqual({k:v for k,v in before.items() if k!='_production'},{k:v for k,v in after.items() if k!='_production'})
+if __name__=='__main__':unittest.main()
