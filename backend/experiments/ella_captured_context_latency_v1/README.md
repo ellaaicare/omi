@@ -1,0 +1,13 @@
+# Captured-context phase latency correction
+
+Source-qualified candidate, not a live deployment or successful enrichment claim. The `.py.source` files preserve exact reviewed bytes and are not installed by their presence here.
+
+The trusted, admitted captured-context worker reuses its sealed input for two non-effect preparation reads. Each read remains scoped to the same actual attempt, OperationBudget, owner/source and publication binding. Full live context validation still precedes every model dispatch and canonical write. After exact canonical readback, fresh source, consent, runtime and graph/attempt checks replace one redundant full context read. Legacy paths retain their existing behavior. Publication, result validation, source deletion/version checks, quarantine, CAS and replay fences remain unchanged.
+
+The actual integration/ledger/bridge and publication classes complete two synthetic roles and a guarded receipt in the offline fixture. Full context reads fall from nine to five through the retained producer; two later publication checks remain, giving eleven to seven overall. Twenty-one cases passed in the owner run (0.450 seconds) and independent root verification (0.500 seconds). Actual service Python 3.11 imports passed with network blocked and matching PublicationBinding class identity. HTTP/model, repository/crypto and semantic result leaves are explicit doubles in these tests; this is not real-provider or Firestore acceptance.
+
+These tests depend on the preserved `captured-context-v2` fixture and service source closure. This directory is not a self-contained runnable test closure. Exact test source is included for review, not as a claim that copying this directory reproduces the run.
+
+Performance stress tests retain 600-second job and 480-second host ceilings. Hypothetical 53-second context reads still fail; a 20-second scenario fits with only a small host margin before unmodelled work. Those scenarios are not measurements of the failed attempt. No remaining saved record should be submitted solely because these tests pass. Required next gates are independent deployment-controller review, exact protected-state and source preflight, and content-free account-scoped timing verification. No credentials, model switch, n8n change or queue admission is part of this candidate.
+
+See [the master analysis](../../../docs/engineering/ella-regression-analysis-2026-10-24.md) for deployment truth and the exact known/unknown failure boundary.

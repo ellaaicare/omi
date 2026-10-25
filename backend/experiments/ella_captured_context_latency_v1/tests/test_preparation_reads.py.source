@@ -1,0 +1,69 @@
+"""Actual integration+ledger preparation under real captured scope/binding/budget.
+Producer body is a pure stop-before-effect observer; HTTP/authority/storage leaves doubled.
+"""
+import ast,asyncio,copy,sys,threading,time,types,unittest
+from dataclasses import dataclass,asdict
+from typing import Callable
+from unittest.mock import patch
+from test_bridge_readback_split import Rig,actual,ROOT,W,definitions,TIMING
+
+def module(name,**kw):
+ m=types.ModuleType(name);m.__dict__.update(kw);return m
+class Tests(unittest.TestCase):
+ def setUp(self):
+  self.r=Rig();self.produced=[];self.created=[];self.context_reads=0
+  producer={"__name__":__name__,'dataclass':dataclass,'ContractError':ValueError}
+  definitions(actual.BACKEND/'ella/services/semantic_producer_v1.py',{'PublicationBinding'},producer)
+  self.ProducerBinding=producer['PublicationBinding']
+  self.ledger_scope={'__name__':__name__,'_timing':TIMING,'current_budget':actual.BUDGET.current_budget,'asyncio':asyncio,'copy':copy,'json':actual.json,'threading':threading,'time':time,'asdict':asdict,'dataclass':dataclass,'Callable':Callable,'admission':actual.PUB,'canonical_source_from_conversation':actual.CAN.canonical_source_from_conversation,'EXECUTIONS_FIELD':'semantic_producer_executions_v1','MAX_OPERATIONS':8,'MAX_RESULT_BYTES':16000}
+  definitions(ROOT/'candidate/ella/services/semantic_producer_ledger.py',{'BackendTurn','TrustedRuntimeAdapter','DurableServerLedger','run_versioned_producer'},self.ledger_scope)
+  def produce(**kwargs):
+   self.produced.append(kwargs);return {'state':'PURE_PREPARATION_STOP_BEFORE_EFFECT'}
+  async def resolve(*a,**kwargs):return self.r.r.runtime
+  def factory(**kwargs):
+   self.created.append(kwargs)
+   self.r.bridge=self.r.Bridge(binding=kwargs['binding'],current_binding=kwargs['current_binding'],current_source_binding=kwargs.get('current_source_binding'),repository=None,event_store=self.r.bridge.event_store,dependencies=self.r.deps,expected_runtime_identity=kwargs['expected_runtime_identity'],timeout_seconds=kwargs['timeout_seconds'])
+   return self.r.bridge
+  def context_reader(**kwargs):
+   def full(runtime,**kw):self.context_reads+=1;return self.r.r.read()
+   return full
+  self.integration_scope={'__name__':__name__,'_timing':TIMING,'current_budget':actual.BUDGET.current_budget,'asyncio':asyncio,'admission':actual.PUB,'context_reader':context_reader,'HostReadBudget':lambda:types.SimpleNamespace(),'run_versioned_producer':self.ledger_scope['run_versioned_producer']}
+  definitions(ROOT/'candidate/ella/services/semantic_retained_integration.py',{'run_retained_contextual_producer'},self.integration_scope)
+  self.mods={'ella.services.semantic_producer_v1':module('ella.services.semantic_producer_v1',PublicationBinding=self.ProducerBinding),'ella.services.semantic_contextual_producer_v3':module('ella.services.semantic_contextual_producer_v3',produce=produce),'ella.services.semantic_runtime_authority':module('ella.services.semantic_runtime_authority',resolve_semantic_runtime=resolve,semantic_runtime_authority_identity=lambda runtime:self.r.r.identity,revalidate_semantic_runtime=resolve),'ella.services.ai_consent':module('ella.services.ai_consent',assert_current_ai_consent=lambda uid:uid),'ella.services.semantic_self_hosted_runtime':module('ella.services.semantic_self_hosted_runtime',create_self_hosted_runtime_bridge=factory)}
+  self.p=patch.dict(sys.modules,self.mods);self.p.start()
+ def tearDown(self):self.p.stop();self.r.close()
+ def reader(self,*a):return self.r.r.reader()
+ def direct(self,initial):
+  return asyncio.run(self.ledger_scope['run_versioned_producer'](uid=self.r.r.uid,conversation_id=self.r.r.cid,read_conversation=self.reader,update_conversation=lambda *a:None,read_companion_context=lambda uid:self.full(),run_backend_turn=lambda **kw:None,provider_deadline_seconds=90,role_deadline_seconds=120,candidate_schema_version=2,semantic_contract_version=2,read_source_binding=self.r.cheap,initial_companion_context=initial))
+ def full(self):self.context_reads+=1;return self.r.r.read()
+ def integration(self):return asyncio.run(self.integration_scope['run_retained_contextual_producer'](uid=self.r.r.uid,conversation_id=self.r.r.cid,repository=None,read_conversation=self.reader,update_conversation=lambda *a:None))
+ def test_two_non_effect_preparation_reads_reuse_exact_sealed_data_without_host_read(self):
+  self.integration();self.assertEqual(self.context_reads,0);self.assertEqual(len(self.produced),1);self.assertIs(type(self.produced[0]['binding']),self.ProducerBinding);self.assertIsNot(self.ProducerBinding,actual.PUB.PublicationBinding);self.assertEqual(self.produced[0]['companion_context'],self.r.r.capture_value);self.assertEqual(self.r.counts['provider'],0)
+ def test_default_initial_none_keeps_full_context_data_read(self):
+  self.direct(None);self.assertEqual(self.context_reads,1)
+ def test_tampered_preparation_context_never_reaches_producer(self):
+  def wrong(uid):
+   value=copy.deepcopy(self.r.r.capture_value);value['documents']['MEMORY.md']='tampered';return value
+  with self.assertRaises(actual.PUB.SemanticPublicationRejectedError):self.direct(wrong)
+  self.assertEqual(self.produced,[])
+ def test_preparation_callback_source_edit_fails_before_effect(self):
+  def change(uid):self.r.r.doc['deleted']=True;return self.r.r.capture_value
+  with self.assertRaises(actual.PUB.SemanticPublicationRejectedError):self.direct(change)
+  self.assertEqual(self.produced,[])
+ def test_missing_scope_cannot_supply_initial_callback(self):
+  token=actual.SCOPE._CURRENT.set(None)
+  try:
+   with self.assertRaises(actual.PUB.SemanticPublicationRejectedError):self.direct(lambda uid:self.r.r.capture_value)
+  finally:actual.SCOPE._CURRENT.reset(token)
+  self.assertEqual(self.produced,[])
+ def test_new_scope_or_budget_during_preparation_cannot_reuse_old_snapshot(self):
+  def change(uid):
+   self.r.r.job['lease_token']='foreign';return self.r.r.capture_value
+  with self.assertRaises((ValueError,actual.PUB.SemanticPublicationRejectedError)):self.direct(change)
+  self.assertEqual(self.produced,[])
+ def test_context_edit_can_be_data_prepared_but_full_fence_still_blocks_first_egress(self):
+  self.r.r.host.metadata['context-a']['canonical_source_sha256']='f'*64
+  self.integration();self.assertEqual(self.context_reads,0)
+  with self.assertRaises(ValueError):self.r.run()
+  self.assertEqual(self.r.counts['provider'],0)
+if __name__=='__main__':unittest.main()

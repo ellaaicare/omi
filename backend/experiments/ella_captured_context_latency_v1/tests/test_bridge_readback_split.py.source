@@ -1,0 +1,116 @@
+"""Actual bridge + real captured scope/budget/publication/fence, synthetic HTTP/event store.
+No DB/model/network; scope's existing host fixture uses actual source/local-file checks with fake HTTP leaves.
+"""
+import asyncio,ast,copy,importlib.util,json,sys,unittest
+from pathlib import Path
+from types import SimpleNamespace
+from dataclasses import dataclass,asdict,replace
+from datetime import datetime,timezone
+from contextlib import nullcontext
+ROOT=Path(__file__).resolve().parents[1];W=ROOT.parents[1]
+p=W/'captured-context-v2/tests/test_attempt_capture_scope.py';spec=importlib.util.spec_from_file_location('actual_capture_for_latency',p);actual=importlib.util.module_from_spec(spec);sys.modules[spec.name]=actual;spec.loader.exec_module(actual)
+async def await_stage(name,value):return await value
+TIMING=SimpleNamespace(stage=lambda name:nullcontext(),await_stage=await_stage)
+def definitions(path,names,scope):
+ nodes=[n for n in ast.parse(path.read_bytes()).body if isinstance(n,(ast.ClassDef,ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in names]
+ exec(compile(ast.Module(body=ast.parse('from __future__ import annotations').body+nodes,type_ignores=[]),str(path),'exec'),scope)
+class Rig:
+ def __init__(self,*,enabled=True,legacy=False):
+  self.r=actual.Rig();self.r.prepare();self.counts={'context':0,'cheap':0,'provider':0,'write':0,'read':0};self.consent=True;self.identity=self.r.identity;self.during_http=None;self.during_read=None;self.during_revalidate=None;self.context_delay=0;self.provider_delay=0
+  runtime=self.r.runtime;runtime.gateway_url='https://synthetic.invalid';runtime.gateway_token='synthetic';runtime.agent_id='synthetic-agent'
+  async def hold(uid):
+   if not self.consent:raise ValueError('consent_revoked')
+  sys.modules['ella.services.transcript_processing_hold'].require_transcript_processing_active=hold
+  ns={'__name__':__name__,'_timing':TIMING,'current_budget':actual.BUDGET.current_budget,'remaining_timeout':actual.BUDGET.remaining_timeout,'require_queue_graph':self.r.graph,'asyncio':asyncio,'copy':copy,'json':json,'asdict':asdict,'datetime':datetime,'timezone':timezone,'digest':actual.PUB.digest,'PublicationBinding':actual.PUB.PublicationBinding,'_reject':lambda code:(_ for _ in ()).throw(ValueError(code)),'SELF_HOSTED_CHANNELS':{'generator':'semantic_generator','verifier':'semantic_verifier'},'ROLE_POLICIES':{'generator':'ella-semantic-summary-v1','verifier':'ella-semantic-summary-v1'},'MAX_REQUEST_BYTES':196608,'_valid_response_id':lambda v:bool(v),'_parse_result':json.loads,'_require_semantic_protocol_ack':lambda *a,**kw:{'provider_response_id':'synthetic-provider'}}
+  # Execute exact actual BackendTurn dataclass, not a substitute binding/turn class.
+  turn_scope=ns|{'dataclass':dataclass};definitions(W/'captured-context-v2/serving-baseline/ella/services/semantic_producer_ledger.py',{'BackendTurn'},turn_scope);ns['BackendTurn']=turn_scope['BackendTurn'];self.BackendTurn=ns['BackendTurn']
+  definitions(ROOT/'candidate/ella/services/semantic_self_hosted_runtime.py',{'SelfHostedSemanticRuntimeBridge'},ns);self.Bridge=ns['SelfHostedSemanticRuntimeBridge']
+  self.binding=actual.PUB.current_binding(self.r.doc,uid=self.r.uid,conversation_id=self.r.cid)
+  async def resolve(*a,**kw):
+   if self.during_revalidate:self.during_revalidate()
+   return runtime
+  self.deps=SimpleNamespace(resolver=resolve,revalidator=resolve,consent=lambda uid:uid if self.consent else'foreign',identity=lambda runtime:self.identity,client_factory=self.client,event_type=lambda **kw:SimpleNamespace(**kw))
+  self.bridge=self.Bridge(binding=self.binding,current_binding=self.full,repository=None,event_store=SimpleNamespace(write_batch=self.write,get_event=self.read),dependencies=self.deps,expected_runtime_identity=self.identity,timeout_seconds=105,current_source_binding=self.cheap if enabled else None)
+  self.legacy=legacy;self.stored=None
+ def cheap(self):
+  self.counts['cheap']+=1;return actual.PUB.current_binding(self.r.reader(),uid=self.r.uid,conversation_id=self.r.cid)
+ def full(self):
+  self.counts['context']+=1;self.r.clock+=self.context_delay;snapshot=self.r.read();bound=self.cheap()
+  if actual.PUB.digest(snapshot)!=bound.companion_context_sha256:raise ValueError('context_changed')
+  return bound
+ def client(self,**kw):
+  rig=self
+  class Client:
+   async def __aenter__(self):return self
+   async def __aexit__(self,*a):pass
+   async def post(self,*a,**kw):
+    rig.counts['provider']+=1;rig.r.clock+=rig.provider_delay
+    if rig.during_http:rig.during_http()
+    role=kw['headers']['X-Ella-Semantic-Role']
+    return SimpleNamespace(raise_for_status=lambda:None,headers={},json=lambda:{'id':'synthetic-gateway-'+role,'choices':[{'finish_reason':'stop','message':{'role':'assistant','content':'{"outcome":"candidate"}'}}]})
+  return Client()
+ async def write(self,events):
+  self.counts['write']+=1;event=events[0];self.stored=event.__dict__;return {'ok':True,'events':[{'event_id':event.event_id,'source_identity':event.source_ref['source_identity']}]}
+ async def read(self,**kw):
+  self.counts['read']+=1
+  if self.during_read:self.during_read()
+  return copy.deepcopy(self.stored)
+ def run(self,role='generator'):
+  request={'policy':'ella-semantic-summary-v1','instructions':'synthetic','schema_version':2,'semantic_contract_version':1 if self.legacy else 2}
+  return asyncio.run(self.bridge(role=role,request=request))
+ def close(self):self.r.close()
+class Tests(unittest.TestCase):
+ def setUp(self):self.r=Rig()
+ def tearDown(self):self.r.close()
+ def test_actual_bridge_constructor_real_scope_typed_binding_two_full_checks(self):
+  r=self.r;turn=r.run();self.assertIs(type(turn),r.BackendTurn);self.assertIs(r.bridge._source_scope,r.r.scope);self.assertIs(r.bridge._source_budget,r.r.budget);self.assertIs(type(r.binding),actual.PUB.PublicationBinding);self.assertEqual(r.counts['context'],2);self.assertEqual((r.counts['provider'],r.counts['write'],r.counts['read']),(1,1,1))
+ def test_unconfigured_callback_retains_three_and_legacy_retains_five_full_checks(self):
+  self.r.close();self.r=Rig(enabled=False);self.r.run();self.assertEqual(self.r.counts['context'],3)
+  self.r.close();self.r=Rig(legacy=True);self.r.run();self.assertEqual(self.r.counts['context'],5)
+ def test_context_drift_during_model_rejects_before_canonical_write(self):
+  r=self.r;r.during_http=lambda:r.r.host.metadata['context-a'].update(canonical_source_sha256='f'*64)
+  with self.assertRaises((ValueError,actual.PUB.SemanticPublicationRejectedError,actual.FENCE.FenceRejected)):r.run()
+  self.assertEqual(r.counts['provider'],1);self.assertEqual(r.counts['write'],0)
+ def test_source_consent_runtime_changes_during_readback_reject(self):
+  for kind in ['source','consent','runtime','owner','closed','expiry','attempt']:
+   self.r.close();self.r=Rig();r=self.r
+   def change():
+    if kind=='source':r.r.doc['active_summary_version_id']='edited'
+    if kind=='consent':r.consent=False
+    if kind=='runtime':r.identity=SimpleNamespace(digest='f'*64)
+    if kind=='owner':r.r.doc['uid']='foreign'
+    if kind=='closed':r.r.scope.closed=True
+    if kind=='expiry':r.r.clock=600
+    if kind=='attempt':r.r.job['lease_token']='different'
+   r.during_read=change
+   with self.subTest(kind=kind),self.assertRaises((ValueError,TimeoutError,actual.PUB.SemanticPublicationRejectedError,actual.FENCE.FenceRejected)):r.run()
+   self.assertEqual(r.counts['write'],1)
+ def test_context_edit_after_event_readback_still_fails_actual_final_publication(self):
+  r=self.r;r.during_read=lambda:r.r.host.metadata['context-a'].update(canonical_source_sha256='f'*64)
+  r.run();self.assertEqual(r.counts['context'],2)
+  candidate,receipt=r.r.receipt()
+  with self.assertRaises((ValueError,actual.PUB.SemanticPublicationRejectedError,actual.FENCE.FenceRejected)):actual.PUB.require_publication(r.r.doc,uid=r.r.uid,conversation_id=r.r.cid,candidate=candidate,receipt_id=receipt,read_companion_context=lambda uid:r.r.read())
+ def test_changed_scope_replacement_cannot_borrow_postreadback_callback(self):
+  r=self.r;before=r.r.scope
+  def change():actual.SCOPE._CURRENT.set(SimpleNamespace(uid=r.r.uid,cid=r.r.cid))
+  r.during_read=change
+  with self.assertRaises((ValueError,actual.PUB.SemanticPublicationRejectedError,actual.FENCE.FenceRejected)):r.run()
+  self.assertEqual(r.counts['write'],1)
+ def test_scope_and_consent_resampled_after_blocking_runtime_revalidation(self):
+  r=self.r;count={'n':0}
+  def change():
+   count['n']+=1
+   if count['n']==3:r.r.doc['deleted']=True
+  r.during_revalidate=change
+  with self.assertRaises((ValueError,actual.PUB.SemanticPublicationRejectedError,actual.FENCE.FenceRejected)):r.run()
+  self.assertEqual(r.counts['context'],2);self.assertEqual(r.counts['write'],1)
+ def test_no_full_context_check_removed_before_http(self):
+  r=self.r;r.r.host.metadata['context-a']['canonical_source_sha256']='f'*64
+  with self.assertRaises((ValueError,actual.PUB.SemanticPublicationRejectedError,actual.FENCE.FenceRejected)):r.run()
+  self.assertEqual(r.counts['provider'],0)
+ def test_virtual53_stress_has_no_guaranteed600_margin(self):
+  #240 includes initial source/pre-model work including ledger's initial context:
+  #remaining producer checks are baseline7 or candidate5, not8/6 plus240 again.
+  self.assertEqual(240+7*53+2*60,731);self.assertEqual(240+5*53+2*60,625)
+  self.assertGreater(625,600)
+if __name__=='__main__':unittest.main()

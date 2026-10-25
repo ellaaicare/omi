@@ -1,0 +1,15 @@
+{
+  "contract": "ella-captured-context-latency-source-v1",
+  "source_pins": {
+    "candidate/ella/services/semantic_producer_ledger.py.source": "8725c30412130de96596b0779691454bb7e53cec2ee36267a20ce2f68049983d",
+    "candidate/ella/services/semantic_retained_integration.py.source": "3eaf48e04abf14c3e6414d6d1682a3f8c75843497cc0e77569eaaff7a97e28d7",
+    "candidate/ella/services/semantic_self_hosted_runtime.py.source": "6ebf699b9d3b0bdcd783b87e8e6253ca48507d7eb25fbf8fa0a876e1e18651bf",
+    "tests/test_bridge_readback_split.py.source": "b2edd7f7331c77a18b3b8f3e5f4db5affb86a450cbe82b52780499fc945454c3",
+    "tests/test_full_composition.py.source": "89306b84baef08f6e0ba39c5353bcc0546e61225b2a53ac33a2726fe87ab6838",
+    "tests/test_preparation_reads.py.source": "8c590ab7a4e5c045557b5e25a50272a910911a71cf9e2ddf4924896df2957f43"
+  },
+  "qualification": "21 offline tests; actual service Python3.11 imports network blocked; current live deployment not changed",
+  "not_portable_test_closure": true,
+  "not_real_provider_or_Firestore_test": true,
+  "no_successful_app_writeback_claim": true
+}
