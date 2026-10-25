@@ -8,7 +8,7 @@
     "tests/test_full_composition.py.source": "89306b84baef08f6e0ba39c5353bcc0546e61225b2a53ac33a2726fe87ab6838",
     "tests/test_preparation_reads.py.source": "8c590ab7a4e5c045557b5e25a50272a910911a71cf9e2ddf4924896df2957f43"
   },
-  "qualification": "21 offline tests; actual service Python3.11 imports network blocked; current live deployment not changed",
+  "qualification": "21 source/composition and11 rollout fault tests; actual service3.11 imports and01:03:07UTC deployment verified; zero new inference/admission",
   "not_portable_test_closure": true,
   "not_real_provider_or_Firestore_test": true,
   "no_successful_app_writeback_claim": true

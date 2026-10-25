@@ -1,6 +1,6 @@
 # Captured-context phase latency correction
 
-Source-qualified candidate, not a live deployment or successful enrichment claim. The `.py.source` files preserve exact reviewed bytes and are not installed by their presence here.
+The exact three-file source was deployed on October 25 at 01:03:07 UTC after independent review, 21 source/composition cases, 11 rollout fault cases and actual service Python 3.11 import checks. Both health routes and serving hashes passed; the existing account-scoped timing setting was corrected. This is not a successful enrichment claim. The `.py.source` files preserve exact reviewed bytes and are not installed by their presence here.
 
 The trusted, admitted captured-context worker reuses its sealed input for two non-effect preparation reads. Each read remains scoped to the same actual attempt, OperationBudget, owner/source and publication binding. Full live context validation still precedes every model dispatch and canonical write. After exact canonical readback, fresh source, consent, runtime and graph/attempt checks replace one redundant full context read. Legacy paths retain their existing behavior. Publication, result validation, source deletion/version checks, quarantine, CAS and replay fences remain unchanged.
 
@@ -8,6 +8,6 @@ The actual integration/ledger/bridge and publication classes complete two synthe
 
 These tests depend on the preserved `captured-context-v2` fixture and service source closure. This directory is not a self-contained runnable test closure. Exact test source is included for review, not as a claim that copying this directory reproduces the run.
 
-Performance stress tests retain 600-second job and 480-second host ceilings. Hypothetical 53-second context reads still fail; a 20-second scenario fits with only a small host margin before unmodelled work. Those scenarios are not measurements of the failed attempt. No remaining saved record should be submitted solely because these tests pass. Required next gates are independent deployment-controller review, exact protected-state and source preflight, and content-free account-scoped timing verification. No credentials, model switch, n8n change or queue admission is part of this candidate.
+Performance stress tests retain 600-second job and 480-second host ceilings. Hypothetical 53-second context reads still fail; a 20-second scenario fits with only a small host margin before unmodelled work. Those scenarios are not measurements of the failed attempt. No remaining saved record should be submitted solely because these tests pass. Independent controller review, exact protected-state/source preflight and effective account-scoped timing verification passed during rollout. All six protected state hashes were unchanged. No credentials, model switch, n8n change, queue admission or new inference occurred. A new controlled attempt still needs valid resource settlement and preflight; these offline cases alone are not proof of production budget margin.
 
 See [the master analysis](../../../docs/engineering/ella-regression-analysis-2026-10-24.md) for deployment truth and the exact known/unknown failure boundary.
