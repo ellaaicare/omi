@@ -1,0 +1,81 @@
+"""Pure readback with actual pinned sanitizer/canonical source; synthetic records only."""
+import ast,copy,hashlib,importlib.util,json,sys,types,unittest
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[1];W=ROOT.parents[1];BASE=W/'repo/backend/serving_snapshots/unified-canonical-memory-4235154f/backend/ella/services'
+def load(name,path):
+ s=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(s);sys.modules[name]=m;s.loader.exec_module(m);return m
+for n in ['ella','ella.services']:
+ m=types.ModuleType(n);m.__path__=[str(BASE)];sys.modules[n]=m
+SAN=load('ella.services.summary_sanitizer',BASE/'summary_sanitizer.py');CAN=load('ella.services.canonical_summary_source',BASE/'canonical_summary_source.py')
+P=load('synthetic_readback_projection',ROOT/'candidate/recall_projection.py')
+class Tests(unittest.TestCase):
+ def setUp(self):
+  self.uid='synthetic-owner';self.cid='synthetic-source';self.raw={'title':'Fictional notebook plan','overview':'Mira plans to take the blue notebook to the library on Friday in this entirely fictional test.','emoji':'📘','category':'other'}
+  self.stock={'id':'stock','is_active':False,'title':'Original stock','overview':'Original saved stock overview preserved without any editing.','emoji':'x','category':'other','source':'omi','kind':'generated'}
+  self.doc={'uid':self.uid,'id':self.cid,'status':'completed','started_at':'2026-01-01T00:00:00Z','finished_at':'2026-01-01T00:01:00Z','transcript_segments':[{'speaker':'Other','text':'This is a fictional notebook plan.'}],'active_summary_version_id':'enhanced'}
+  self.sha=P.digest(self.doc['transcript_segments']);self.client='synthetic-client';self.job={'uid':self.uid,'conversation_id':self.cid,'job_id':'job','status':'completed','dispatch_state':'completed','attempt_count':1,'client_interaction_id':self.client,'transcript_sha256':self.sha,'receipt':{'active_summary_version_id':'enhanced'}}
+  self.install(self.raw)
+ def install(self,raw,contract=2):
+  self.raw=copy.deepcopy(raw);original={**self.doc,'structured':{k:self.stock[k] for k in P.FIELDS}};source=CAN.canonical_source_from_conversation(uid=self.uid,conversation_id=self.cid,conversation=original)
+  binding={'uid':self.uid,'conversation_id':self.cid,'source_sha256':CAN.canonical_source_sha256(source),'source_version':source['finished_at'],'active_summary_version_id':'stock','policy_revision':'revision','companion_context_sha256':'a'*64,'companion_context_revision':'context-revision','transcript_sha256':self.sha};self.binding=binding
+  sanitized=SAN.sanitize_summary_update(**self.raw);stored={k:getattr(sanitized,k) for k in P.FIELDS};self.doc['structured']=copy.deepcopy(stored);self.doc['summary_versions']=[self.stock,{'id':'enhanced','is_active':True,**stored}]
+  candidate=P.digest(self.raw);ops={}
+  for role in ['generator','verifier']:ops[role]={'contract':'ella-semantic-publication-v1','status':'completed','role':role,'binding':copy.deepcopy(binding),'candidate_sha256':candidate,'runtime_interaction_id':role+'-interaction','canonical_assistant_event_id':role+'-event'}
+  ops['verifier']['verifier_result']={k:True for k in ['accepted','source_grounded','semantic_summary','context_owner_verified']};self.doc['semantic_publication_operations']=ops
+  self.doc['semantic_publication_receipts']={'pub':{'contract':'ella-semantic-publication-v1','binding':binding,'candidate_sha256':candidate,'generator_operation_id':'generator','verifier_operation_id':'verifier'}}
+  proposal={'publication_receipt_id':'pub','policy':'ella-semantic-summary-v1','policy_revision':'revision','candidate_schema_version':2,'summary':copy.deepcopy(self.raw),'candidate_sha256':candidate}
+  if contract==2:proposal['semantic_contract_version']=2
+  self.key=P.digest({'uid':self.uid,'cid':self.cid,'client':self.client,'transcript':self.sha});self.doc['semantic_retained_completion_jobs_v1']={self.key:{'status':'proposed','client':self.client,'transcript':self.sha,'proposal':proposal}}
+  payload={'domain':'ella-retained-semantic-apply-v1','binding':copy.deepcopy(binding),'receipt_id':'pub','candidate':copy.deepcopy(self.raw),'schema_version':2}
+  if contract==2:payload['semantic_contract_version']=2
+  h=P.digest(payload);self.doc['summary_writeback_receipt']={'status':'completed','canonical_status':'completed','active_summary_version_id':'enhanced','semantic_publication_receipt_id':'pub','payload_sha256':h,'token':'semantic-apply-'+h,'source_sha256':binding['source_sha256'],'source_version':binding['source_version']}
+ def result(self):return P.completed_projection(self.job,self.doc,uid=self.uid,cid=self.cid,job_id='job',transcript_sha=self.sha,stock_id='stock',stock_sha=P.digest({k:v for k,v in self.stock.items() if k!='is_active'}))
+ def mutate_reject(self,fn,code=None):
+  fn()
+  with self.assertRaises(ValueError) if code is None else self.assertRaisesRegex(ValueError,code):self.result()
+ def test_positive_existing_prefix_projection_separate_hashes(self):
+  out=self.result();self.assertNotEqual(out['candidate_sha256'],out['presentation_sha256']);self.assertTrue(self.doc['structured']['overview'].startswith('[Ella] '));self.assertEqual(out['title'],self.raw['title'])
+ def test_whitespace_projection(self):
+  raw={**self.raw,'title':'  Fictional   notebook plan  ','overview':'Mira  plans a library visit.\n\nThis is fictional data and contains no real events.'};self.install(raw);self.assertEqual(self.result()['title'],'Fictional notebook plan')
+ def test_unchanged_sanitized_case(self):
+  self.install({k:self.doc['structured'][k] for k in P.FIELDS});out=self.result();self.assertEqual(out['candidate_sha256'],out['presentation_sha256'])
+ def test_historical_contract_one_payload_omits_version(self):self.install(self.raw,contract=1);self.result()
+ def test_wrong_owner(self):self.mutate_reject(lambda:self.doc.update(uid='foreign'),'source_unavailable')
+ def test_wrong_job_owner(self):self.mutate_reject(lambda:self.job.update(uid='foreign'),'job_owner_changed')
+ def test_wrong_raw_candidate(self):self.mutate_reject(lambda:self.doc['semantic_retained_completion_jobs_v1'][self.key]['proposal']['summary'].update(overview='Changed raw candidate'), 'proposal_candidate_changed')
+ def test_wrong_proposal_hash(self):self.mutate_reject(lambda:self.doc['semantic_retained_completion_jobs_v1'][self.key]['proposal'].update(candidate_sha256='b'*64),'proposal_candidate_changed')
+ def test_extra_proposal_field_rejected(self):self.mutate_reject(lambda:self.doc['semantic_retained_completion_jobs_v1'][self.key]['proposal'].update(extra=True),'proposal_shape_changed')
+ def test_wrong_proposal_contract(self):self.mutate_reject(lambda:self.doc['semantic_retained_completion_jobs_v1'][self.key]['proposal'].update(semantic_contract_version=True),'proposal_contract_changed')
+ def test_wrong_retained_key(self):self.mutate_reject(lambda:self.doc['semantic_retained_completion_jobs_v1'].update({self.key:None}),'retained_proposal_missing')
+ def test_wrong_retained_client(self):self.mutate_reject(lambda:self.doc['semantic_retained_completion_jobs_v1'][self.key].update(client='foreign'),'retained_proposal_missing')
+ def test_wrong_retained_phase(self):self.mutate_reject(lambda:self.doc['semantic_retained_completion_jobs_v1'][self.key].update(status='started'),'retained_proposal_missing')
+ def test_wrong_payload(self):self.mutate_reject(lambda:self.doc['summary_writeback_receipt'].update(payload_sha256='b'*64),'accepted_payload_changed')
+ def test_wrong_token(self):self.mutate_reject(lambda:self.doc['summary_writeback_receipt'].update(token='other'),'accepted_payload_changed')
+ def test_wrong_source_hash(self):self.mutate_reject(lambda:self.doc['summary_writeback_receipt'].update(source_sha256='b'*64),'accepted_source_changed')
+ def test_wrong_source_version(self):self.mutate_reject(lambda:self.doc['summary_writeback_receipt'].update(source_version='other'),'accepted_source_changed')
+ def test_actual_transcript_edit(self):self.mutate_reject(lambda:self.doc['transcript_segments'][0].update(text='changed'),'retained_source_changed')
+ def test_revision_changed(self):self.mutate_reject(lambda:self.doc['semantic_retained_completion_jobs_v1'][self.key]['proposal'].update(policy_revision='changed'),'proposal_binding_changed')
+ def test_arbitrary_stored_presentation_not_sanitizer(self):self.mutate_reject(lambda:self.doc['structured'].update(overview='Arbitrary presentation'),'presentation_changed')
+ def test_active_version_presentation_changed(self):self.mutate_reject(lambda:self.doc['summary_versions'][1].update(title='Other'),'presentation_changed')
+ def test_original_stock_pin_changed(self):
+  old=P.digest({k:v for k,v in self.stock.items() if k!='is_active'});self.stock['title']='changed'
+  with self.assertRaisesRegex(ValueError,'stock_changed'):P.completed_projection(self.job,self.doc,uid=self.uid,cid=self.cid,job_id='job',transcript_sha=self.sha,stock_id='stock',stock_sha=old)
+ def test_verifier_rejected(self):self.mutate_reject(lambda:self.doc['semantic_publication_operations']['verifier']['verifier_result'].update(accepted=False),'verifier_not_accepted')
+ def test_pubops_must_bind_raw_not_presentation(self):self.mutate_reject(lambda:self.doc['semantic_publication_operations']['generator'].update(candidate_sha256=P.digest(self.doc['structured'])),'operation_provenance_invalid')
+ def test_current_version_changed(self):self.mutate_reject(lambda:self.doc.update(active_summary_version_id='other'),'enhanced_version_required')
+ def canonical(self):
+  p=self.result();e={'uid':self.uid,'canonical_identity':self.uid,'source_ref':{'conversation_id':self.cid,'active_summary_version_id':'enhanced'},'channel':'omi','text':p['summary_text'],'metadata':{'structured':{'title':p['title']}}};v={'status':'available','truncated':False,'events':[e]};render={'status':'available','selected_event_count':1,'text':json.dumps({'channel':'omi','conversation_id':self.cid,'summary_version':'enhanced','text':p['summary_text']})};return p,e,v,render
+ def test_canonical_user_data_guard_preserved(self):
+  p,e,v,render=self.canonical();self.assertEqual(P.canonical_title_context(v,render,uid=self.uid,cid=self.cid,projection=p)['role'],'user')
+ def test_current_canonical_mutation_rejected(self):
+  for field in ['text','version','title']:
+   p,e,v,render=self.canonical()
+   if field=='text':e['text']='wrong'
+   if field=='version':e['source_ref']['active_summary_version_id']='other'
+   if field=='title':e['metadata']['structured']['title']='wrong'
+   with self.assertRaisesRegex(ValueError,'canonical_summary_changed'):P.canonical_title_context(v,render,uid=self.uid,cid=self.cid,projection=p)
+ def test_existing_render_guard_ast_unchanged(self):
+  old=ast.parse((W/'codex-sol-v1/recall-v3/candidate/recall_projection.py').read_text());new=ast.parse((ROOT/'candidate/recall_projection.py').read_text())
+  for name in ['canonical_title_context','answer_matches','unique_pairs']:
+   get=lambda tree:ast.dump(next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name==name),include_attributes=False)
+   self.assertEqual(get(old),get(new))

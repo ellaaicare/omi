@@ -1,0 +1,9 @@
+# Exact verified candidate and sanitized presentation readback
+
+This is a read-only acceptance-helper correction; no serving code, summary, transcript or model result is changed. Exact helper/test bytes are archived as `.py.source`. The fixture uses the existing source harness and actual pinned sanitizer/canonical-source modules, not an independently runnable repository test target.
+
+The old helper compared the original publication candidate hash to the stored presentation hash. The existing writer intentionally stores the exact sanitizer projection: in the observed completed case this added the product's `[Ella] ` overview prefix while preserving the other three fields. The accepted proposal, payload hash/token, source/version and publication bindings matched; the active version and stored fields matched the actual sanitizer exactly. A hash difference at that boundary is expected, not grounds to accept an arbitrary replacement.
+
+The corrected helper verifies both representations: original retained proposal and accepted payload/token/raw publication provenance, then exact pinned sanitizer output against stored and active fields. Owner, transcript, original stock, current version, distinct verifier provenance and canonical/render checks remain strict. Thirty offline cases passed, including tampered proposal/presentation/source/token and sanitizer drift. No live effects occurred in those tests.
+
+Independent readback of the same completed record passed at 2026-10-25 07:47:36 UTC: current-version canonical retrieval and app projection matched, with the original transcript and stock summary preserved. This establishes one real saved enhancement through persistence and retrieval. Separate-turn agent recall, physical display and remaining-backlog completion are not established by this result.

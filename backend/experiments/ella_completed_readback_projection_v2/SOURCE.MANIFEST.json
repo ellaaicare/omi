@@ -1,0 +1,25 @@
+{
+  "state": "REVIEWED_READONLY_PROJECTION_SOURCE_AND_ACTUAL_CANONICAL_READBACK",
+  "files": {
+    "candidate/recall_projection.py.source": "86e20339ef1f7ab56458bee09953fbc85c99c1adeaa710cdb7cbf26f784456d7",
+    "baseline/recall_projection.py.source": "4d6abe4acb0b6534768376141f746408af0477da562eec68ff904c222930934b",
+    "tests/test_projection.py.source": "1fdb87995c8760edc7957e12d3521c1463ec31964a57fb0586f039da47bfac39"
+  },
+  "source_freeze_sha256": "629f05f782fe42af723d8acbb2f4fa2d94e6ad2dbe728f044950c7942516dc98",
+  "independent_review_sha256": "83bf565884c0a798309d806b5fe20989346b82070a3bb583fc17ccccc2365d59",
+  "tests_actual": {
+    "projection": 28,
+    "extra_negative_guards": 2
+  },
+  "actual_same_record_readback": {
+    "utc": "2026-10-25T07:47:36.882626+00:00",
+    "canonical_current_version_match": true,
+    "app_model_projection_valid": true,
+    "original_transcript_and_stock_preserved": true,
+    "original_account_route_match": true,
+    "generator_verifier_distinct_accepted_provenance": true,
+    "no_regeneration_or_write": true
+  },
+  "actual_agent_recall": "NOT_YET_RUN",
+  "new_serving_deployment": false
+}
