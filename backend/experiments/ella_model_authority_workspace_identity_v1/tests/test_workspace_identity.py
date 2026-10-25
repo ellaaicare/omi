@@ -1,17 +1,17 @@
-import importlib.util, unittest, tempfile, pathlib, os, json, hashlib, shutil
+import importlib.util, importlib.machinery, unittest, tempfile, pathlib, os, json, hashlib, shutil
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def load(path, name):
-    s = importlib.util.spec_from_file_location(name, path)
+    s = importlib.util.spec_from_file_location(name, path, loader=importlib.machinery.SourceFileLoader(name, str(path)))
     m = importlib.util.module_from_spec(s)
     s.loader.exec_module(m)
     return m
 
 
-BASE = ROOT / 'baseline/semantic_runtime_authority.py'
-NEW = ROOT / 'candidate/semantic_runtime_authority.py'
+BASE = ROOT / 'baseline/semantic_runtime_authority.py.source'
+NEW = ROOT / 'candidate/semantic_runtime_authority.py.source'
 
 
 class Tests(unittest.TestCase):

@@ -1,5 +1,7 @@
 # Workspace identity during model-authority reads
 
+The `.py.source` files preserve exact deployed/source-reviewed bytes outside the repository Python formatter; the portable test loads them using the standard source loader.
+
 Source candidate: the authority read previously compared workspace directory timestamps and size between two samples. Ordinary file creation or atomic replacement changes directory metadata and can reject an otherwise unchanged account/model authority. This candidate compares the workspace device, inode, mode and owner, matching the pre-existing registry-parent identity rule. It retains full checks for the profile/root directories, authority file bytes, no-follow traversal, source/version, captured content and attempt/account/consent guards.
 
 Nine tests use the actual runtime implementation with disposable fictional files. The baseline reproduces timestamp-only rejection. The candidate accepts timestamp/content-write metadata changes while rejecting replacement, unsafe/safe permission changes, symlinks, and changes to each authority file. Portable tests differ from the local executed suite only in baseline and temporary fixture paths. The portable fixture resolves the temporary root before no-follow traversal, because macOS may return a `/var` symlink path. Its first uncanonicalized run rejected that path; the corrected portable nine cases passed without changing product source.

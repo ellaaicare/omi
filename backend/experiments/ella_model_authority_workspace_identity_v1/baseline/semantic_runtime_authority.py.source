@@ -1,0 +1,236 @@
+"""Read-only selected registry/config authority. No auth file, backend or inference I/O."""
+from __future__ import annotations
+from datetime import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import time
+
+class SemanticRoleHold(RuntimeError):
+    pass
+
+def require_shared_root_policy(config, model):
+    """Existing RuntimeProfilePolicy public_payload/sha256 contract, no I/O."""
+    policy=config.get('ella_runtime_policy')
+    allowed={'version','provider','model','credentialRef','fallbackModels','reasoningEffort','apiToolsets','isolationPosture','fallbackRoutes','digest'}
+    required=allowed-{'fallbackRoutes','digest'}
+    if not isinstance(policy,dict) or set(policy)-allowed or not required.issubset(policy):
+        raise SemanticRoleHold('semantic_runtime_policy_witness_missing')
+    public={k:v for k,v in policy.items() if k!='digest'}
+    calculated=hashlib.sha256(json.dumps(public,sort_keys=True,separators=(',',':')).encode('utf-8')).hexdigest()
+    if (policy.get('digest')!=calculated or policy.get('provider')!=model.get('provider')
+        or policy.get('model')!=model.get('default') or policy.get('credentialRef')!=({'openai-codex':'global-auth:openai-codex','openrouter':'env:OPENROUTER_API_KEY'}.get(model.get('provider')))
+        or not isinstance(policy.get('version'),str) or not policy['version']):
+        raise SemanticRoleHold('semantic_runtime_policy_witness_mismatch')
+    return policy
+
+CAP=1048576
+HEX=re.compile(r"[0-9a-f]{64}")
+TOKEN=re.compile(r"[A-Za-z0-9_.@:+-]{1,200}")
+MODEL_TOKEN=re.compile(r"[A-Za-z0-9_.:/+-]{1,200}")
+CANONICAL_BASE="https://chatgpt.com/backend-api/codex"
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()
+
+def pairs(items):
+    result={}
+    for key,value in items:
+        if key in result:raise SemanticRoleHold('semantic_authority_duplicate_key')
+        result[key]=value
+    return result
+
+def token(value):
+    if not isinstance(value,str) or not TOKEN.fullmatch(value) or '..' in value:
+        raise SemanticRoleHold('semantic_authority_subject_invalid')
+    return value
+
+def signature(s):
+    return (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_mode,s.st_uid)
+
+def check_deadline(deadline):
+    if time.monotonic()>=deadline:raise SemanticRoleHold('semantic_authority_deadline')
+
+def read_file(path,deadline):
+    """Walk every parent with no-follow and compare linked inode after finite regular-file read."""
+    path=Path(path)
+    if not path.is_absolute() or '..' in path.parts:raise SemanticRoleHold('semantic_authority_path_invalid')
+    fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:-1]:
+            check_deadline(deadline)
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd);fd=child
+        f=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+        try:
+            before=os.fstat(f)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid!=os.geteuid()
+                or before.st_nlink!=1 or before.st_mode&0o022 or before.st_size>CAP):
+                raise SemanticRoleHold('semantic_authority_file_unsafe')
+            chunks=[];size=0
+            while True:
+                check_deadline(deadline)
+                chunk=os.read(f,65536)
+                if not chunk:break
+                size+=len(chunk)
+                if size>CAP:raise SemanticRoleHold('semantic_authority_file_capacity')
+                chunks.append(chunk)
+            after=os.fstat(f);linked=os.stat(path.name,dir_fd=fd,follow_symlinks=False)
+            if signature(before)!=signature(after) or signature(after)!=signature(linked):
+                raise SemanticRoleHold('semantic_authority_file_changed')
+            return b''.join(chunks)
+        finally:os.close(f)
+    finally:os.close(fd)
+
+def directory_identity(path,deadline):
+    path=Path(path)
+    if not path.is_absolute() or '..' in path.parts:raise SemanticRoleHold('semantic_authority_path_invalid')
+    fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            check_deadline(deadline)
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd);fd=child
+        s=os.fstat(fd)
+        if s.st_uid!=os.geteuid() or s.st_mode&0o022:raise SemanticRoleHold('semantic_authority_directory_unsafe')
+        return signature(s)
+    finally:os.close(fd)
+
+def parse_json(data):
+    return json.loads(data,object_pairs_hook=pairs,parse_constant=lambda _: (_ for _ in ()).throw(SemanticRoleHold('semantic_authority_nonfinite')))
+
+def parse_yaml(data):
+    import yaml
+    class StrictLoader(yaml.SafeLoader):pass
+    def mapping(loader,node,deep=False):
+        loader.flatten_mapping(node)
+        return pairs((loader.construct_object(k,deep=deep),loader.construct_object(v,deep=deep)) for k,v in node.value)
+    StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,mapping)
+    return yaml.load(data,Loader=StrictLoader)
+
+def selected_registry(registry,uid,agent,account,profiles_root):
+    if not isinstance(registry,dict):raise SemanticRoleHold('semantic_authority_registry_invalid')
+    owners=registry.get('agent_owners');workspaces=registry.get('agent_workspaces');users=registry.get('users')
+    if not all(isinstance(x,dict) for x in (owners,workspaces,users)) or owners.get(agent)!=uid:
+        raise SemanticRoleHold('semantic_authority_owner_mismatch')
+    # Server supplies the canonical account key from its current owned runtime.
+    # Unrelated legacy aliases stay intact and never participate in selection.
+    row=users.get(account)
+    h=row.get('hermes') if isinstance(row,dict) else None
+    if (not isinstance(h,dict) or row.get('omiUid')!=uid or row.get('userId')!=account
+        or agent not in (h.get('userAgentId'),h.get('userProfile'))):
+        raise SemanticRoleHold('semantic_authority_canonical_account_mismatch')
+    profile=token(h.get('userProfile'));registered_agent=token(h.get('userAgentId'));workspace=h.get('userWorkspace')
+    expected=str(Path(profiles_root)/profile/'workspace')
+    if (workspace!=expected or workspaces.get(agent)!=expected
+        or workspaces.get(profile)!=expected or workspaces.get(registered_agent)!=expected
+        or owners.get(profile)!=uid or owners.get(registered_agent)!=uid):
+        raise SemanticRoleHold('semantic_authority_workspace_mismatch')
+    return {'uid':uid,'agent_id':agent,'profile_name':profile,'workspace_root':expected,
+            'account_user_id':account,'registered_agent_id':registered_agent}
+
+def require_profile_manifest(data,selected):
+    manifest=parse_json(data)
+    expected={'schemaVersion':1,'profile':selected['profile_name'],'uid':selected['uid'],
+              'userId':selected['account_user_id'],'role':'user'}
+    # The existing provision writer appends workspace and updatedAt. Compare
+    # the exact ownership projection without rejecting those legitimate fields;
+    # no arbitrary authority/security metadata is accepted or silently stripped.
+    if (not isinstance(manifest,dict) or not set(expected).issubset(manifest)
+        or set(manifest)-set(expected)-{'workspace','updatedAt'}
+        or type(manifest.get('schemaVersion')) is not int
+        or any(manifest.get(k)!=v for k,v in expected.items())):
+        raise SemanticRoleHold('semantic_authority_profile_manifest_mismatch')
+    if 'workspace' in manifest and manifest['workspace']!=selected['workspace_root']:
+        raise SemanticRoleHold('semantic_authority_profile_manifest_workspace_mismatch')
+    if 'updatedAt' in manifest:
+        stamp=manifest['updatedAt']
+        if not isinstance(stamp,str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\+00:00',stamp):
+            raise SemanticRoleHold('semantic_authority_profile_manifest_metadata_invalid')
+        try:
+            datetime.fromisoformat(stamp)
+        except ValueError:
+            raise SemanticRoleHold('semantic_authority_profile_manifest_metadata_invalid') from None
+
+
+def project_config(config,agent):
+    if not isinstance(config,dict):raise SemanticRoleHold('semantic_authority_config_invalid')
+    model=config.get('model')
+    if (not isinstance(model,dict) or model.get('provider') not in ('openai-codex','openrouter')
+        or not isinstance(model.get('default'),str) or not MODEL_TOKEN.fullmatch(model['default'])
+        or model.get('base_url') not in (None,'',CANONICAL_BASE if model.get('provider')=='openai-codex' else 'https://openrouter.ai/api/v1')):
+        raise SemanticRoleHold('semantic_authority_model_invalid')
+    if model['provider']=='openrouter' and model['default']!='deepseek/deepseek-v4-flash':
+        raise SemanticRoleHold('semantic_authority_model_invalid')
+    canonical_base=CANONICAL_BASE if model['provider']=='openai-codex' else 'https://openrouter.ai/api/v1'
+    policy=require_shared_root_policy(config,model)
+    token(policy['version'])
+    routes=config.get('model_routes',{})
+    if not isinstance(routes,dict):raise SemanticRoleHold('semantic_authority_route_invalid')
+    route=routes.get(agent)
+    if route is not None and (not isinstance(route,dict) or route.get('model')!=model['default']
+        or route.get('provider',model['provider'])!=model['provider']
+        or route.get('base_url') not in (None,'',canonical_base) or route.get('api_key')):
+        raise SemanticRoleHold('semantic_authority_route_mismatch')
+    projection={'provider':model['provider'],'model':model['default'],'base_url':model.get('base_url'),
+                'policy':{k:v for k,v in policy.items() if k!='digest'},
+                'selected_route':None if route is None else {'model':route.get('model'),'provider':route.get('provider',model['provider']),'base_url':route.get('base_url')}}
+    return projection,policy
+
+def runtime_authority(*,body,request_owner_uid,agent_id,registry_path,profiles_root):
+    deadline=time.monotonic()+4.5
+    if (not isinstance(body,dict) or set(body)!={'uid','agent_id','account_user_id','legacy_runtime_identity_sha256'}
+        or body['uid']!=request_owner_uid or body['agent_id']!=agent_id
+        or not isinstance(body['legacy_runtime_identity_sha256'],str) or not HEX.fullmatch(body['legacy_runtime_identity_sha256'])):
+        raise SemanticRoleHold('semantic_authority_request_invalid')
+    uid=token(request_owner_uid);agent=token(agent_id);account=token(body['account_user_id'])
+    registry_path=Path(registry_path);profiles_root=Path(profiles_root)
+    registry_parent_identity=directory_identity(registry_path.parent,deadline)
+    root_identity=directory_identity(profiles_root,deadline)
+    registry_bytes=read_file(registry_path,deadline)
+    selected=selected_registry(parse_json(registry_bytes),uid,agent,account,profiles_root)
+    profile_root=profiles_root/selected['profile_name'];workspace=Path(selected['workspace_root'])
+    profile_identity=directory_identity(profile_root,deadline);workspace_identity=directory_identity(workspace,deadline)
+    manifest_path=profile_root/'ella-profile.json';manifest_bytes=read_file(manifest_path,deadline)
+    require_profile_manifest(manifest_bytes,selected)
+    config_path=profile_root/'config.yaml';config_bytes=read_file(config_path,deadline)
+    projection,policy=project_config(parse_yaml(config_bytes),agent)
+    response={'version':2,'uid':uid,'agent_id':agent,'account_user_id':account,'profile_name':selected['profile_name'],
+        'workspace_root':selected['workspace_root'],'legacy_runtime_identity_sha256':body['legacy_runtime_identity_sha256'],
+        'provider':projection['provider'],'model':projection['model'],'policy_version':policy['version'],
+        'policy_sha256':policy['digest'],'config_projection_sha256':digest(projection),'registry_revision':digest(selected)}
+    # Re-sample the same two authorized sources; no credential path or backend recursion.
+    changed_component = None
+    changed_fields = None
+    def comparison(read, expected, component):
+        nonlocal changed_component, changed_fields
+        try:
+            current = read()
+        except Exception as error:
+            error.semantic_authority_component = component
+            raise
+        changed = (tuple(current[i] for i in (0,1,5,6)) != tuple(expected[i] for i in (0,1,5,6))
+                   if component == "registry_parent_directory" and type(current) is tuple and type(expected) is tuple
+                   and len(current)==len(expected)==7 else current != expected)
+        if changed:
+            changed_component = component
+            if (component.endswith("_directory") and type(current) is tuple and type(expected) is tuple
+                and len(current)==len(expected)==7 and all(type(v) is int for v in current+expected)):
+                changed_fields = {name:current[i]!=expected[i] for i,name in enumerate(("dev","ino","size","mtime","ctime","mode","uid"))}
+        return changed
+    if (comparison(lambda: read_file(registry_path,deadline), registry_bytes, 'registry_bytes')
+        or comparison(lambda: read_file(config_path,deadline), config_bytes, 'config_bytes')
+        or comparison(lambda: read_file(manifest_path,deadline), manifest_bytes, 'manifest_bytes')
+        or comparison(lambda: directory_identity(registry_path.parent,deadline), registry_parent_identity, 'registry_parent_directory')
+        or comparison(lambda: directory_identity(profiles_root,deadline), root_identity, 'profiles_root_directory')
+        or comparison(lambda: directory_identity(profile_root,deadline), profile_identity, 'profile_directory')
+        or comparison(lambda: directory_identity(workspace,deadline), workspace_identity, 'workspace_directory')):
+        error = SemanticRoleHold('semantic_authority_sources_changed')
+        error.semantic_authority_component = changed_component
+        if changed_fields is not None:error.semantic_authority_field_changes = changed_fields
+        raise error
+    check_deadline(deadline)
+    return response
