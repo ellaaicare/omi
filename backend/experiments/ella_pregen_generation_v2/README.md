@@ -1,0 +1,7 @@
+# Append-only pre-generation recovery generation
+
+This archive preserves the exact independently reviewed generic source and test inputs. The certificate digest is `UNBOUND`, so this published source cannot admit a live recovery. Private bindings and execution controllers are excluded. The shared module dispatches the fixed generation protocol; the new module preserves the original and failed predecessor while creating one deterministic generation and atomically moving the exact two-field source-lock head.
+
+The actual retained tests passed 19 generation/admission/worker/context-factory cases and 9 strict-response/APPLY/SDK-retry/readback cases. These use separate explicit fixture stores and external leaves; they are not one datastore integration and do not prove real Firestore, authentication, crypto or provider behavior. The `.py.source` files are immutable archived inputs with retained workspace-relative harness dependencies, not a standalone executable test package. `SOURCE.PINS.json` records their exact hashes.
+
+The operational owner separately qualified service imports with forbidden I/O counters zero, deployed the private binding with rollback/health checks, and executed one approved same-record attempt. The first observation of that attempt completed with a durable `hermes_enriched` version and preserved transcript/stock/history. Independent canonical/app retrieval and conversational recall remain separate acceptance steps. This packet grants no replay authority for other quarantined records.

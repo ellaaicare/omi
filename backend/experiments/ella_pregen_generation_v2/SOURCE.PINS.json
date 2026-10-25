@@ -1,0 +1,14 @@
+{
+  "state": "GENERIC_UNBOUND_SOURCE_ARCHIVE",
+  "sha256": {
+    "saved_source_recovery.py.source": "73c8b7825ff320f44b1473a3d5f11bfb734223619ae5dff88f925d3a3fc72c7c",
+    "saved_source_pregen_generation.py.source": "fb0a9cab610fba7a2f0272c33be61bdedccb1d1639754fd10aa4dccabed843a0",
+    "test_generation.py.source": "ae95f0d419b709c801eb0f161c4719e9ff0d37e1b9e6f667d663fe19bd959f41",
+    "test_generation_apply.py.source": "396c162f3e4de760dbf08af7630ca5bb812f3a92a0f2def7f7e9f5c8a10f7475"
+  },
+  "tests_actual": [
+    19,
+    9
+  ],
+  "limits": "Two separate fixture-store compositions; no single admission-to-APPLY datastore integration. Original fixture tests require retained prior harness/source closure and are archived byte-exact, not advertised as a standalone portable suite. Private certificate, owner/source identifiers and live controllers excluded."
+}

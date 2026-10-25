@@ -1,0 +1,18 @@
+"""Existing actual strict captured/issuer/APPLY/SDK engine under v2 identity.
+Admission/worker/realcallback is exercised separately in test_generation.py.
+This fixture's graph/transport/storage leaves remain explicit existing doubles;
+it is NOT one datastore spanning new admission and APPLY, or live proof.
+"""
+import pathlib,types,sys,unittest
+W=pathlib.Path(__file__).resolve().parents[3];SOURCE=W/'quarantine-recovery-v1/integration-v3/tests/test_namespace_apply.py';text=SOURCE.read_text()
+old="raw=copy.deepcopy(oldvirtual);raw['semantic_publication_policy']={'old':'immutable'};raw['semantic_producer_executions_v1']={'old-Q':{'status':'started','result':'immutable'}}"
+new="raw=copy.deepcopy(oldvirtual)\n  for field in ns.FIELDS:raw.pop(field,None)\n  raw['semantic_retained_completion_jobs_v1']={'original-start':{'status':'started','client':r.job['client_interaction_id'],'transcript':r.job['transcript_sha256'],'runtime_binding_id':'synthetic-original-binding','canonical_user':{'confirmed':True},'learning':{'status':'no_learning','reason':'synthetic_disabled'}}}"
+assert text.count(old)==1;text=text.replace(old,new).replace("protocol_revision='recovery-v1'","protocol_revision='ella-terminal-pregen-successor-generation-v2'")
+needle="raw[ns.ROOT]={tag['recovery_id']:{'identity':copy.deepcopy(tag),'state':{self.parent.pub.POLICY_FIELD:copy.deepcopy(r.doc[self.parent.pub.POLICY_FIELD])}}};"
+replacement="oldtag={**tag,'protocol_revision':'ella-terminal-pregen-successor-v1'};self.previous_namespace={'identity':oldtag,'state':{'semantic_retained_completion_jobs_v1':{'closed-start':{'status':'started','canonical_user':{'confirmed':True},'learning':{'status':'no_learning'}}}}}\n  raw[ns.ROOT]={'previous-immutable':copy.deepcopy(self.previous_namespace),tag['recovery_id']:{'identity':copy.deepcopy(tag),'state':{self.parent.pub.POLICY_FIELD:copy.deepcopy(r.doc[self.parent.pub.POLICY_FIELD])}}};"
+assert text.count(needle)==1;text=text.replace(needle,replacement)
+text=text.replace("def check_old(self):\n", "def check_old(self):\n  self.assertEqual(self.f.db.rows[self.f.key][self.ns.ROOT]['previous-immutable'],self.previous_namespace)\n")
+module=types.ModuleType('generation_actual_apply_fixture');module.__file__=str(SOURCE);sys.modules[module.__name__]=module;exec(compile(text,str(SOURCE),'exec'),module.__dict__)
+NAMES=['test_full_captured_producer_namespace_APPLY_and_exact_replay','test_current_recovery_readback_uses_exact_accepted_namespace','test_pending_accepted_race_reconciles_same_namespace_once','test_completed_accepted_race_does_not_duplicate','test_late_parent_callback_before_CAS_has_no_effect','test_late_parent_callback_after_completed_does_not_duplicate','test_consent_revoke_inside_APPLY_prevents_new_write','test_new_attempt_lease_change_stops_before_APPLY','test_FULL_retained_start_old_journal_to_strict_roles_APPLY_readback']
+def load_tests(loader,tests,pattern):return unittest.TestSuite(module.Cases(name) for name in NAMES)
+if __name__=='__main__':unittest.main()
