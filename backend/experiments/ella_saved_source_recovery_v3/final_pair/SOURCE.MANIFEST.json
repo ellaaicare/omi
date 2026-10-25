@@ -1,0 +1,21 @@
+{
+  "state": "FINAL_PAIRED_SOURCE_REVIEWED_IMPORTED_NOT_DEPLOYED",
+  "files": {
+    "authority-diagnostic-merge-v1/candidate/ella/services/semantic_context_authority.py.source": "e6030fd14899ca244acaa1fdb0c45ad95852703c03e33e928253778ac668c3da",
+    "authority-diagnostic-merge-v1/tests/test_authority_failure.py.source": "d65df1cb0e4eb634d77e0726d0fd90acab4a9851051e09aab6ea36938c4384c9",
+    "authority-diagnostic-merge-v1/tests/test_backend_authority_response.py.source": "3c012b2e5b606cbfc829cae160166f6792bb35cf9539b56bb605645b2d3443e2",
+    "sync-owned-adapter-reuse-v1/candidate/semantic_sync_host.py.source": "d8754a49a76a43ae749a29b0166f3b325ddfb1d29664bd8e56e19dacf65d922f",
+    "sync-owned-adapter-reuse-v1/tests/test_owned_reuse.py.source": "c2b4c5bacca6b440e14011bf804f53f393b749a01ba3d174578ecf9f2f34c641"
+  },
+  "original_runtime_files": 14,
+  "two_overrides": {
+    "backend_authority": "e6030fd14899ca244acaa1fdb0c45ad95852703c03e33e928253778ac668c3da",
+    "host_sync": "d8754a49a76a43ae749a29b0166f3b325ddfb1d29664bd8e56e19dacf65d922f"
+  },
+  "other_twelve_runtime_files": "unchanged original parent package hashes",
+  "required_existing_diagnostic_dependencies": {
+    "causal_diagnostics.py": "1fb069a6f9b57a1e3904983808f4cb5e6fa5b14e31e9e30e2439e79feea43548",
+    "enrichment_stage_timing.py": "4aa066553e6e60d2a8ed5f360a7331fce5b3bf80b011157b23eafff634a8b771"
+  },
+  "private_cohort_or_operational_controls_included": false
+}

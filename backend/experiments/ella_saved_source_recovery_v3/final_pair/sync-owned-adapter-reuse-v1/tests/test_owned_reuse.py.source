@@ -1,0 +1,105 @@
+"""Actual ordinary handler/adapter/run/capture; HTTP, registry and sync leaves fictional."""
+import ast,asyncio,copy,importlib.util,json,sys,unittest
+from pathlib import Path
+from types import SimpleNamespace
+D=Path(__file__).resolve().parents[2];W=D.parents[1];S=Path(__file__).resolve().parents[1]
+def load(name,p):
+ spec=importlib.util.spec_from_file_location(name,p);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m
+H=load('owned_reuse_host_fixture',D/'tests/test_host_startup.py');BASE=load('ordinary_base_host_for_counts',D/'host/semantic_sync_host.py');FAST=load('semantic_sync_host',S/'candidate/semantic_sync_host.py')
+sys.path.insert(0,'/Users/ellaai/.hermes/profiles/plato-eval/bin')
+CAP=load('semantic_context_snapshot_host_v2',W/'captured-context-latency-v3-host/candidate/semantic_context_snapshot_host_v2.py')
+class Tests(unittest.TestCase):
+ def setUp(self):
+  self.r=H.Rig();self.addCleanup(self.r.close);r=self.r;r.value.pop('recovery_context')
+  for suffix in ['start','completed']:(r.jpath/(r.key+'.'+suffix+'.json')).unlink()
+  self.gets=0;self.posts=0;self.server_samples=0;self.syncs=0;self.revoked=False;self.hook=None;self.sync_hook=None;self.mapping=str(r.path)
+  outer=self
+  class Response:
+   headers={}
+   def __init__(self,method,body):self.method=method;self.body=body;self.status_code=200
+   async def __aenter__(self):
+    if self.method=='GET':
+     outer.gets+=1;outer.server_samples+=2
+     if outer.hook:outer.hook(outer.gets)
+     self.status_code=403 if outer.revoked else 200;self.value=copy.deepcopy(r.value)
+    else:
+     outer.posts+=1;outer.server_samples+=2
+     self.value={'contract':'ella-context-records-v2.1','owner_sha256':H.MAN.textsha(r.uid),'target_conversation_id':r.cid,'target_source_sha256':r.sha,'runtime_authority_sha256':r.value['runtime_identity']['digest'],'attempt_scope_sha256':'b'*64,'records':{}}
+    return self
+   async def __aexit__(self,*a):return False
+   async def aiter_bytes(self):yield H.SYNC.encode(self.value)
+  class Client:
+   def __init__(self,**kw):pass
+   async def __aenter__(self):return self
+   async def __aexit__(self,*a):return False
+   def stream(self,method,url,**kw):return Response(method,kw.get('json'))
+  self.Client=Client
+  async def sync(authority,cid):
+   self.syncs+=1
+   if self.sync_hook:self.sync_hook()
+  self.base_pinned=BASE.PinnedSync;self.fast_pinned=FAST.PinnedSync
+  BASE.PinnedSync=FAST.PinnedSync=lambda **kw:sync
+  self.addCleanup(lambda:setattr(BASE,'PinnedSync',self.base_pinned));self.addCleanup(lambda:setattr(FAST,'PinnedSync',self.fast_pinned))
+  self.args={'body':{'uid':r.uid,'agent_id':'agent','conversation_id':r.cid,'expected_source_sha256':r.sha},'request_owner_uid':r.uid,'agent_id':'agent','workspace_for_agent':lambda *a:self.mapping,'load_registry':lambda:copy.deepcopy(r.registry),'state_root':r.jpath,'backend_url':'http://127.0.0.1:1','callback_key':'fictional-existing-reference','client_factory':Client}
+ def run_handler(self,module):return asyncio.run(module.sync_context_request(**self.args,sync_script='unused-fixture',registry_path='unused-fixture'))
+ def test_actual_baseline_run_six_GET_twelve_authority_samples(self):
+  out=self.run_handler(BASE);self.assertEqual(out['receipt']['status'],'completed');self.assertEqual((self.gets,self.server_samples,self.syncs),(6,12,1))
+ def test_reuse_run_three_GET_six_samples_same_sync_and_journal_contract(self):
+  out=self.run_handler(FAST);self.assertEqual(out['receipt']['status'],'completed');self.assertEqual((self.gets,self.server_samples,self.syncs),(3,6,1))
+  done=self.r.journal.read(self.r.key,'completed');self.assertEqual(done,out['receipt'])
+ def test_actual_sync_then_capture_uses_current_reviewed_private_adapter(self):
+  self.run_handler(FAST);self.gets=self.posts=self.server_samples=0
+  out=asyncio.run(CAP.captured_context_request(**self.args));self.assertEqual(out['version'],2);self.assertEqual((self.gets,self.posts,self.server_samples),(2,1,6))
+ def test_recovery_first_stage_reuses_exact_adapter_without_old_sync_or_journal_write(self):
+  r=self.r;r.value['recovery_context']=r.proof
+  r.journal.publish(r.key,'start',r.start);r.journal.publish(r.key,'completed',r.completed);before=r.images()
+  out=self.run_handler(FAST);self.assertEqual(out['receipt']['status'],'completed');self.assertEqual((self.gets,self.server_samples,self.syncs),(2,4,0));self.assertEqual(r.images(),before)
+ def test_final_posthydration_authority_bookend_still_rejects(self):
+  self.hook=lambda count:setattr(self,'revoked',count==3)
+  with self.assertRaises(H.SYNC.SyncHold):self.run_handler(FAST)
+  self.assertEqual((self.gets,self.syncs),(3,1));self.assertIsNone(self.r.journal.read(self.r.key,'completed'))
+ def test_consent_rejection_before_start_has_no_sync(self):
+  self.revoked=True
+  with self.assertRaises(H.SYNC.SyncHold):self.run_handler(FAST)
+  self.assertEqual(self.syncs,0);self.assertIsNone(self.r.journal.read(self.r.key,'start'))
+ def test_revocation_after_sync_prevents_completed_receipt(self):
+  self.sync_hook=lambda:setattr(self,'revoked',True)
+  with self.assertRaises(H.SYNC.SyncHold):self.run_handler(FAST)
+  self.assertEqual(self.syncs,1);self.assertIsNone(self.r.journal.read(self.r.key,'completed'))
+ def test_foreign_owner_response_rejected_before_sync(self):
+  self.r.value['uid']='foreign'
+  with self.assertRaises(H.SYNC.SyncHold):self.run_handler(FAST)
+  self.assertEqual(self.syncs,0)
+ def test_registry_change_during_HTTP_is_rejected_before_sync(self):
+  self.hook=lambda count:self.r.registry['agent_owners'].update(agent='foreign')
+  with self.assertRaises(H.SYNC.SyncHold):self.run_handler(FAST)
+  self.assertEqual(self.syncs,0)
+ def test_workspace_change_during_HTTP_is_rejected(self):
+  self.hook=lambda count:setattr(self,'mapping','/fictional-foreign-workspace')
+  with self.assertRaises(H.SYNC.SyncHold):self.run_handler(FAST)
+  self.assertEqual(self.syncs,0)
+ def test_source_edit_after_sync_is_rejected_before_snapshot_completion(self):
+  def edit():
+   self.r.source['transcript']='edited fictional source';self.r.value['source_sha256']=H.SYNC.digest(self.r.source)
+  self.sync_hook=edit
+  with self.assertRaises(H.SYNC.SyncHold):self.run_handler(FAST)
+  self.assertIsNone(self.r.journal.read(self.r.key,'completed'))
+ def test_generic_IO_reader_keeps_two_resolves_and_postread_revalidation(self):
+  r=self.r;a=FAST.parse_authority(r.value,r.uid,r.cid,'agent',r.registry);state={'calls':0,'authority':a}
+  async def resolve(*args):state['calls']+=1;return state['authority']
+  async def read(*args):
+   await asyncio.sleep(0);state['authority']=H.SYNC.Authority(a.runtime,a.identity,'different-registry',a.source_sha256);return copy.deepcopy(r.source)
+  operation=H.SYNC.SyncOnlyOperation(journal=r.journal,resolve=resolve,read_source=read,sync=None)
+  with self.assertRaisesRegex(H.SYNC.SyncHold,'authority_changed_during_source_read'):asyncio.run(operation._fresh(r.uid,r.cid))
+  self.assertEqual(state['calls'],2)
+ def test_private_reuse_rejects_unknown_or_subclass_adapter(self):
+  class Foreign(FAST.BackendAuthorityAdapter):pass
+  adapter=Foreign(backend_url='http://127.0.0.1:1',service_key='fictional',load_registry=lambda:self.r.registry,agent_id='agent',client_factory=self.Client)
+  with self.assertRaises(H.SYNC.SyncHold):CAP._CapturedAuthorityOperation(journal=self.r.journal,adapter=adapter,mapped=self.r.path,workspace_for_agent=lambda *a:self.r.path)
+ def test_owned_read_source_noawait_and_private_class_unchanged_source(self):
+  tree=ast.parse((D/'host/semantic_sync_host.py').read_text());cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='BackendAuthorityAdapter');reader=next(n for n in cls.body if getattr(n,'name',None)=='read_source');self.assertFalse(any(isinstance(n,ast.Await) for n in ast.walk(reader)))
+  old=ast.parse((D/'host/semantic_sync_host.py').read_text());new=ast.parse((S/'candidate/semantic_sync_host.py').read_text());definitions=lambda t:{n.name:ast.dump(n,include_attributes=False) for n in t.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef))};a,b=definitions(old),definitions(new)
+  self.assertEqual(set(a),set(b))
+  for name in a:
+   if name!='sync_context_request':self.assertEqual(a[name],b[name])
+if __name__=='__main__':unittest.main()

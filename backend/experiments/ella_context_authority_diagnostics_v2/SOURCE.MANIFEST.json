@@ -1,5 +1,5 @@
 {
-  "state": "REVIEWED_OBSERVATIONAL_CANDIDATE_NOT_DEPLOYED",
+  "state": "EXACT_DIAGNOSTIC_SOURCE_DEPLOYED_20261025T120238Z",
   "files": {
     "candidate/ella/services/causal_diagnostics.py.source": "1fb069a6f9b57a1e3904983808f4cb5e6fa5b14e31e9e30e2439e79feea43548",
     "candidate/ella/services/enrichment_stage_timing.py.source": "4aa066553e6e60d2a8ed5f360a7331fce5b3bf80b011157b23eafff634a8b771",
@@ -13,5 +13,21 @@
   },
   "actual_async_fixture_cases": 9,
   "external_IO_leaves_synthetic": true,
-  "private_control_or_runtime_data_included": false
+  "private_control_or_runtime_data_included": false,
+  "deployment": {
+    "utc": "2026-10-25T12:02:38.202246+00:00",
+    "backend_pid": 2726986,
+    "health_both_200": true,
+    "original20_source_and_job_hashes_preserved": true,
+    "quarantine_history_count_unchanged": 13,
+    "model_calls": 0,
+    "database_writes": 0
+  },
+  "live_readonly_acceptance": {
+    "utc": "2026-10-25T12:05:28.428148+00:00",
+    "expected_closed_source_guard": "account_processing_callback_source_not_active",
+    "all_stages_closed": true,
+    "protected_data_unchanged": true,
+    "historical503_cause_proven": false
+  }
 }

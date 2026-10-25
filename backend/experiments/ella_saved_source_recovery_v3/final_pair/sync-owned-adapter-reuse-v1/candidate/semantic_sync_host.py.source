@@ -1,0 +1,255 @@
+"""Owner-scoped sync-only host route implementation; existing service auth only.
+
+No legacy enrichment/model dispatch. Private context is returned only to the
+authenticated backend integration, never to logs or ordinary status receipts.
+"""
+from __future__ import annotations
+import copy
+from dataclasses import dataclass
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+from types import SimpleNamespace
+from urllib.parse import quote, urlsplit
+import uuid
+
+import httpx
+from semantic_sync_operation import Authority, Journal, SyncHold, SyncOnlyOperation, digest, encode, run_owned_sync, unique_pairs
+
+CONTRACT = 'ella-semantic-context-authority-v1'
+SOURCE_SHA = 'b6c950cf04d4706e73f47723a9d1ffffbeef8fa51e5df4541ec706fc16bf0212'
+MAX_AUTHORITY = 196608
+MAX_SOURCE_CODE = 1048576
+TOKEN = re.compile(r'^[A-Za-z0-9_.@:+-]{1,200}$')
+RUNTIME_FIELDS = {'uid','provider','status','binding_id','revision','profile_name','agent_id','workspace_root','account_user_id','profile_user_id'}
+RESPONSE_FIELDS = {'contract','uid','conversation_id','canonical_source','source_sha256','transcript_sha256','source_version','active_summary_version_id','runtime','runtime_identity'}
+
+
+def token(value):
+    if not isinstance(value,str) or not TOKEN.fullmatch(value) or '..' in value:
+        raise SyncHold('host_subject_invalid')
+    return value
+
+
+def backend_origin(value):
+    parsed = urlsplit(value)
+    try: ip = ipaddress.ip_address(parsed.hostname or '')
+    except ValueError as exc: raise SyncHold('host_backend_origin_invalid') from exc
+    if (parsed.scheme not in {'http','https'} or parsed.username or parsed.password or parsed.path
+            or parsed.query or parsed.fragment or ip.is_unspecified or ip.is_multicast):
+        raise SyncHold('host_backend_origin_invalid')
+    return value
+
+
+def parse_authority(value, uid, cid, agent, registry):
+    if (not isinstance(value,dict) or set(value) not in (RESPONSE_FIELDS, RESPONSE_FIELDS | {'recovery_context'}) or value['contract']!=CONTRACT
+            or value['uid']!=uid or value['conversation_id']!=cid):
+        raise SyncHold('host_backend_authority_invalid')
+    r=value['runtime']; i=value['runtime_identity']; source=value['canonical_source']
+    for name in ('source_sha256','transcript_sha256'):
+        if not isinstance(value[name],str) or not re.fullmatch(r'[0-9a-f]{64}',value[name]):
+            raise SyncHold('host_backend_source_binding_invalid')
+    if not isinstance(value['source_version'],str) or not value['source_version']:
+        raise SyncHold('host_backend_source_binding_invalid')
+    if (not isinstance(r,dict) or set(r)!=RUNTIME_FIELDS or not isinstance(i,dict)
+            or set(i)!={'uid','target_mode','digest'} or r['uid']!=uid or i['uid']!=uid
+            or r['agent_id']!=agent or r['provider']!='hermes' or r['status']!='active'
+            or type(r['revision']) is not int or r['revision']<1
+            or not isinstance(source,dict) or source.get('uid')!=uid or source.get('conversation_id')!=cid
+            or digest(source)!=value['source_sha256']):
+        raise SyncHold('host_backend_owner_or_source_changed')
+    for field in ('binding_id','profile_name','agent_id','account_user_id','profile_user_id'):
+        token(r[field])
+    if not isinstance(registry,dict): raise SyncHold('host_registry_invalid')
+    owners=registry.get('agent_owners'); workspaces=registry.get('agent_workspaces'); users=registry.get('users')
+    if not all(isinstance(x,dict) for x in (owners,workspaces,users)):
+        raise SyncHold('host_registry_invalid')
+    row=users.get(r['account_user_id']); hermes=row.get('hermes') if isinstance(row,dict) else None
+    if (not isinstance(hermes,dict) or row.get('omiUid')!=uid or row.get('userId')!=r['account_user_id']
+            or r['profile_user_id']!=r['account_user_id'] or owners.get(agent)!=uid
+            or workspaces.get(agent)!=r['workspace_root'] or hermes.get('userProfile')!=r['profile_name']
+            or agent not in (hermes.get('userAgentId'),r['profile_name'])
+            or owners.get(r['profile_name'])!=uid or owners.get(hermes.get('userAgentId'))!=uid
+            or workspaces.get(r['profile_name'])!=r['workspace_root']
+            or workspaces.get(hermes.get('userAgentId'))!=r['workspace_root']
+            or hermes.get('userWorkspace')!=r['workspace_root']):
+        raise SyncHold('host_registry_owner_runtime_mismatch')
+    token(hermes['userAgentId'])
+    # No whole-registry hash: it may contain credential references/private fields.
+    selected={'uid':uid,'account_user_id':r['account_user_id'],'profile_user_id':r['profile_user_id'],
+              'profile_name':r['profile_name'],'agent_id':agent,'registered_agent_id':hermes['userAgentId'],'workspace_root':r['workspace_root']}
+    runtime=SimpleNamespace(**copy.deepcopy(r)); identity=SimpleNamespace(**copy.deepcopy(i))
+    recovery = None
+    if 'recovery_context' in value:
+        from semantic_recovery_context import require_descriptor
+        recovery = copy.deepcopy(require_descriptor(value['recovery_context'], uid, cid, value['source_sha256']))
+        if recovery['source_version'] != value['source_version'] or recovery['stock_version'] != value['active_summary_version_id']:
+            raise SyncHold('recovery_context_source_version')
+    return Authority(runtime,identity,digest(selected),value['source_sha256'],recovery)
+
+
+def observe_authority_failure(*, uid, cid, category, phase, http_status=None):
+    """Closed metadata only; observation cannot change authority or retry behavior."""
+    try:
+        if category not in {'http_rejected', 'response_capacity', 'connect_timeout',
+                'read_timeout', 'write_timeout', 'pool_timeout', 'timeout',
+                'connect_error', 'read_error', 'protocol_error', 'transport_error',
+                'decode_invalid'} or phase not in {'request_headers', 'response_body', 'decode'}:
+            return
+        status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+        print('ella_semantic_callback_observation ' + json.dumps({
+            'version': 1, 'owner_sha256': hashlib.sha256(uid.encode()).hexdigest(),
+            'source_sha256': hashlib.sha256(cid.encode()).hexdigest(),
+            'category': category, 'phase': phase, 'http_status': status,
+        }, sort_keys=True, allow_nan=False), flush=True)
+    except BaseException:
+        pass
+
+
+class BackendAuthorityAdapter:
+    def __init__(self, *, backend_url, service_key, load_registry, agent_id, client_factory=httpx.AsyncClient, snapshot_only=False):
+        self.origin=backend_origin(backend_url); self.key=service_key
+        self.load_registry=load_registry; self.agent=agent_id; self.client_factory=client_factory
+        self.last=None
+        # Backend authority has a 20s bound; include finite transport headroom.
+        self.authority_timeout=25
+
+    async def fetch(self,uid,cid):
+        if not isinstance(self.key,str) or not self.key:
+            raise SyncHold('host_backend_auth_missing')
+        headers={'X-Ella-Callback-Service-Key':self.key,'X-Ella-Subject-Uid':uid,'Accept':'application/json'}
+        url=self.origin+'/v1/ella/conversation/'+quote(cid,safe='')+'/semantic-context-authority'
+        phase = 'request_headers'
+        try:
+            async with self.client_factory(timeout=httpx.Timeout(self.authority_timeout,connect=2),follow_redirects=False,trust_env=False) as client:
+                async with client.stream('GET',url,headers=headers) as response:
+                    if response.status_code!=200:
+                        observe_authority_failure(uid=uid, cid=cid, category='http_rejected',
+                                                  phase=phase, http_status=response.status_code)
+                        raise SyncHold('host_backend_authority_rejected')
+                    phase = 'response_body'
+                    chunks=[];size=0
+                    async for chunk in response.aiter_bytes():
+                        size+=len(chunk)
+                        if size>MAX_AUTHORITY:
+                            observe_authority_failure(uid=uid, cid=cid, category='response_capacity', phase=phase)
+                            raise SyncHold('host_backend_authority_capacity')
+                        chunks.append(chunk)
+            phase = 'decode'
+            value=json.loads(b''.join(chunks),object_pairs_hook=unique_pairs,
+                             parse_constant=lambda x: (_ for _ in ()).throw(SyncHold('host_backend_nonfinite')))
+        except SyncHold:raise
+        except httpx.HTTPError as exc:
+            if isinstance(exc, httpx.ConnectTimeout): category = 'connect_timeout'
+            elif isinstance(exc, httpx.ReadTimeout): category = 'read_timeout'
+            elif isinstance(exc, httpx.WriteTimeout): category = 'write_timeout'
+            elif isinstance(exc, httpx.PoolTimeout): category = 'pool_timeout'
+            elif isinstance(exc, httpx.TimeoutException): category = 'timeout'
+            elif isinstance(exc, httpx.ConnectError): category = 'connect_error'
+            elif isinstance(exc, httpx.ReadError): category = 'read_error'
+            elif isinstance(exc, httpx.ProtocolError): category = 'protocol_error'
+            else: category = 'transport_error'
+            observe_authority_failure(uid=uid, cid=cid, category=category, phase=phase)
+            raise SyncHold('host_backend_authority_unavailable') from exc
+        except (ValueError,UnicodeError) as exc:
+            observe_authority_failure(uid=uid, cid=cid, category='decode_invalid', phase=phase)
+            raise SyncHold('host_backend_authority_unavailable') from exc
+        return value
+
+    async def resolve(self,uid,cid):
+        value=await self.fetch(uid,cid)
+        authority=parse_authority(value,uid,cid,self.agent,self.load_registry())
+        self.last=copy.deepcopy(value)
+        return authority
+
+    async def read_source(self,uid,cid):
+        # The subsequent resolve in _fresh resamples trusted backend+registry;
+        # source hash is also part of Authority equality, not just caller input.
+        if self.last is None or self.last['uid']!=uid or self.last['conversation_id']!=cid:
+            raise SyncHold('host_authority_source_unavailable')
+        return copy.deepcopy(self.last['canonical_source'])
+
+
+def pinned_source(path):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        before=os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid!=os.geteuid()
+                or before.st_nlink!=1 or before.st_mode&0o022 or before.st_size>MAX_SOURCE_CODE):
+            raise SyncHold('host_sync_source_unsafe')
+        data=b''
+        while len(data)<=MAX_SOURCE_CODE:
+            chunk=os.read(fd,65536)
+            if not chunk:break
+            data+=chunk
+        after=os.fstat(fd)
+        if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
+            raise SyncHold('host_sync_source_changed')
+        if hashlib.sha256(data).hexdigest()!=SOURCE_SHA:
+            raise SyncHold('host_sync_source_pin_changed')
+        return data
+    finally:os.close(fd)
+
+
+class PinnedSync:
+    def __init__(self, *, journal, sync_script, registry_path):
+        self.journal,self.script,self.registry=journal,str(sync_script),str(registry_path)
+
+    async def __call__(self,authority,cid):
+        data=pinned_source(self.script); self.journal.check()
+        name='sync-source-'+uuid.uuid4().hex+'.py'
+        fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=self.journal.fd)
+        captured=os.fstat(fd)
+        try:
+            with os.fdopen(fd,'wb',closefd=False) as stream:
+                stream.write(data);stream.flush();os.fsync(fd)
+            os.fsync(self.journal.fd)
+            staged=Path(self.journal.root)/name
+            current=os.stat(name,dir_fd=self.journal.fd,follow_symlinks=False)
+            if (current.st_dev,current.st_ino)!=(captured.st_dev,captured.st_ino):
+                raise SyncHold('host_sync_stage_replaced')
+            if pinned_source(staged) != data:
+                raise SyncHold('host_sync_stage_changed')
+            argv=[sys.executable,str(staged),'--owner-uid',authority.runtime.uid,
+                  '--agent-id',authority.runtime.agent_id,'--target-workspace',authority.runtime.workspace_root,
+                  '--registry-path',self.registry,'--conversation-id',cid]
+            await run_owned_sync(argv,timeout_seconds=60)
+        finally:
+            os.close(fd)
+            try:current=os.stat(name,dir_fd=self.journal.fd,follow_symlinks=False)
+            except FileNotFoundError:current=None
+            if current is not None and (current.st_dev,current.st_ino)==(captured.st_dev,captured.st_ino):
+                try: owned_bytes = pinned_source(Path(self.journal.root)/name) == data
+                except (OSError, SyncHold): owned_bytes = False
+                if owned_bytes:
+                    os.unlink(name,dir_fd=self.journal.fd);os.fsync(self.journal.fd)
+
+
+async def sync_context_request(*, body, request_owner_uid, agent_id, workspace_for_agent,
+                               load_registry, state_root, sync_script, registry_path,
+                               backend_url, callback_key, client_factory=httpx.AsyncClient, snapshot_only=False):
+    if (not isinstance(body,dict) or set(body)!={'uid','agent_id','conversation_id','expected_source_sha256'}
+            or body['uid']!=request_owner_uid or body['agent_id']!=agent_id):
+        raise SyncHold('host_request_owner_mismatch')
+    uid=token(body['uid']);cid=token(body['conversation_id']);agent=token(agent_id)
+    # Existing shim's trusted owner/workspace gate, before any backend request.
+    mapped=workspace_for_agent(agent,uid)
+    adapter=BackendAuthorityAdapter(backend_url=backend_url,service_key=callback_key,
+                                  load_registry=load_registry,agent_id=agent,client_factory=client_factory,snapshot_only=snapshot_only)
+    journal=Journal(state_root)
+    try:
+        # Reuse the already-reviewed exact owned HTTP adapter specialization.
+        # Lazy import avoids the existing host<->snapshot module import cycle.
+        # Generic SyncOnlyOperation._fresh remains unchanged for IO readers.
+        from semantic_context_snapshot_host_v2 import _CapturedAuthorityOperation
+        operation=_CapturedAuthorityOperation(journal=journal,adapter=adapter,mapped=mapped,
+                                             workspace_for_agent=workspace_for_agent)
+        operation.sync=PinnedSync(journal=journal,sync_script=sync_script,registry_path=registry_path)
+        method = operation.snapshot if snapshot_only else operation.run
+        return await method(uid=uid,conversation_id=cid,expected_source_sha256=body['expected_source_sha256'])
+    finally:journal.close()

@@ -1,0 +1,9 @@
+# Final paired recovery source supplement
+
+This is an unactivated source supplement to the parent fourteen-file recovery package. Select the merged backend authority and host sync module from this directory; retain the other twelve parent runtime files and the existing deployed causal/timing diagnostic dependencies pinned in `SOURCE.MANIFEST.json`. Never overwrite a newer recovery algorithm with the older diagnostic-only authority module. Private cohort configuration and operational controls remain excluded.
+
+The authority merge preserves the recovery sampler AST apart from observational awaited-stage wrappers and reuses the independently reviewed diagnostic observer/public wrappers. The author ran 97 offline cases; independent review repeated 14 targeted async/compatibility cases and checked the remaining exact source hashes.
+
+The host change lazily reuses the existing private owned-adapter class for normal sync. It copies canonical data from the same immutable authority response without an intervening I/O await, retains both registry/workspace checks and before/after work authority bookends, and leaves generic potentially blocking source readers unchanged. Fourteen fictional HTTP composition fixtures count normal sync at three backend GETs/six server samples instead of six GETs/twelve samples, with the same sync child and completed journal. Capture/recovery behavior and revocation/wrong-owner/source-change rejection are covered. These counts do not establish the historical 503 cause or real latency improvement.
+
+Both final backend and host overlays passed actual interpreter import/type-identity acceptance with forbidden-I/O guards. This is not a deployment, real Firestore transaction or provider/writeback result. Final rollback/controller review and a controlled live application result remain separate gates. Fixtures depend on the archived baseline and existing local synthetic harnesses; this directory alone is not a standalone checkout.

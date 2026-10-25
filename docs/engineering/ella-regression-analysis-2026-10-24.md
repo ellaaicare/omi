@@ -4,6 +4,14 @@ Status: investigation and isolated implementation; **not a release qualification
 Prepared October 24, 2026 UTC for independent review, including Claude.
 No credentials, account identifiers, transcript bodies or private source packets belong in this document.
 
+## Deployed diagnostic checkpoint — October 25, 12:27 UTC
+
+Five original saved sources have independently verified enhanced readbacks; thirteen old attempts remain quarantined and two sources remain untouched. The three [context-authority diagnostic modules](../../backend/experiments/ella_context_authority_diagnostics_v2/README.md) were deployed at 12:02:38 UTC under backend PID 2726986. Both health endpoints return 200. Independent post-rollout checks preserved every original twenty-record source/job hash, all thirteen quarantine histories, original routing and the existing credential reference. The failed attempt's execution reservation and consumed control were separately retired under exact reviewed compare-and-swap controls; no quarantine was reopened. No attempt is active, no execution reservation remains, and claims are closed.
+
+The live read-only acceptance on that closed source correctly rejected at `source_admission` with `account_processing_callback_source_not_active`, retained sanitized cause/stage metadata and closed every span. This is the expected current closed-source guard. It does **not** identify the earlier inner HTTP503 cause, which was not retained at the time.
+
+A [final paired recovery source supplement](../../backend/experiments/ella_saved_source_recovery_v3/final_pair/README.md) merges those diagnostics into the guarded recovery authority and reuses the existing owned-adapter fresh-read implementation for ordinary sync. Fictional HTTP fixtures count six GETs/twelve authority samples before and three GETs/six samples afterward, retaining source/owner/consent/registry/workspace bookends and the same sync child. This proves the redundant-read correction, not its responsibility for the historical 503 or a measured production speedup. Both final overlays passed actual backend/host interpreter import and type-identity checks. They remain **undeployed**; final transactional/fault/rollback review and one controlled live canonical writeback remain gates. A missing timing-module hash in smoke output was caught before rollout and is being corrected with a permanent preflight coverage invariant.
+
 ## Verified recovery checkpoint — October 25, 11:11 UTC
 
 The authorized original twenty saved sources now have **five independently read-back enhanced versions, thirteen quarantined attempts, and two untouched sources**. Both backend health endpoints returned 200 at 11:10:59 UTC. No model attempt is active; claims are closed and one failed-attempt execution reservation remains held pending reviewed settlement. Original transcripts, stock versions and original per-account routing are preserved. Five successes do not qualify recovery of all saved memories.
