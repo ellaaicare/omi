@@ -519,6 +519,20 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     await ServiceManager.instance().device.disconnectDevice(id, userInitiated: true);
   }
 
+  /// The user's Reconnect after [disconnectKeepingPairing]. Saved-device reconnect stays blocked while the hold is
+  /// set, so clear it through the non-automatic forced connect, then re-arm saved reconnect as a launch would.
+  Future<void> reconnectKeepingPairing(String caller) async {
+    if (_isDisposed || isConnected) return;
+    final id = SharedPreferencesUtil().btDevice.id;
+    if (id.isEmpty || ServiceManager.instance().device.staleBondRecoveryRequired) return;
+    try {
+      await ServiceManager.instance().device.ensureConnection(id, force: true);
+    } catch (e) {
+      Logger.debug('reconnectKeepingPairing ($caller): ensureConnection failed: $e');
+    }
+    await initiateConnection(caller);
+  }
+
   Future _bleDisconnectDevice(BtDevice btDevice) async {
     await ServiceManager.instance().device.disconnectDevice(btDevice.id);
   }
