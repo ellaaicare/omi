@@ -4904,7 +4904,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get consentDataMessage =>
-      'By continuing, your conversations, transcripts, and personal information will be securely stored on Ella\'s servers. Live recordings are transcribed on your device. When you sync saved recordings, send a voice message, or set up your voice profile, that audio is sent to Ella\'s servers, and recordings and voice messages are transcribed by Modulate or Soniox. Transcripts and conversation text are sent through OpenRouter to OpenAI models to generate summaries, chat answers, and insights.';
+      'By continuing, your conversations, transcripts, and personal information will be securely stored on Ella\'s servers, which use Google Cloud (Firebase) for sign-in and storage. Live recordings are transcribed on your device. When you sync saved recordings, send a voice message, or set up your voice profile, that audio is sent to Ella\'s servers, and recordings and voice messages are transcribed by Modulate or Soniox. Transcripts and conversation text are sent through OpenRouter to OpenAI models to generate summaries, chat answers, and insights, and Pinecone stores a search index built from them. Spoken replies are generated from the reply text by Google Gemini.';
 
   @override
   String get tasksEmptyStateMessage => 'Start a conversation to create a task.';
