@@ -9318,7 +9318,7 @@ abstract class AppLocalizations {
   /// Consent message explaining how user data will be stored and used
   ///
   /// In en, this message translates to:
-  /// **'By continuing, your conversations, transcripts, and personal information will be securely stored on Ella\'s servers. Speech is transcribed on your device with Apple speech recognition. Transcripts and conversation text are sent through OpenRouter to OpenAI models to generate summaries, chat answers, and insights.'**
+  /// **'By continuing, your conversations, transcripts, and personal information will be securely stored on Ella\'s servers. Live recordings are transcribed on your device. When you sync saved recordings, send a voice message, or set up your voice profile, that audio is sent to Ella\'s servers, and recordings and voice messages are transcribed by Modulate or Soniox. Transcripts and conversation text are sent through OpenRouter to OpenAI models to generate summaries, chat answers, and insights.'**
   String get consentDataMessage;
 
   /// Guidance on the empty Tasks tab: start a conversation to create a task.
@@ -17070,13 +17070,13 @@ abstract class AppLocalizations {
   /// Title of the dialog shown when a third-party (custom) STT user manually syncs offline recordings
   ///
   /// In en, this message translates to:
-  /// **'Sync uses Omi transcription'**
+  /// **'Sync sends this audio off your phone'**
   String get syncCustomSttWarningTitle;
 
   /// Body warning that syncing transcribes on Omi servers and counts toward the plan limit
   ///
   /// In en, this message translates to:
-  /// **'You use your own transcription provider. Syncing these recordings transcribes them on Omi\'s servers instead, and they count toward your plan\'s transcription limit.'**
+  /// **'Live recordings are transcribed on your device. Syncing these recordings uploads their audio to Ella\'s servers, where Modulate or Soniox transcribes it, and they count toward your plan\'s transcription limit.'**
   String get syncCustomSttWarningMessage;
 
   /// Title for the 'transcribe later' capture-mode toggle in device settings

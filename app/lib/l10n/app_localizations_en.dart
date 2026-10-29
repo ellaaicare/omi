@@ -4904,7 +4904,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get consentDataMessage =>
-      'By continuing, your conversations, transcripts, and personal information will be securely stored on Ella\'s servers. Speech is transcribed on your device with Apple speech recognition. Transcripts and conversation text are sent through OpenRouter to OpenAI models to generate summaries, chat answers, and insights.';
+      'By continuing, your conversations, transcripts, and personal information will be securely stored on Ella\'s servers. Live recordings are transcribed on your device. When you sync saved recordings, send a voice message, or set up your voice profile, that audio is sent to Ella\'s servers, and recordings and voice messages are transcribed by Modulate or Soniox. Transcripts and conversation text are sent through OpenRouter to OpenAI models to generate summaries, chat answers, and insights.';
 
   @override
   String get tasksEmptyStateMessage => 'Start a conversation to create a task.';
@@ -9154,11 +9154,11 @@ class AppLocalizationsEn extends AppLocalizations {
   String get recapRegenerateNoConversations => 'No conversations to summarize for this day.';
 
   @override
-  String get syncCustomSttWarningTitle => 'Sync uses Omi transcription';
+  String get syncCustomSttWarningTitle => 'Sync sends this audio off your phone';
 
   @override
   String get syncCustomSttWarningMessage =>
-      'You use your own transcription provider. Syncing these recordings transcribes them on Omi\'s servers instead, and they count toward your plan\'s transcription limit.';
+      'Live recordings are transcribed on your device. Syncing these recordings uploads their audio to Ella\'s servers, where Modulate or Soniox transcribes it, and they count toward your plan\'s transcription limit.';
 
   @override
   String get transcribeLaterTitle => 'Transcribe Later';

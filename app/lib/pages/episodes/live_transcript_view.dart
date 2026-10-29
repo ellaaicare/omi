@@ -29,6 +29,7 @@ import 'package:omi/utils/constants.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
+import 'package:omi/utils/sync_confirmation.dart';
 import 'package:omi/widgets/conversation_photo_image.dart';
 import 'package:omi/widgets/media_viewer_page.dart';
 import 'package:omi/widgets/photos_grid.dart';
@@ -699,7 +700,12 @@ class _LiveTranscriptViewState extends State<LiveTranscriptView> {
           liveRegion: true,
           button: retryable,
           child: retryable
-              ? GestureDetector(onTap: () => provider.retryFailedSessionWalUploads(), child: indicator)
+              ? GestureDetector(
+                  onTap: () async {
+                    if (await confirmSyncForCustomStt(context)) provider.retryFailedSessionWalUploads();
+                  },
+                  child: indicator,
+                )
               : indicator,
         ),
       ),
