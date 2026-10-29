@@ -93,7 +93,9 @@ class WalListItem extends StatelessWidget {
       return OmiButton.secondary(
         label: context.l10n.tryAgain,
         size: OmiButtonSize.compact,
-        onPressed: () => syncProvider.syncWal(wal),
+        onPressed: () async {
+          if (await confirmSyncForCustomStt(context)) syncProvider.syncWal(wal);
+        },
       );
     }
     // No upload can resolve these, so offer removal rather than a chevron that
