@@ -643,7 +643,11 @@ class _DeviceSettingsState extends State<DeviceSettings> {
           if (provider.isConnected)
             _customizationGroup(paired ?? connected, provider)
           else
-            const DeviceDisconnectedCard(),
+            DeviceDisconnectedCard(
+              onReconnect: Env.profile == AppEnvironmentProfile.ellaBase && provider.pairedDevice != null
+                  ? () => provider.reconnectKeepingPairing('DeviceSettingsReconnect')
+                  : null,
+            ),
           gap,
           _deviceGroup(provider),
           gap,
