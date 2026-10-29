@@ -105,7 +105,7 @@ class QuickActionsService {
         _toggleMute(context, mute: false);
         break;
       case _kConnectDevice:
-        Provider.of<DeviceProvider>(context, listen: false).initiateConnection('QuickActions');
+        Provider.of<DeviceProvider>(context, listen: false).reconnectKeepingPairing('QuickActions');
         routeToPage(context, const DeviceSettings());
         break;
       case _kDeviceSettings:

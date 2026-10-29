@@ -187,6 +187,17 @@ void main() {
     expect(SharedPreferencesUtil().btDevice.id, id);
   });
 
+  test('saved-device reconnect (the old Connect Device path) stays blocked by the hold', () async {
+    await service.disconnectDevice(id, userInitiated: true);
+    final connectsBefore = built[id]!.connects;
+
+    await service.reconnectSavedDevice('launch');
+    expect(service.connectionFor(id), isNull);
+    expect(built[id]!.connects, connectsBefore);
+    expect(SharedPreferencesUtil().getStringList('manualBleDisconnects'), contains(id));
+    service.savedReconnect.stop();
+  });
+
   test('Forget, by contrast, is the path that unmanages the device', () async {
     await service.forgetDevice(id);
     expect(unmanageCalls + (built[id]!.transport.disposed ? 1 : 0), greaterThan(0));
