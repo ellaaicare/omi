@@ -5863,7 +5863,7 @@
     "@additionalSpeechSampleRemoved": {
         "description": "Confirmation message when an additional speech sample is deleted"
     },
-    "consentDataMessage": "By continuing, your conversations, transcripts, and personal information will be securely stored on Ella's servers. Speech is transcribed on your device with Apple speech recognition. Transcripts and conversation text are sent through OpenRouter to OpenAI models to generate summaries, chat answers, and insights.",
+    "consentDataMessage": "By continuing, your conversations, transcripts, and personal information will be securely stored on Ella's servers. Live recordings are transcribed on your device. When you sync saved recordings, send a voice message, or set up your voice profile, that audio is sent to Ella's servers, and recordings and voice messages are transcribed by Modulate or Soniox. Transcripts and conversation text are sent through OpenRouter to OpenAI models to generate summaries, chat answers, and insights.",
     "@consentDataMessage": {
         "description": "Consent message explaining how user data will be stored and used"
     },
@@ -10897,11 +10897,11 @@
     "recapRegenerateFailed": "Couldn't regenerate the recap. Try again later.",
     "recapRegenerateCooldown": "Please wait a few seconds before regenerating again.",
     "recapRegenerateNoConversations": "No conversations to summarize for this day.",
-    "syncCustomSttWarningTitle": "Sync uses Omi transcription",
+    "syncCustomSttWarningTitle": "Sync sends this audio off your phone",
     "@syncCustomSttWarningTitle": {
         "description": "Title of the dialog shown when a third-party (custom) STT user manually syncs offline recordings"
     },
-    "syncCustomSttWarningMessage": "You use your own transcription provider. Syncing these recordings transcribes them on Omi's servers instead, and they count toward your plan's transcription limit.",
+    "syncCustomSttWarningMessage": "Live recordings are transcribed on your device. Syncing these recordings uploads their audio to Ella's servers, where Modulate or Soniox transcribes it, and they count toward your plan's transcription limit.",
     "@syncCustomSttWarningMessage": {
         "description": "Body warning that syncing transcribes on Omi servers and counts toward the plan limit"
     },
