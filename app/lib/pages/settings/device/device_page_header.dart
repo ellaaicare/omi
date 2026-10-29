@@ -133,7 +133,10 @@ class DeviceBatteryGroup extends StatelessWidget {
 
 /// Shown instead of the device controls while the device is not connected.
 class DeviceDisconnectedCard extends StatelessWidget {
-  const DeviceDisconnectedCard({super.key});
+  const DeviceDisconnectedCard({super.key, this.onReconnect});
+
+  /// Ella Base: reconnects the remembered necklace after a user Disconnect.
+  final VoidCallback? onReconnect;
 
   @override
   Widget build(BuildContext context) {
@@ -158,6 +161,14 @@ class DeviceDisconnectedCard extends StatelessWidget {
             textAlign: TextAlign.center,
             style: OmiType.subhead.copyWith(color: OmiColors.textSecondary, height: 1.4),
           ),
+          if (onReconnect != null) ...[
+            const SizedBox(height: OmiSpacing.lg),
+            OmiButton.secondary(
+              key: const Key('device_reconnect_button'),
+              label: context.l10n.reconnect,
+              onPressed: onReconnect,
+            ),
+          ],
         ],
       ),
     );
