@@ -640,6 +640,7 @@ class _AutoSyncPageState extends State<AutoSyncPage> {
         label: context.l10n.tryAgain,
         size: OmiButtonSize.compact,
         onPressed: () async {
+          if (!await confirmSyncForCustomStt(context) || !mounted) return;
           final sync = context.read<SyncProvider>();
           for (final wal in block.wals) {
             final s = wal.syncDisplayState;
@@ -833,7 +834,9 @@ class _AutoSyncPageState extends State<AutoSyncPage> {
       return OmiButton.secondary(
         label: context.l10n.tryAgain,
         size: OmiButtonSize.compact,
-        onPressed: () => context.read<SyncProvider>().syncWal(wal),
+        onPressed: () async {
+          if (await confirmSyncForCustomStt(context) && mounted) context.read<SyncProvider>().syncWal(wal);
+        },
       );
     }
     // Nothing can move these forward, so the only honest action is removal.
