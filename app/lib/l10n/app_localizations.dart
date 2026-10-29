@@ -9318,7 +9318,7 @@ abstract class AppLocalizations {
   /// Consent message explaining how user data will be stored and used
   ///
   /// In en, this message translates to:
-  /// **'By continuing, your conversations, recordings, and personal information will be securely stored on our servers. Your audio recordings and transcripts are processed by third-party AI services — Deepgram for transcription and OpenAI for analysis — to provide you with AI-powered insights and enable all app features.'**
+  /// **'By continuing, your conversations, transcripts, and personal information will be securely stored on Ella\'s servers. Speech is transcribed on your device with Apple speech recognition. Transcripts and conversation text are sent through OpenRouter to OpenAI models to generate summaries, chat answers, and insights.'**
   String get consentDataMessage;
 
   /// Guidance on the empty Tasks tab: start a conversation to create a task.

@@ -1,6 +1,10 @@
 #if compiler(>=6.4)
 import Foundation
 import AppIntents
+#if BASE_DEV_TIMED_CAPTURE
+import ActivityKit
+import Flutter
+#endif
 
 private func cleanedMemory(_ text: String) -> String {
     var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -738,4 +742,284 @@ extension StartOmiListeningIntent {
 extension StopOmiListeningIntent {
     static var supportedModes: IntentModes { .foreground(.dynamic) }
 }
+#if BASE_DEV_TIMED_CAPTURE
+// DEV-ONLY Ella Base timed capture test (lib/dev/base_timed_capture.dart). Compiled only with the Swift
+// condition BASE_DEV_TIMED_CAPTURE. No AppShortcut phrase: reachable only as a Shortcuts action. Starting the
+// mic from the background is allowed only inside an AudioRecordingIntent perform, so the delayed start is
+// this intent; Dart refuses unless armed (one shot, same account, time window).
+//
+// Exact ownership (v4): Dart asks for a token grant, then only the capture session it starts for the test (and
+// that session's own restarts) mints session ids carrying the token (lib/dev/dev_mic_token.dart); ordinary starts
+// never do. PhoneMicController refuses any activation of a revoked or expired token at every setup stage and never
+// lets a test id adopt another session. The grant's expiry is enforced here, independent of Dart:
+// at expiry the token is revoked and only a session carrying exactly that token is stopped and verified.
+@available(iOS 18.0, *)
+// v4.7: LiveActivityIntent, like the production OmiCaptureRecordingIntent. iOS lets Activity.request run from the
+// background only inside a LiveActivityIntent; without it the capture card was refused (v4.6 token 461300147:
+// native_live_activity_missing, then the app quit before its first audio chunk was written).
+struct BaseTimedCaptureTestIntent: AudioRecordingIntent, LiveActivityIntent {
+    static var title: LocalizedStringResource = "Run armed Ella Base timed capture test"
+    static var description = IntentDescription(
+        "Dev only. Records once, only if armed in Developer Settings in the last few minutes, then stops itself.")
+    static var openAppWhenRun: Bool = false
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let outcome = try await BaseTimedCaptureDispatcher.run()
+        return .result(dialog: IntentDialog(stringLiteral: "Timed capture test: \(outcome)"))
+    }
+}
+
+@available(iOS 18.0, *)
+enum BaseTimedCaptureDispatcher {
+    /// Upper bound for a grant: startBound 15 s + max record 60 s + stopBound 10 s.
+    static let maxGrant: TimeInterval = 85
+    static let queryBound: TimeInterval = 2
+    static let cutoffBound: TimeInterval = 5
+    static let runBound: TimeInterval = 20
+    static let liveActivityBound: TimeInterval = 3
+
+    /// Set once on the main thread by AppDelegate, like OmiCaptureActionDispatcher.handler.
+    static var channel: FlutterMethodChannel?
+    static var mic: PhoneMicController?
+
+    static func attach(messenger: FlutterBinaryMessenger, mic: PhoneMicController) {
+        Self.mic = mic
+        let channel = FlutterMethodChannel(name: "com.ella.base/dev_timed_capture", binaryMessenger: messenger)
+        channel.setMethodCallHandler { call, result in Self.handleFromDart(call, result) }
+        Self.channel = channel
+    }
+
+    // MARK: intent entry
+
+    static func run() async throws -> String {
+        let launchDeadline = Date().addingTimeInterval(10)  // cold background launch: wait for Flutter
+        while Self.channel == nil || Self.mic == nil {
+            if Date() >= launchDeadline { throw CaptureActionError.unavailable }
+            try await Task.sleep(nanoseconds: 150_000_000)
+        }
+        await MainActor.run { LiveActivityManager.devLastStartError = nil }
+        await Self.setLiveActivityWindow(runBound + liveActivityBound)
+        var outcome = await Self.invokeDart("run", timeout: runBound) as? String ?? "dart_no_answer"
+        if outcome.hasPrefix("recording") {
+            let card = await Self.awaitLiveActivity()
+            let startError = await MainActor.run { LiveActivityManager.devLastStartError }
+            Self.evidence("native_live_activity_\(card.rawValue)", startError.map { ["start_error": $0] } ?? [:])
+            // v4.7: never return from perform with an owned recording and no card. iOS ends such a recording
+            // (and in v4.6 the process) without any stop line; stop it ourselves while we still can.
+            if case .cutoff(let reason) = BaseTimedCaptureCardPolicy.afterStart(outcome: outcome, card: card.rawValue),
+               let token = Self.liveToken {
+                let result = await Self.cutoffOffMain(token, reason: reason)
+                outcome = "cut_\(reason):\(result)"
+            }
+        }
+        await Self.setLiveActivityWindow(nil)
+        Self.evidence("native_trigger_outcome", ["outcome": outcome])
+        return outcome
+    }
+
+    /// The token of the current grant (set on grant, cleared on revoke/expiry). Read from the intent's task.
+    private static let liveTokenLock = NSLock()
+    private static var _liveToken: Int64?
+    static var liveToken: Int64? {
+        get { liveTokenLock.lock(); defer { liveTokenLock.unlock() }; return _liveToken }
+        set { liveTokenLock.lock(); _liveToken = newValue; liveTokenLock.unlock() }
+    }
+
+    /// cutoff() blocks on semaphores, so it must not run on the main thread or the intent's cooperative pool.
+    private static func cutoffOffMain(_ token: Int64, reason: String) async -> String {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: Self.cutoff(token, reason: reason)) }
+        }
+    }
+
+    /// Apple: an AudioRecordingIntent must start a Live Activity when recording begins, or the recording stops.
+    /// LiveActivityManager starts capture cards only in the foreground; this opens its dev window for this perform.
+    private static func setLiveActivityWindow(_ seconds: TimeInterval?) async {
+        await MainActor.run { LiveActivityManager.devIntentStartUntil = seconds.map { Date().addingTimeInterval($0) } }
+    }
+
+    private enum LiveActivityWait: String { case started, missing, waitCancelled = "wait_cancelled" }
+
+    /// Bounded wait for the capture card LiveActivityManager starts from the recording's own snapshot.
+    /// Cancelling the intent task ends only this wait (no busy loop): run() still closes the window and writes its
+    /// evidence, and the recording keeps its owned stop (Dart devStopOwned, native grant expiry), never this task.
+    private static func awaitLiveActivity() async -> LiveActivityWait {
+        let deadline = Date().addingTimeInterval(liveActivityBound)
+        while Date() < deadline {
+            if Activity<OmiCaptureAttributes>.activities.contains(where: { $0.activityState == .active }) { return .started }
+            do { try await Task.sleep(nanoseconds: 150_000_000) } catch { return .waitCancelled }
+        }
+        return .missing
+    }
+
+    // MARK: Dart -> native
+
+    private static func token(_ call: FlutterMethodCall) -> Int64? {
+        ((call.arguments as? [String: Any])?["token"] as? NSNumber)?.int64Value
+    }
+
+    private static func handleFromDart(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
+        switch call.method {
+        case "grantToken":
+            guard let token = Self.token(call),
+                  let ttlMs = ((call.arguments as? [String: Any])?["ttl_ms"] as? NSNumber)?.doubleValue else {
+                result(false); return
+            }
+            let ttl = min(max(ttlMs / 1000, 1), maxGrant)
+            let now = Date()
+            let granted = PhoneMicController.devTokens.grant(token, until: now.addingTimeInterval(ttl), now: now)
+            Self.evidence(granted ? "native_token_granted" : "native_token_refused", ["token": token, "ttl_s": ttl])
+            if granted {
+                Self.liveToken = token
+                DispatchQueue.global().asyncAfter(deadline: .now() + ttl) { Self.expire(token) }
+            }
+            result(granted)
+        case "revokeToken":
+            if let token = Self.token(call) {
+                PhoneMicController.devTokens.revoke(token)
+                if Self.liveToken == token { Self.liveToken = nil }
+                Self.evidence("native_token_revoked", ["token": token])
+            }
+            result(nil)
+        case "micOpen":
+            guard let token = Self.token(call) else { result(nil); return }
+            DispatchQueue.global().async {
+                let open = Self.sessionOpen(token)
+                DispatchQueue.main.async { result(open) }
+            }
+        case "cutoff":
+            guard let token = Self.token(call) else { result("unverified"); return }
+            DispatchQueue.global().async {
+                let outcome = Self.cutoff(token, reason: "dart_escalation")
+                DispatchQueue.main.async { result(outcome) }
+            }
+        case "terminal":
+            Self.evidence("native_dart_terminal", ["status": (call.arguments as? [String: Any])?["status"] ?? "?"])
+            result(nil)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    // MARK: expiry and cutoff (off the main thread)
+
+    private static func expire(_ token: Int64) {
+        PhoneMicController.devTokens.revoke(token)
+        if Self.liveToken == token { Self.liveToken = nil }
+        Self.evidence("native_token_expired", ["token": token])
+        _ = Self.cutoff(token, reason: "native_deadline")
+    }
+
+    /// Revokes [token]; stops only a session carrying exactly [token]; verifies it is gone within cutoffBound.
+    /// Returns "idle" | "not_owned" | "closed" | "unverified". Must not run on the main thread.
+    static func cutoff(_ token: Int64, reason: String) -> String {
+        guard let mic = Self.mic else {
+            Self.evidence("UNVERIFIED_HOLD", ["token": token, "reason": reason, "detail": "no_controller"])
+            return "unverified"
+        }
+        let box = StringBox()
+        let done = DispatchSemaphore(value: 0)
+        mic.devCutoff(token: token) { box.set($0); done.signal() }
+        guard done.wait(timeout: .now() + cutoffBound) == .success, let decision = box.get() else {
+            Self.evidence("UNVERIFIED_HOLD", ["token": token, "reason": reason, "detail": "controller_unresponsive"])
+            return "unverified"
+        }
+        switch decision {
+        case "idle", "not_owned":
+            Self.evidence("native_cutoff_\(decision)", ["token": token, "reason": reason])
+            return decision
+        default:
+            if Self.sessionOpen(token) == false {
+                Self.evidence("NATIVE_CUTOFF_MIC_CLOSED", ["token": token, "reason": reason])
+                return "closed"
+            }
+            Self.evidence("UNVERIFIED_HOLD", ["token": token, "reason": reason, "detail": "token_session_not_idle"])
+            return "unverified"
+        }
+    }
+
+    /// true: a live session carries [token]; false: none does; nil: controller unresponsive within queryBound.
+    static func sessionOpen(_ token: Int64) -> Bool? {
+        guard let mic = Self.mic else { return nil }
+        let box = BoolBox()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { box.set(mic.devSessionOpen(token: token)); done.signal() }
+        guard done.wait(timeout: .now() + queryBound) == .success else { return nil }
+        return box.get()
+    }
+
+    /// Native -> Dart with a bounded wait; a late reply is ignored.
+    private static func invokeDart(_ method: String, timeout: TimeInterval) async -> Any? {
+        await withCheckedContinuation { continuation in
+            let once = ResumeOnce(continuation)
+            DispatchQueue.main.async {
+                guard let channel = Self.channel else { once.resume(nil); return }
+                channel.invokeMethod(method, arguments: nil) { reply in
+                    if let error = reply as? FlutterError { once.resume("error \(error.code)") } else { once.resume(reply) }
+                }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { once.resume("timeout") }
+        }
+    }
+
+    /// Append-only raw evidence, the same file the Dart side appends to.
+    static func evidence(_ event: String, _ detail: [String: Any]) {
+        var line: [String: Any] = ["t": ISO8601DateFormatter().string(from: Date()), "event": event, "side": "native"]
+        line.merge(detail) { _, new in new }
+        guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              var data = try? JSONSerialization.data(withJSONObject: line) else { return }
+        data.append(0x0A)
+        let url = dir.appendingPathComponent("base_timed_capture_evidence.jsonl")
+        if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    }
+}
+
+// BEGIN DEV CARD POLICY
+/// DEV-ONLY: what perform() does once Dart answers. Pure, so run_dev_card_policy_tests.sh compiles it alone.
+enum BaseTimedCaptureCardPolicy {
+    enum Action: Equatable { case keep, cutoff(String) }
+
+    /// [outcome]: Dart's answer ("recording:<s>" or a refusal). [card]: "started" | "missing" | "wait_cancelled".
+    static func afterStart(outcome: String, card: String) -> Action {
+        guard outcome.hasPrefix("recording") else { return .keep }  // nothing started: nothing to stop
+        switch card {
+        case "started": return .keep
+        case "wait_cancelled": return .cutoff("live_activity_wait_cancelled")
+        default: return .cutoff("live_activity_missing")
+        }
+    }
+}
+// END DEV CARD POLICY
+
+@available(iOS 18.0, *)
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Any?, Never>?
+    init(_ continuation: CheckedContinuation<Any?, Never>) { self.continuation = continuation }
+    func resume(_ value: Any?) {
+        lock.lock(); let c = continuation; continuation = nil; lock.unlock()
+        c?.resume(returning: value)
+    }
+}
+
+@available(iOS 18.0, *)
+private final class StringBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String?
+    func set(_ v: String) { lock.lock(); value = v; lock.unlock() }
+    func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+@available(iOS 18.0, *)
+private final class BoolBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool?
+    func set(_ v: Bool) { lock.lock(); value = v; lock.unlock() }
+    func get() -> Bool? { lock.lock(); defer { lock.unlock() }; return value }
+}
+#endif
 #endif

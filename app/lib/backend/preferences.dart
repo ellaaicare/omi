@@ -14,6 +14,8 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/memory.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
+import 'package:omi/env/env.dart';
+import 'package:omi/env/environment_profile.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/models/stt_provider.dart';
 import 'package:omi/services/capture/capture_policy.dart';
@@ -166,7 +168,7 @@ class SharedPreferencesUtil {
       'uid': (value) => value is String,
       'fullName': (value) => value is String,
       'batchModeEnabled': (value) => value is bool,
-      'flash_page_pending_uploads': (value) => value is List<String>,
+      'flash_page_pending_uploads': _isStringList,
       'limitless_wal_migration_v1': (value) => value is bool,
     };
     for (final entry in expected.entries) {
@@ -700,7 +702,11 @@ class SharedPreferencesUtil {
   // Custom STT configuration
   CustomSttConfig get customSttConfig {
     final configJson = getString('customSttConfig');
-    if (configJson.isEmpty) return CustomSttConfig.defaultConfig;
+    if (configJson.isEmpty) {
+      return Env.profile == AppEnvironmentProfile.ellaBase
+          ? const CustomSttConfig(provider: SttProvider.onDeviceWhisper, language: 'en', sendRawAudioToOmi: false)
+          : CustomSttConfig.defaultConfig;
+    }
     try {
       return CustomSttConfig.fromJson(jsonDecode(configJson));
     } catch (e, stack) {
@@ -1515,9 +1521,16 @@ class SharedPreferencesUtil {
   double getDouble(String key, {double defaultValue = 0.0}) =>
       PhysicalQualification.enabled ? _preferences?.getDouble(key) ?? defaultValue : _readOrDefault(key, defaultValue);
 
-  List<String> getStringList(String key, {List<String> defaultValue = const []}) => PhysicalQualification.enabled
-      ? _preferences?.getStringList(key) ?? defaultValue
-      : _readOrDefault(key, defaultValue);
+  /// A string list loaded from the platform store is a List<Object?>, never a List<String>
+  /// (the plugin's own getStringList casts it), so only a non-string element is a mismatch.
+  List<String> getStringList(String key, {List<String> defaultValue = const []}) {
+    if (PhysicalQualification.enabled) return _preferences?.getStringList(key) ?? defaultValue;
+    final value = _preferences?.get(key);
+    if (_isStringList(value)) return (value as List).cast<String>().toList();
+    return _readOrDefault(key, defaultValue);
+  }
+
+  static bool _isStringList(Object? value) => value is List && value.every((element) => element is String);
 
   Future<bool> saveString(String key, String value) async {
     final changed = key == 'btDevice' && _preferences?.getString(key) != value;

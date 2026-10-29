@@ -164,6 +164,9 @@ class AuthenticationProvider extends BaseProvider {
   /// is offered at all; the authoritative gate is server-side.
   bool get isLocalDevProfile => Env.profile == AppEnvironmentProfile.localDev;
 
+  /// Ella Base signs in with Google only until Sign in with Apple is configured on its Firebase project.
+  bool get isEllaBaseProfile => Env.profile == AppEnvironmentProfile.ellaBase;
+
   Future<void> onLocalDevSignIn(Function() onSignIn) async {
     if (loading) return;
     setLoadingState(true);

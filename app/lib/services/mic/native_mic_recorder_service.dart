@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:omi/gen/phone_mic_pigeon.g.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/dev/dev_mic_token.dart';
 
 /// iOS/Android [IMicRecorderService] backed by the native PhoneMic module — an
 /// AVAudioEngine capture layer with self-healing interruption and route-change
@@ -56,6 +57,15 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
   // Dart-minted session identity, bumped on every start()/startBatch(). Events
   // are dropped unless they carry this id (see the FlutterApi handlers below).
   int _sessionId = 0;
+
+  // DEV-ONLY timed capture test: ordinary ids come from their own counter so a tagged test id
+  // (lib/dev/dev_mic_token.dart, armed for exactly one start) never leaks into later ordinary sessions.
+  // Without the define this is exactly `++_sessionId`.
+  int _ordinarySeq = 0;
+  int _mintSessionId() {
+    if (!kBaseDevTimedCapture) return ++_sessionId;
+    return _sessionId = DevMicToken.mint(() => ++_ordinarySeq);
+  }
   bool _batchMode = false;
   bool _interrupted = false;
   DateTime? _lastByteAt;
@@ -100,7 +110,7 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
     _interrupted = false;
     _batchMode = false;
     _sessionActive = true;
-    final sessionId = ++_sessionId;
+    final sessionId = _mintSessionId();
     try {
       // Throws a PlatformException (permission_denied, session_config_failed,
       // format_invalid, converter_init_failed, engine_start_failed) instead of
@@ -128,7 +138,7 @@ class NativeMicRecorderService implements IMicRecorderService, PhoneMicFlutterAp
     _interrupted = false;
     _batchMode = true;
     _sessionActive = true;
-    final sessionId = ++_sessionId;
+    final sessionId = _mintSessionId();
     try {
       // Batch adds opus_init_failed / batch_dir_unavailable to the stream error
       // codes; the native writer stores .bin files instead of streaming frames.

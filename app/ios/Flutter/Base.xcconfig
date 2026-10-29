@@ -1,5 +1,5 @@
-APP_BUNDLE_IDENTIFIER=com.friend-app-with-wearable.ios12
-AUTH_CALLBACK_SCHEME=omi
+APP_BUNDLE_IDENTIFIER=com.ellaaicare.ella.base
+AUTH_CALLBACK_SCHEME=ella-base-auth
 
 // Ray-Ban Meta (Meta Wearables DAT) credentials — optional, git-ignored.
 // Copy RayBanMetaCredentials.xcconfig.template to RayBanMetaCredentials.xcconfig

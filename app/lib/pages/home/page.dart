@@ -7,6 +7,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:omi/env/env.dart';
+import 'package:omi/widgets/ella_base_info.dart';
 import 'package:omi/pages/paywall/trial_paywall_page.dart';
 
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -865,6 +867,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                     children: [
                       Column(
                         children: [
+                          if (onHome) EllaBaseInfoBar(readBackend: () => Env.apiBaseUrl),
                           HomeTabSwitcher(
                             trailing: onHome ? null : _buildTasksActions(context),
                             onTabTap: (index, isRepeat) {

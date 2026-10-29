@@ -155,7 +155,7 @@ abstract class Env {
 
   static void validateProfilePairing() {
     final productionFlavor = F.env == Environment.prod;
-    if (!productionFlavor && profile != AppEnvironmentProfile.localDev) {
+    if (!productionFlavor && profile != AppEnvironmentProfile.localDev && profile != AppEnvironmentProfile.ellaBase) {
       throw StateError('Profile ${profile.name} must be built with the prod flavor.');
     }
     if (productionFlavor && profile == AppEnvironmentProfile.localDev) {

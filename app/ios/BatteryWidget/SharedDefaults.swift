@@ -1,7 +1,7 @@
 import Foundation
 
 /// App Group identifier shared between the main app and the widget extension.
-let appGroupIdentifier = "group.com.friend-app-with-wearable.ios12"
+let appGroupIdentifier = "group.com.ellaaicare.ella.base"
 
 /// Keys used to store device battery data in the shared UserDefaults.
 enum BatteryWidgetKeys {

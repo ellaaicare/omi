@@ -300,7 +300,7 @@ private final class SiriNativeAuthFence {
 /// A bounded, account-scoped outbox for engine-free intent and index metrics.
 /// Records have enums/counts/durations only; user content never enters defaults.
 enum SiriTelemetry {
-    private static let defaults = UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12")
+    private static let defaults = UserDefaults(suiteName: "group.com.ellaaicare.ella.base")
     private static let key = SiriStorageNamespace.current.telemetryKey
     private static let lock = NSLock()
 

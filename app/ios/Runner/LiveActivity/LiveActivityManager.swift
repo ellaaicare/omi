@@ -22,6 +22,17 @@ final class LiveActivityManager {
     private var statusClock: (id: String, status: String, since: Date)?
     private var delivery: Task<Void, Never>?
     private var foregroundObserver: NSObjectProtocol?
+    #if BASE_DEV_TIMED_CAPTURE
+    /// DEV-ONLY (lib/dev/base_timed_capture.dart): an AudioRecordingIntent must start a Live Activity when it begins
+    /// recording or iOS stops the recording, and that intent runs with the app in the background.
+    /// BaseTimedCaptureDispatcher opens this window only for its bounded perform; otherwise the foreground rule holds.
+    static var devIntentStartUntil: Date?
+    /// The last card request iOS refused inside that window (v4.7: written to the test's evidence, not only NSLog).
+    static var devLastStartError: String?
+    private static var startAllowedOutsideForeground: Bool { devIntentStartUntil.map { Date() < $0 } ?? false }
+    #else
+    private static let startAllowedOutsideForeground = false
+    #endif
 
     init(messenger: FlutterBinaryMessenger) {
         channel = FlutterMethodChannel(name: "com.omi.ios/liveActivity", binaryMessenger: messenger)
@@ -192,7 +203,7 @@ final class LiveActivityManager {
         if let activity {
             await update(activity, state: state)
         } else if suppressedRecordingId != id && !dismissedCards.contains(card)
-                    && UIApplication.shared.applicationState == .active {
+                    && (UIApplication.shared.applicationState == .active || Self.startAllowedOutsideForeground) {
             do {
                 if #available(iOS 16.2, *) {
                     activity = try Activity.request(attributes: OmiCaptureAttributes(recordingId: id),
@@ -203,6 +214,9 @@ final class LiveActivityManager {
                 }
             } catch {
                 NSLog("[LiveActivity] Start unavailable: %@", String(describing: error))
+                #if BASE_DEV_TIMED_CAPTURE
+                if Self.startAllowedOutsideForeground { Self.devLastStartError = String(describing: error) }
+                #endif
             }
         }
     }
@@ -221,7 +235,7 @@ final class LiveActivityManager {
     /// pendant is connected and not charging. Only Omi pendants report charging, so other
     /// wearables never show this card. Unknown readings are -1.
     private static func pendantBattery() -> Int? {
-        guard let defaults = UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12"),
+        guard let defaults = UserDefaults(suiteName: "group.com.ellaaicare.ella.base"),
               defaults.string(forKey: "widget_device_type") == "omi",
               defaults.bool(forKey: "widget_is_connected"), !defaults.bool(forKey: "widget_is_charging"),
               let level = defaults.object(forKey: "widget_battery_level") as? Int, level >= 0 else { return nil }

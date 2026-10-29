@@ -78,6 +78,11 @@ class OnDeviceRunner with WidgetsBindingObserver {
   int? _publishedGeneration;
   String? lastError;
   int pendingSeconds = 0;
+
+  /// Test-only: when set, runs transcribe only these exact pending WAL files, and a completed pass clears it.
+  /// Memory only; no app surface sets it. Unset (always, outside tests) leaves the queue exactly as before.
+  @visibleForTesting
+  Set<String>? debugOnlyWalFiles;
   static const channel = MethodChannel('com.omi/on_device');
 
   Future<void> start() async {
@@ -154,6 +159,8 @@ class OnDeviceRunner with WidgetsBindingObserver {
       pendingSeconds = pending.fold(0, (sum, w) => sum + w.seconds);
       controller.setPendingSeconds(pendingSeconds);
       if (!controller.settings.enabled) return;
+      final only = debugOnlyWalFiles;
+      if (only != null) pending.retainWhere((w) => only.contains(w.filePath));
       if (pending.any((w) => w.onDevicePreparedUpload != null) && !await ClientRefactorFlags.chunkUploads()) {
         for (final wal in pending.where((w) => w.onDevicePreparedUpload != null)) {
           await sync.rejectDisabledPreparedUpload(wal, generation);
@@ -173,6 +180,7 @@ class OnDeviceRunner with WidgetsBindingObserver {
         if (_cancelled || generation != sync.sessionGeneration) return;
         await _process(wal, generation);
       }
+      debugOnlyWalFiles = null;
       lastError = null;
     } catch (error) {
       // Keep original bytes and retry from them. No transcript content in error logs.

@@ -509,6 +509,16 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     return await connection?.playFindDevicePattern() ?? false;
   }
 
+  /// Ends the link to the paired necklace but keeps it paired and remembered: the stored device, its name and
+  /// every saved recording stay. Automatic reconnect stays off until the user reconnects (initiateConnection
+  /// clears it). Unlike Forget, nothing is cleared or unmanaged.
+  Future<void> disconnectKeepingPairing() async {
+    final id = connectedDevice?.id ?? SharedPreferencesUtil().btDevice.id;
+    if (id.isEmpty) return;
+    markDisconnectIntentional(id);
+    await ServiceManager.instance().device.disconnectDevice(id, userInitiated: true);
+  }
+
   Future _bleDisconnectDevice(BtDevice btDevice) async {
     await ServiceManager.instance().device.disconnectDevice(btDevice.id);
   }

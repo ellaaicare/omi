@@ -93,6 +93,55 @@ final class PhoneMicController {
         }
     }
 
+#if BASE_DEV_TIMED_CAPTURE
+    // MARK: - DEV-ONLY timed capture test (lib/dev/base_timed_capture.dart)
+
+    /// Grants for test tokens. A test session id carries its token (PhoneMicDevTokenPolicy); ordinary ids never do.
+    static let devTokens = PhoneMicDevTokenRegistry()
+
+    /// True while a live (non-idle) session carries exactly [token].
+    func devSessionOpen(token: Int64) -> Bool {
+        controlQueue.sync { state != .idle && PhoneMicDevTokenPolicy.token(of: currentSessionId) == token }
+    }
+
+    /// Revokes [token], then stops the live session only if it carries exactly that token. Ordinary and
+    /// other-token sessions are never stopped. Completion on main: "idle" | "not_owned" | "stopped".
+    func devCutoff(token: Int64, completion: @escaping (String) -> Void) {
+        controlQueue.async { [weak self] in
+            guard let self else { return }
+            Self.devTokens.revoke(token)
+            switch PhoneMicDevTokenPolicy.cutoffDecision(
+                isIdle: self.state == .idle, current: self.currentSessionId, token: token) {
+            case .nothingToStop: DispatchQueue.main.async { completion("idle") }
+            case .notOwned: DispatchQueue.main.async { completion("not_owned") }
+            case .stop: self.handleStop { completion("stopped") }
+            }
+        }
+    }
+
+    private func devTokenValid(_ token: Int64) -> Bool { Self.devTokens.isValid(token, now: Date()) }
+
+    /// nil when the current session may activate; otherwise the failure to return. A dead test session in
+    /// resume/rebuild is ended instead of probed forever. Control queue only.
+    private func devActivationRefusal(stage: String) -> (code: String, message: String)? {
+        guard !PhoneMicDevTokenPolicy.activationAllowed(current: currentSessionId, tokenValid: devTokenValid) else {
+            return nil
+        }
+        NSLog("[PhoneMic] activation refused at %@: dev test token revoked or expired", stage)
+        devActivationRefusals.append(stage)
+        if state != .starting {
+            controlQueue.async { [weak self] in self?.handleStop {} }
+        }
+        return ("dev_token_invalid", "dev timed capture token revoked or expired (\(stage))")
+    }
+
+    /// Stages at which activation was refused (control queue only); read through devRefusalStages.
+    private var devActivationRefusals: [String] = []
+
+    /// Diagnostics for the controller harness: refusal stages so far.
+    var devRefusalStages: [String] { controlQueue.sync { devActivationRefusals } }
+#endif
+
     var isRecording: Bool {
         controlQueue.sync {
             switch state {
@@ -105,6 +154,19 @@ final class PhoneMicController {
     // MARK: - Command handling (controlQueue)
 
     private func handleStart(_ mode: PhoneMicCaptureMode, _ sessionId: Int64, _ completion: @escaping (Result<Void, Error>) -> Void) {
+#if BASE_DEV_TIMED_CAPTURE
+        // A test-token start needs a valid (granted, unrevoked, unexpired) token and may only join its own
+        // token's session; it never adopts an ordinary or other-token engine. Ordinary starts are untouched.
+        if case .refuse(let reason) = PhoneMicDevTokenPolicy.startDecision(
+            isIdle: state == .idle, current: currentSessionId, incoming: sessionId, tokenValid: devTokenValid) {
+            NSLog("[PhoneMic] dev test start refused: %@", reason)
+            DispatchQueue.main.async {
+                completion(.failure(PhoneMicPigeonError(
+                    code: "dev_token_\(reason)", message: "dev timed capture token refused", details: nil)))
+            }
+            return
+        }
+#endif
         switch state {
         case .running:
             // Piggyback onto a live session (a de-synced Dart restart). Adopt the
@@ -203,6 +265,12 @@ final class PhoneMicController {
     /// Returns nil on success. Always builds a brand-new engine so no stale
     /// engine/converter state can survive a route generation.
     private func attemptBringUp() -> (code: String, message: String)? {
+#if BASE_DEV_TIMED_CAPTURE
+        // Every engine activation (initial start, its retries, interruption resume, rebuild) passes here. The
+        // token is checked at entry and again after each setup stage that can block, last immediately before
+        // startEngine(), so a revocation or expiry during setup never reaches the engine.
+        if let refusal = devActivationRefusal(stage: "entry") { return refusal }
+#endif
         if mode == .batch, let failure = ensureBatchResources() {
             return failure
         }
@@ -211,6 +279,9 @@ final class PhoneMicController {
         } catch {
             return ("session_config_failed", error.localizedDescription)
         }
+#if BASE_DEV_TIMED_CAPTURE
+        if let refusal = devActivationRefusal(stage: "after_configure_session") { return refusal }
+#endif
 
         teardownEngine()
         let epoch = generation.advance()
@@ -229,6 +300,14 @@ final class PhoneMicController {
         } catch {
             return ("engine_start_failed", error.localizedDescription)
         }
+#if BASE_DEV_TIMED_CAPTURE
+        if let refusal = devActivationRefusal(stage: "before_start_engine") {
+            // Prepared but never started: release it and invalidate its epoch so nothing it built can publish.
+            newEngine.teardown()
+            generation.invalidate()
+            return refusal
+        }
+#endif
         do {
             try newEngine.startEngine()
         } catch {
@@ -670,3 +749,66 @@ final class PhoneMicController {
         }
     }
 }
+
+#if BASE_DEV_TIMED_CAPTURE
+// BEGIN DEV TOKEN POLICY
+// Pure (Foundation only). test/native/run_dev_token_policy_tests.sh compiles exactly this block standalone.
+// Constants must match lib/dev/dev_mic_token.dart.
+enum PhoneMicDevTokenPolicy {
+    static let testBit: Int64 = 1 << 62
+    static let tokenMask: Int64 = (1 << 30) - 1
+
+    static func isTest(_ sessionId: Int64) -> Bool { sessionId & testBit != 0 }
+
+    static func token(of sessionId: Int64) -> Int64? {
+        isTest(sessionId) ? (sessionId >> 16) & tokenMask : nil
+    }
+
+    enum StartDecision: Equatable { case allow, refuse(String) }
+
+    static func startDecision(isIdle: Bool, current: Int64, incoming: Int64,
+                              tokenValid: (Int64) -> Bool) -> StartDecision {
+        guard let incomingToken = token(of: incoming) else { return .allow }  // ordinary: stock behavior
+        guard tokenValid(incomingToken) else { return .refuse("invalid") }
+        if !isIdle && token(of: current) != incomingToken { return .refuse("would_adopt_other_session") }
+        return .allow
+    }
+
+    static func activationAllowed(current: Int64, tokenValid: (Int64) -> Bool) -> Bool {
+        guard let currentToken = token(of: current) else { return true }
+        return tokenValid(currentToken)
+    }
+
+    enum CutoffDecision: Equatable { case nothingToStop, notOwned, stop }
+
+    static func cutoffDecision(isIdle: Bool, current: Int64, token cutToken: Int64) -> CutoffDecision {
+        if isIdle { return .nothingToStop }
+        return token(of: current) == cutToken ? .stop : .notOwned
+    }
+}
+
+/// Process-memory grants. One live grant at a time; a token is never granted twice or revived after revocation.
+final class PhoneMicDevTokenRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var expiry: [Int64: Date] = [:]
+    private var revoked = Set<Int64>()
+
+    func grant(_ token: Int64, until: Date, now: Date) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard token > 0, token <= PhoneMicDevTokenPolicy.tokenMask, expiry[token] == nil, !revoked.contains(token),
+              until > now else { return false }
+        if expiry.contains(where: { !revoked.contains($0.key) && $0.value > now }) { return false }
+        expiry[token] = until
+        return true
+    }
+
+    func revoke(_ token: Int64) { lock.lock(); revoked.insert(token); lock.unlock() }
+
+    func isValid(_ token: Int64, now: Date) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let until = expiry[token], !revoked.contains(token) else { return false }
+        return now < until
+    }
+}
+// END DEV TOKEN POLICY
+#endif

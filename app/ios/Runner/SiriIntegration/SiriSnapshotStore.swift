@@ -86,9 +86,9 @@ enum SiriLateRepairLedger {
 final class SiriSnapshotStore {
     static let shared = SiriSnapshotStore()
     private let lock = NSLock()
-    private let defaults = UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12") ?? .standard
+    private let defaults = UserDefaults(suiteName: "group.com.ellaaicare.ella.base") ?? .standard
     private let container = SiriStorageLocation.container(
-        groupURL: FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.friend-app-with-wearable.ios12"),
+        groupURL: FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.ellaaicare.ella.base"),
         appSupportURL: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory)
     private let namespace = SiriStorageNamespace.current

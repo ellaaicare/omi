@@ -280,7 +280,7 @@ enum SiriDebugProbe {
             let developmentKeys = [development.ownerKey, development.pendingWipeOwnersKey,
                 development.generationKey, development.enabledKey, development.pendingRouteKey,
                 development.sessionConfigKey, development.telemetryKey]
-            guard let defaults = UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12") else {
+            guard let defaults = UserDefaults(suiteName: "group.com.ellaaicare.ella.base") else {
                 NSLog("[SiriProbe] flavorNamespace=FAIL (app-group defaults unavailable)")
                 return
             }
@@ -985,17 +985,17 @@ enum SiriDebugProbe {
             let owner = SiriSnapshotStore.shared.owner
             let coldSignedInPreserved = owner != nil && auth.currentUser?.uid == owner &&
                 SiriSession.shared.hasMirroredToken() &&
-                (UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12")?
+                (UserDefaults(suiteName: "group.com.ellaaicare.ella.base")?
                     .stringArray(forKey: SiriStorageNamespace.current.pendingWipeOwnersKey) ?? []).isEmpty
             NSLog("[SiriProbe] coldFirebaseUserPreserved=%@", coldSignedInPreserved ? "PASS" : "FAIL")
             try auth.signOut() // No Flutter engine or Pigeon messenger exists in this probe.
             for _ in 0..<40 {
                 if !SiriSession.shared.hasMirroredToken() &&
-                    !(UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12")?
+                    !(UserDefaults(suiteName: "group.com.ellaaicare.ella.base")?
                         .stringArray(forKey: SiriStorageNamespace.current.pendingWipeOwnersKey) ?? []).isEmpty { break }
                 try await Task.sleep(nanoseconds: 50_000_000)
             }
-            let pending = !(UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12")?
+            let pending = !(UserDefaults(suiteName: "group.com.ellaaicare.ella.base")?
                 .stringArray(forKey: SiriStorageNamespace.current.pendingWipeOwnersKey) ?? []).isEmpty
             NSLog("[SiriProbe] firebaseSignOutWithoutPigeon=%@", pending && !SiriSession.shared.hasMirroredToken() ? "PASS" : "FAIL")
             _ = try await SiriSnapshotStore.shared.wipeForAccountTransition()
@@ -1049,7 +1049,7 @@ enum SiriDebugProbe {
                 queriesEmpty = SiriSnapshotStore.shared.memories(ids: nil).isEmpty &&
                     SiriSnapshotStore.shared.tasks(ids: nil).isEmpty
             } else { queriesEmpty = true }
-            let pending = !(UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12")?
+            let pending = !(UserDefaults(suiteName: "group.com.ellaaicare.ella.base")?
                 .stringArray(forKey: SiriStorageNamespace.current.pendingWipeOwnersKey) ?? []).isEmpty
             NSLog("[SiriProbe] authGateNilRefused=%@ queriesEmpty=%@ fenced=%@",
                   refused ? "PASS" : "FAIL", queriesEmpty ? "PASS" : "FAIL", pending ? "PASS" : "FAIL")
@@ -1088,7 +1088,7 @@ enum SiriDebugProbe {
             SiriSession.shared.simulateKeychainDeleteFailuresRemaining = 2
             SiriSnapshotStore.shared.simulateMarkerFlushFailureOnce = true
             SiriSnapshotStore.shared.prepareForSignOut()
-            let missingMarker = (UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12")?
+            let missingMarker = (UserDefaults(suiteName: "group.com.ellaaicare.ella.base")?
                 .stringArray(forKey: SiriStorageNamespace.current.pendingWipeOwnersKey) ?? []).isEmpty
             let queryDenied: Bool
             if #available(iOS 27.0, *) { queryDenied = SiriSnapshotStore.shared.memories(ids: nil).isEmpty }

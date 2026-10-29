@@ -349,6 +349,9 @@ final class QuickActionsIconPatcher: NSObject {
           let micController = PhoneMicController(
               environment: PhoneMicLiveEnvironment.make(sink: phoneMicFlutterApi))
           phoneMicController = micController
+          #if compiler(>=6.4) && BASE_DEV_TIMED_CAPTURE
+          if #available(iOS 18.0, *) { BaseTimedCaptureDispatcher.attach(messenger: messenger, mic: micController) }
+          #endif
           PhoneMicHostApiSetup.setUp(binaryMessenger: messenger, api: PhoneMicHostApiImpl(controller: micController))
       }
 
@@ -534,7 +537,7 @@ final class QuickActionsIconPatcher: NSObject {
     // so the WidgetKit extension can read it.
     let batteryWidgetChannel = FlutterMethodChannel(name: "com.omi.battery_widget", binaryMessenger: messenger)
     batteryWidgetChannel.setMethodCallHandler { (call, result) in
-      let defaults = UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12")
+      let defaults = UserDefaults(suiteName: "group.com.ellaaicare.ella.base")
       guard let args = call.arguments as? [String: Any] else {
         result(FlutterMethodNotImplemented)
         return

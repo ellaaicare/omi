@@ -43,6 +43,7 @@ import 'package:omi/env/dev_env.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/env/environment_profile.dart';
 import 'package:omi/env/prod_env.dart';
+import 'package:omi/firebase_options_ella_base.dart' as ella_base;
 import 'package:omi/firebase_options_local.dart' as local;
 import 'package:omi/firebase_options_prod.dart' as prod;
 import 'package:omi/flavors.dart';
@@ -67,6 +68,7 @@ import 'package:omi/providers/auth_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/capture/capture_composition.dart';
 import 'package:omi/services/siri_integration.dart';
+import 'package:omi/dev/base_timed_capture.dart';
 import 'package:omi/services/capture/local_segment_store.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -118,9 +120,11 @@ import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/utils/notification_channel_strings.dart';
 
 /// Firebase parameters for the current flavor, resolved identically in every engine.
-FirebaseOptions _firebaseOptionsForFlavor() => Env.profile == AppEnvironmentProfile.localDev
-    ? local.DefaultFirebaseOptions.currentPlatform
-    : prod.DefaultFirebaseOptions.currentPlatform;
+FirebaseOptions _firebaseOptionsForFlavor() => switch (Env.profile) {
+      AppEnvironmentProfile.localDev => local.DefaultFirebaseOptions.currentPlatform,
+      AppEnvironmentProfile.ellaBase => ella_base.DefaultFirebaseOptions.currentPlatform,
+      _ => prod.DefaultFirebaseOptions.currentPlatform,
+    };
 
 /// The single Firebase entry point for every Flutter engine in the app.
 ///
@@ -326,6 +330,8 @@ Future _init() async {
   );
   OnboardingSyncRuntime.initialize();
   SiriIntegration.instance.installEvents();
+  // DEV-ONLY; null (no channel, no listener) unless built with BASE_DEV_TIMED_CAPTURE.
+  BaseTimedCapture.instance?.attachChannel();
 
   // TestFlight remains a distribution/telemetry signal; production-family
   // builds always use the established production backend.

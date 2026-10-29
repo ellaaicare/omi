@@ -7,6 +7,8 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/env/env.dart';
+import 'package:omi/env/environment_profile.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/gen/pigeon_communicator.g.dart';
 import 'package:omi/pages/conversations/auto_sync_page.dart';
@@ -571,6 +573,15 @@ class _DeviceSettingsState extends State<DeviceSettings> {
     final l10n = context.l10n;
     return OmiSettingsGroup(
       children: [
+        // Ella Base: end the link without forgetting the necklace (it stays paired; saved recordings are untouched).
+        if (Env.profile == AppEnvironmentProfile.ellaBase && provider.isConnected)
+          OmiSettingsRow(
+            key: const Key('disconnect_keep_pairing_button'),
+            leading: const FaIcon(FontAwesomeIcons.plugCircleXmark),
+            title: l10n.disconnectDevice,
+            showChevron: false,
+            onTap: provider.disconnectKeepingPairing,
+          ),
         OmiSettingsRow(
           key: const Key('forget_device_button'),
           leading: const FaIcon(FontAwesomeIcons.linkSlash),

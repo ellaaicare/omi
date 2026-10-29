@@ -51,7 +51,7 @@ class _AuthComponentState extends State<AuthComponent> {
               const SizedBox(height: 32),
 
               // Sign in buttons
-              if (!provider.isLocalDevProfile && (Platform.isIOS || Platform.isAndroid)) ...[
+              if (!provider.isLocalDevProfile && !provider.isEllaBaseProfile && (Platform.isIOS || Platform.isAndroid)) ...[
                 SizedBox(
                   width: double.infinity,
                   height: 56,

@@ -9,6 +9,8 @@ import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/dev/base_timed_capture.dart';
+import 'package:omi/dev/base_timed_capture_section.dart';
 import 'package:omi/pages/settings/developer_firmware_flash_page.dart';
 import 'package:omi/pages/settings/developer_mcp_section.dart';
 import 'package:omi/pages/settings/settings_destinations.dart';
@@ -397,6 +399,10 @@ class _DeveloperSettingsPageState extends State<_DeveloperSettingsPageView> {
                   const SizedBox(height: OmiSpacing.xxl),
                   _buildDebugLogs(),
                   const SizedBox(height: OmiSpacing.xxl),
+                  if (BaseTimedCapture.instance case final timedCapture?) ...[
+                    BaseTimedCaptureSection(controller: timedCapture),
+                    const SizedBox(height: OmiSpacing.xxl),
+                  ],
                   const DeveloperApiKeysSection(),
                   const SizedBox(height: OmiSpacing.xxl),
                   const DeveloperMcpSection(),

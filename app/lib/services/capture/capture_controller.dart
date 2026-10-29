@@ -84,6 +84,7 @@ import 'package:omi/services/battery_widget_service.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/app_globals.dart';
+import 'package:omi/dev/dev_mic_token.dart';
 
 import 'package:omi/backend/schema/message_event.dart'
     show
@@ -512,7 +513,8 @@ class CaptureController extends ChangeNotifier
     updateRecordingState(RecordingState.initialising);
     _activeSource = PhoneMicSource();
     _phoneMicWalActive = true;
-    await _phoneMic.start(
+    // A restart of a test-owned session stays owned by the same token; any other session restarts ordinary.
+    await _devOwnedStart(_devOwnedTokenForCurrentSession(), () => _phoneMic.start(
       onByteReceived: (bytes) {
         if (!_admitsCapture(revision)) return;
         phoneMicAudioTap?.call(bytes);
@@ -547,7 +549,7 @@ class CaptureController extends ChangeNotifier
       },
       onStalled: _onMicStalled,
       onInterruption: _onMicInterruption,
-    );
+    ));
   }
 
   void _syncCaptureHealthTimer(CaptureCoordinatorState? state) {
@@ -1166,6 +1168,61 @@ class CaptureController extends ChangeNotifier
   /// Injected capture-session owner. Null on the default production constructor.
   @protected
   CaptureSessionOwner? get sessionOwner => _sessionOwner;
+
+  // ----------------------------------------------------------------------------------------------------------
+  // DEV-ONLY timed capture test ownership (lib/dev/base_timed_capture.dart). Inert unless a dev start sets it.
+
+  ({int token, CaptureSessionToken? session, String? sessionKey})? _devOwned;
+
+  /// The owning test token if the CURRENT capture session is the one a dev start created, else null.
+  int? _devOwnedTokenForCurrentSession() {
+    final owned = _devOwned;
+    if (owned == null || owned.sessionKey == null) return null;
+    if (_sessionOwner != null && (owned.session == null || !_sessionOwner!.isCurrent(owned.session!))) return null;
+    if (_capture.state.active?.sessionKey != owned.sessionKey) return null;
+    return owned.token;
+  }
+
+  /// Tags exactly the native start made by [start] (minted synchronously inside it) with [devToken].
+  Future<void> _devOwnedStart(int? devToken, Future<void> Function() start) {
+    if (devToken == null) return start();
+    DevMicToken.armNext(devToken);
+    try {
+      return start();
+    } finally {
+      DevMicToken.disarm();
+    }
+  }
+
+  /// Starts a phone recording owned by [token]. The reducer refuses it if any capture is active, so it never
+  /// preempts or adopts another capture.
+  Future<void> devStreamRecordingOwned(int token) async {
+    final outcome = await _capture.dispatch(PhoneStartRequested(devToken: token));
+    // PlatformExceptions so the test's evidence keeps the code (its log records only the type of anything else):
+    // a failed start effect vs a refusal, and for a refusal the reducer's closed guard code.
+    try {
+      outcome.throwIfFailed();
+    } catch (error) {
+      throw PlatformException(code: 'dev_start_failed', message: error.runtimeType.toString());
+    }
+    final result = outcome.result;
+    if (result != true) {
+      throw PlatformException(code: 'dev_start_refused', message: result is String ? result : 'result_$result');
+    }
+  }
+
+  /// Stops only the session [token] started (reducer-checked by session key). False: nothing of ours to stop.
+  Future<bool> devStopOwned(int token) async {
+    final owned = _devOwned;
+    if (owned == null || owned.token != token || owned.sessionKey == null) return false;
+    final outcome = await _capture.dispatch(
+      PhoneStopRequested(reason: 'user_stopped', userStop: true, devSessionKey: owned.sessionKey),
+    );
+    outcome.throwIfFailed();
+    return outcome.result == true;
+  }
+
+  bool devOwnsCurrentSession(int token) => _devOwnedTokenForCurrentSession() == token;
 
   bool _captureSessionIsCurrent(CaptureSessionToken? token) {
     final owner = _sessionOwner;
@@ -2849,7 +2906,7 @@ class CaptureController extends ChangeNotifier
     }
   }
 
-  Future<Object?> _startPhoneSessionBody({required CaptureTransport mode}) async {
+  Future<Object?> _startPhoneSessionBody({required CaptureTransport mode, int? devToken, String? devSessionKey}) async {
     final revision = _preferences.capturePolicy.revision;
     // Returning null here would publish a phone owner whose mic never opened.
     if (!_admitsCapture(revision)) return const CaptureStageFailure('not_admitted');
@@ -2863,6 +2920,10 @@ class CaptureController extends ChangeNotifier
     await _wal.getSyncs().phone.finalizeCurrentSession();
     _bindSafetyWalRecordingSession();
     _rollCaptureSession('phone');
+    // DEV-ONLY ownership is bound to exactly this capture session (null for every ordinary session).
+    _devOwned = devToken == null
+        ? null
+        : (token: devToken, session: _sessionOwner?.token, sessionKey: devSessionKey);
     _clearSessionLocation();
     // Mode is fixed for the whole session at start. On iOS and Android the phone
     // mic can capture Transcribe Later (batch) audio: explicitly when the user
@@ -2893,7 +2954,7 @@ class CaptureController extends ChangeNotifier
     setIsWalSupported(true);
 
     try {
-      await _phoneMic.start(
+      await _devOwnedStart(devToken, () => _phoneMic.start(
         onByteReceived: (bytes) {
           if (!_admitsCapture(revision)) return;
           phoneMicAudioTap?.call(bytes);
@@ -2932,7 +2993,7 @@ class CaptureController extends ChangeNotifier
         },
         onStalled: _onMicStalled,
         onInterruption: _onMicInterruption,
-      );
+      ));
       // Product: recording is the tap; location is metadata. Do not hold
       // RecordingState.initialising for the OS location dialog, and do not
       // prompt location before the microphone. The async capture still stamps
@@ -4465,7 +4526,8 @@ class CaptureController extends ChangeNotifier
           SuspendPendantStage() => _suspendPendantBody(reason: stage.reason, wasPaused: stage.wasPaused),
           ConvertCallSuspensionStage() => _convertCallSuspensionBody(),
           ResumeSuspendedPendantStage() => _resumeSuspendedPendantBody(wasPaused: stage.wasPaused),
-          StartPhoneSessionStage() => _startPhoneSessionBody(mode: stage.mode),
+          StartPhoneSessionStage() =>
+            _startPhoneSessionBody(mode: stage.mode, devToken: stage.devToken, devSessionKey: stage.devSessionKey),
           WritePhoneRestoreMarkerStage() => _writePhoneRestoreMarker(stage.mutedBefore),
           ClearPhoneRestoreMarkerStage() => _clearPhoneRestoreMarker(),
           StopPhoneLiveStage() => _stopPhoneLiveBody(reason: stage.reason),

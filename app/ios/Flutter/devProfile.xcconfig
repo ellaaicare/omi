@@ -4,8 +4,8 @@
 #include "Custom.xcconfig"
 
 ASSET_PREFIX=dev
-BUNDLE_NAME=Omi Dev
-BUNDLE_DISPLAY_NAME=Omi Dev
-APP_BUNDLE_IDENTIFIER=com.friend-app-with-wearable.ios12.development
-AUTH_CALLBACK_SCHEME=omi-dev
+BUNDLE_NAME=Ella Base
+BUNDLE_DISPLAY_NAME=Ella Base
+APP_BUNDLE_IDENTIFIER=com.ellaaicare.ella.base
+AUTH_CALLBACK_SCHEME=ella-base-auth
 INFOPLIST_FILE=Runner/Info-Dev.plist

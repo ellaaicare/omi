@@ -20,7 +20,7 @@ final class SiriSession {
     private let keychainAccount = SiriStorageNamespace.current.keychainAccount
     private let configKey = SiriStorageNamespace.current.sessionConfigKey
 
-    init(defaults: UserDefaults? = UserDefaults(suiteName: "group.com.friend-app-with-wearable.ios12")) {
+    init(defaults: UserDefaults? = UserDefaults(suiteName: "group.com.ellaaicare.ella.base")) {
         self.defaults = defaults
     }
 

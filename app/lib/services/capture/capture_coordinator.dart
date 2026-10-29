@@ -600,17 +600,29 @@ sealed class CaptureEvent {
 /// `streamRecording`. [resumePolicy] mirrors the resumeCapture argument: an
 /// explicit start unmutes and captures the pre-start policy for restore.
 class PhoneStartRequested extends CaptureEvent {
-  const PhoneStartRequested({this.resumePolicy = true});
+  const PhoneStartRequested({this.resumePolicy = true, this.devToken});
   final bool resumePolicy;
+
+  /// DEV-ONLY timed capture test (lib/dev/base_timed_capture.dart): the session this start creates is owned
+  /// by [devToken]. Null for every ordinary start.
+  final int? devToken;
 }
 
 /// `stopStreamRecording`. [userStop] selects the user-stop policy restore;
 /// [resumeSuspendedPendant] maps resumeHandedOffPendant.
 class PhoneStopRequested extends CaptureEvent {
-  const PhoneStopRequested({required this.reason, required this.userStop, this.resumeSuspendedPendant = true});
+  const PhoneStopRequested({
+    required this.reason,
+    required this.userStop,
+    this.resumeSuspendedPendant = true,
+    this.devSessionKey,
+  });
   final String reason;
   final bool userStop;
   final bool resumeSuspendedPendant;
+
+  /// DEV-ONLY: stop only if the active phone session is still this one; otherwise a no-op. Null for ordinary stops.
+  final String? devSessionKey;
 }
 
 /// The recording and conversation a Live Activity card showed when it was tapped.
@@ -952,8 +964,13 @@ class ResumeSuspendedPendantStage extends CaptureStage {
 /// `streamRecording` after admission bookkeeping: marker/unmute already ran
 /// as effects; this runs the session tail.
 class StartPhoneSessionStage extends CaptureStage {
-  const StartPhoneSessionStage({required this.mode});
+  const StartPhoneSessionStage({required this.mode, this.devToken, this.devSessionKey});
   final CaptureTransport mode;
+
+  /// DEV-ONLY: see [PhoneStartRequested.devToken]. [devSessionKey] is the session key this start mints; the
+  /// coordinator commits state only after the stage runs, so the body cannot read it from state.
+  final int? devToken;
+  final String? devSessionKey;
 }
 
 /// Persisted while a phone recording is live so a process death cannot leave
@@ -1779,6 +1796,17 @@ CaptureTransition? _rejectStaleTarget(
 }
 
 CaptureTransition _reducePhoneStart(CaptureCoordinatorState state, PhoneStartRequested event, CaptureEnvironment env) {
+  // DEV-ONLY: a test-owned start never preempts, suspends or replaces another capture. Decided here, inside the
+  // serialized reducer, so no start racing ahead of it can be stopped or adopted.
+  // The refusal carries a closed code (not just false) so the test's evidence names the guard.
+  if (event.devToken != null && (state.phase != CapturePhase.idle || state.suspended.isNotEmpty || state.callActive)) {
+    final code = state.phase != CapturePhase.idle
+        ? 'dev_refused_phase_${state.phase.name}'
+        : state.suspended.isNotEmpty
+            ? 'dev_refused_suspended'
+            : 'dev_refused_call';
+    return CaptureTransition(state, const [], result: code);
+  }
   if (state.callActive && state.awaitingPhoneResume) {
     return CaptureTransition(state, const [], result: false);
   }
@@ -1798,6 +1826,12 @@ CaptureTransition _reducePhoneStart(CaptureCoordinatorState state, PhoneStartReq
     return CaptureTransition(state, const []);
   }
   final mode = env.phoneTransport();
+  // DEV-ONLY: a test-owned start is live-only. On batch (Transcribe Later, or the offline fallback) the recorder
+  // would run under an ordinary id that no token gate, expiry or cutoff can see or stop. Refused here, before any
+  // permission, WAL, marker, policy or native effect is emitted. Ordinary batch starts are unchanged.
+  if (event.devToken != null && mode != CaptureTransport.live) {
+    return CaptureTransition(state, const [], result: 'dev_refused_transport_${mode.name}');
+  }
   final seq = state.sessionSeq + 1;
   final key = 'phone-$seq';
   final mutedBefore = event.resumePolicy ? (state.mutedBeforePhone ?? env.paused) : state.mutedBeforePhone;
@@ -1856,7 +1890,11 @@ CaptureTransition _reducePhoneStart(CaptureCoordinatorState state, PhoneStartReq
         requestOrigin: 'explicit_user',
       ),
     )
-    ..add(RunStage(StartPhoneSessionStage(mode: mode)));
+    ..add(RunStage(StartPhoneSessionStage(
+      mode: mode,
+      devToken: event.devToken,
+      devSessionKey: event.devToken == null ? null : key,
+    )));
 
   final next = state.copyWith(
     phase: mode == CaptureTransport.live ? CapturePhase.phoneLive : CapturePhase.phoneBatchLive,
@@ -1879,6 +1917,11 @@ CapturePhase _pendantResumePhase(CaptureTransport mode, bool wasPaused) => switc
     };
 
 CaptureTransition _reducePhoneStop(CaptureCoordinatorState state, PhoneStopRequested event) {
+  // DEV-ONLY: a test-owned stop never reaches a session other than the one it started.
+  final devSessionKey = event.devSessionKey;
+  if (devSessionKey != null && (!state.phoneOwns || state.active?.sessionKey != devSessionKey)) {
+    return CaptureTransition(state, const [], result: false);
+  }
   if (!state.phoneOwns) {
     // An unowned phone stop must not tear down a pendant or a call's capture.
     final debt = state.pendantSuspension;

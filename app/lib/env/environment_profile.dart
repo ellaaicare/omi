@@ -8,8 +8,16 @@ enum AppEnvironmentProfile {
     name: 'local_dev',
     defaultApiBaseUrl: 'http://127.0.0.1:8000/',
     firebaseProjectId: 'demo-omi-local',
-    authCallbackScheme: 'omi-dev',
+    authCallbackScheme: 'ella-base-auth',
     usesFirebaseAuthEmulator: true,
+    allowsProductionData: false,
+  ),
+  ellaBase(
+    name: 'ella_base',
+    defaultApiBaseUrl: 'https://base-api.ella-ai-care.com/',
+    firebaseProjectId: 'omi-dev-ca005',
+    authCallbackScheme: 'ella-base-auth',
+    usesFirebaseAuthEmulator: false,
     allowsProductionData: false,
   ),
   localProd(
@@ -63,7 +71,7 @@ enum AppEnvironmentProfile {
       (profile) => profile.name == requested,
       orElse: () => throw StateError(
         'Unknown OMI_APP_PROFILE "$requested". '
-        'Use local_dev, mobile_beta, or production.',
+        'Use local_dev, ella_base, mobile_beta, or production.',
       ),
     );
   }
