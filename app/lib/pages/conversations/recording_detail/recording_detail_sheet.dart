@@ -9,6 +9,7 @@ import 'package:omi/providers/local_recordings_provider.dart';
 import 'package:omi/services/app_review_service.dart';
 import 'package:omi/ui/ui.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/sync_confirmation.dart';
 import 'package:omi/widgets/waveform_painter.dart';
 
 /// Floating bottom sheet for a batch/offline recording — playback (waveform +
@@ -290,6 +291,7 @@ class _RecordingDetailSheetState extends State<_RecordingDetailSheet> {
   }
 
   Future<void> _handleTranscribe(LocalRecordingsProvider provider, LocalRecording rec) async {
+    if (!await confirmSyncForCustomStt(context) || !mounted) return;
     final outcome = await provider.upload(rec);
     if (!mounted) return;
     switch (outcome) {
